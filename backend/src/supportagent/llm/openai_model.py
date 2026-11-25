@@ -27,14 +27,17 @@ class OpenAIChatModel:
         extra_body: dict[str, Any] | None = None,
         price: Price | None = None,
         silence_timeout_s: float = 60.0,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """`name` is the label in events. `model` is the ID the endpoint expects.
 
         `extra_body` carries provider-specific fields, such as the reasoning effort or the
         gateway's provider order. `json_schema` false is for an endpoint that rejects structured
         output: a caller's schema is then left out and the prompt alone asks for JSON.
-        `silence_timeout_s` only stops a dead socket and must be longer than the client's own
-        first-token and stall limits.
+        `silence_timeout_s` only stops a dead connection and must be longer than the client's own
+        first-token and stall limits. It is set twice: as the socket's read limit, and as the
+        library's own limit on the gap between two chunks. That one is 120 seconds unless it is
+        set, which is shorter than a slow local model takes to write one tool call.
         """
         self.name = name
         self.price = price
@@ -47,6 +50,8 @@ class OpenAIChatModel:
             temperature=temperature,
             max_retries=0,  # the resilient client owns retries and deadlines
             timeout=httpx.Timeout(silence_timeout_s, connect=5.0),
+            stream_chunk_timeout=silence_timeout_s,
+            http_async_client=http_client,
             stream_usage=True,
             extra_body=extra_body,
         )

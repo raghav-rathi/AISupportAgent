@@ -49,8 +49,10 @@ def build_model(settings: Settings, spec: ModelSettings) -> OpenAIChatModel:
         json_schema=spec.json_schema,
         extra_body=spec.extra_body,
         price=Price(spec.input_price, spec.output_price) if priced else None,
-        # The socket limit only catches a dead connection, so it sits above our own limits.
-        silence_timeout_s=max(60.0, settings.llm_first_token_timeout_s + 10.0),
+        # This limit only catches a dead connection, so it sits above our own limits.
+        silence_timeout_s=max(
+            60.0, settings.llm_first_token_timeout_s + 10.0, settings.llm_stall_timeout_s + 10.0
+        ),
     )
 
 
