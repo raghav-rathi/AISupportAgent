@@ -1,0 +1,68 @@
+{"q": "How long do I have to get my money back on a monthly plan?", "tier": "pro", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Pro plan refunds"]}]}
+{"q": "I'm on annual billing, what's the refund window?", "tier": "pro", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Pro plan refunds"]}]}
+{"q": "What's the biggest refund you can approve right now?", "tier": "pro", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Pro plan refunds", "What support can approve on Pro"]}]}
+{"q": "Can we get a refund for the storage add-on we bought last week?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Enterprise plan refunds"]}]}
+{"q": "How much can support refund without involving our account manager?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Enterprise plan refunds", "What support can approve on Enterprise"]}]}
+{"q": "I was charged twice this month", "tier": "pro", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Duplicate charges"]}]}
+{"q": "Can I get a refund?", "tier": "free", "kind": "in", "expect": [{"doc": "refund-policy", "path": ["Free plan"]}]}
+{"q": "How long does a refund take to reach my card?", "tier": null, "kind": "in", "expect": [{"doc": "refund-policy", "path": ["How refunds are paid"]}]}
+{"q": "My card got declined, what happens to my workspace?", "tier": "pro", "kind": "in", "expect": [{"doc": "billing-and-invoices", "path": ["When a payment fails"]}]}
+{"q": "Where do I download an invoice PDF?", "tier": "pro", "kind": "in", "expect": [{"doc": "billing-and-invoices", "path": ["Finding your invoices"]}]}
+{"q": "Can we pay by bank transfer?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "billing-and-invoices", "path": ["Payment methods", "Enterprise"]}]}
+{"q": "How do I add our VAT number?", "tier": "pro", "kind": "in", "expect": [{"doc": "billing-and-invoices", "path": ["Tax"]}]}
+{"q": "What's your response time for a P1 outage?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "support-and-sla", "path": ["Enterprise plan support"]}]}
+{"q": "What credit do we get if uptime drops below 99 percent?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "support-and-sla", "path": ["Enterprise plan support", "Uptime commitment"]}]}
+{"q": "What are your support hours?", "tier": "pro", "kind": "in", "expect": [{"doc": "support-and-sla", "path": ["Pro plan support"]}]}
+{"q": "Is there email support on my plan?", "tier": "free", "kind": "in", "expect": [{"doc": "support-and-sla", "path": ["Free plan support"]}]}
+{"q": "I forgot my password", "tier": null, "kind": "in", "expect": [{"doc": "account-security", "path": ["Resetting your password"]}]}
+{"q": "I lost my phone and can't get my two-factor codes", "tier": null, "kind": "in", "expect": [{"doc": "account-security", "path": ["Lost your two-factor device"]}]}
+{"q": "We get invalid_audience when testing SAML", "tier": "enterprise", "kind": "in", "expect": [{"doc": "sso-and-provisioning", "path": ["SAML single sign-on", "SAML troubleshooting"]}]}
+{"q": "How do we set up single sign-on with Okta?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "sso-and-provisioning", "path": ["SAML single sign-on"]}]}
+{"q": "Can my team log in with Google?", "tier": "pro", "kind": "in", "expect": [{"doc": "sso-and-provisioning", "path": ["Google sign-in"]}]}
+{"q": "Slack notifications stopped showing up in our channel", "tier": null, "kind": "in", "expect": [{"doc": "integrations", "path": ["Slack", "Slack notifications are not arriving"]}]}
+{"q": "How do I verify the X-Fernhill-Signature header?", "tier": "pro", "kind": "in", "expect": [{"doc": "integrations", "path": ["Webhooks"]}]}
+{"q": "Pull request links aren't showing on cards anymore", "tier": "pro", "kind": "in", "expect": [{"doc": "integrations", "path": ["GitHub"]}]}
+{"q": "What's the API rate limit on my plan?", "tier": "pro", "kind": "in", "expect": [{"doc": "api-and-rate-limits", "path": ["Rate limits", "Pro"]}]}
+{"q": "How many API requests per minute can we make?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "api-and-rate-limits", "path": ["Rate limits", "Enterprise"]}]}
+{"q": "What does a 429 response mean and how long should I wait?", "tier": null, "kind": "in", "expect": [{"doc": "api-and-rate-limits", "path": ["When you hit the limit"]}]}
+{"q": "How do I rotate an API key?", "tier": null, "kind": "in", "expect": [{"doc": "api-and-rate-limits", "path": ["API keys"]}]}
+{"q": "How can I export all our data?", "tier": null, "kind": "in", "expect": [{"doc": "data-export-and-retention", "path": ["Exporting your data"]}]}
+{"q": "How long do you keep our data after we cancel?", "tier": "pro", "kind": "in", "expect": [{"doc": "data-export-and-retention", "path": ["Data after cancellation", "Pro"]}]}
+{"q": "My edits aren't syncing and there's a grey cloud icon", "tier": null, "kind": "in", "expect": [{"doc": "troubleshooting-sync-and-performance", "path": ["Changes are not syncing"]}]}
+{"q": "Our board with thousands of cards is really slow", "tier": null, "kind": "in", "expect": [{"doc": "troubleshooting-sync-and-performance", "path": ["A board loads slowly"]}]}
+{"q": "I'm not getting push notifications on Android", "tier": null, "kind": "in", "expect": [{"doc": "troubleshooting-sync-and-performance", "path": ["Mobile notifications are not arriving"]}]}
+{"q": "If I remove a user mid-month do I get money back for the seat?", "tier": "pro", "kind": "in", "expect": [{"doc": "seats-and-user-management", "path": ["Removing seats on Pro"]}]}
+{"q": "What can a guest do?", "tier": null, "kind": "in", "expect": [{"doc": "seats-and-user-management", "path": ["Roles"]}]}
+{"q": "Our owner left the company, how do we transfer ownership?", "tier": null, "kind": "in", "expect": [{"doc": "seats-and-user-management", "path": ["Transferring ownership"]}]}
+{"q": "Can you change the billing email on my account?", "tier": null, "kind": "in", "expect": [{"doc": "account-changes-and-cancellation", "path": ["What support can change in chat"]}]}
+{"q": "How do I cancel my subscription?", "tier": "pro", "kind": "in", "expect": [{"doc": "account-changes-and-cancellation", "path": ["Cancelling a paid plan", "Pro"]}]}
+{"q": "Why is my account suspended?", "tier": null, "kind": "in", "expect": [{"doc": "account-changes-and-cancellation", "path": ["Suspended accounts"]}]}
+{"q": "How much does an extra 500 GB of storage cost?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "storage-and-file-limits", "path": ["Storage by plan", "Enterprise"]}]}
+{"q": "What's the largest file I can upload?", "tier": "free", "kind": "in", "expect": [{"doc": "storage-and-file-limits", "path": ["Storage by plan", "Free"]}]}
+{"q": "My upload keeps failing", "tier": null, "kind": "in", "expect": [{"doc": "storage-and-file-limits", "path": ["An upload fails"]}]}
+{"q": "Can we get your SOC 2 report?", "tier": "enterprise", "kind": "in", "expect": [{"doc": "privacy-and-security-overview", "path": ["Compliance documents"]}]}
+{"q": "Is our data encrypted?", "tier": null, "kind": "in", "expect": [{"doc": "privacy-and-security-overview", "path": ["How data is protected"]}]}
+{"q": "Does the app work offline?", "tier": null, "kind": "in", "expect": [{"doc": "mobile-and-desktop-apps", "path": ["Working offline"]}]}
+{"q": "Which iOS version do I need?", "tier": null, "kind": "in", "expect": [{"doc": "mobile-and-desktop-apps", "path": ["Where Fernhill runs"]}]}
+{"q": "How much is the Pro plan per seat?", "tier": null, "kind": "in", "expect": [{"doc": "plans-and-pricing", "path": ["Pro plan"]}, {"doc": "plans-and-pricing", "path": ["Plan comparison"]}]}
+{"q": "How do I upgrade my plan?", "tier": null, "kind": "in", "expect": [{"doc": "plans-and-pricing", "path": ["Changing plans"]}]}
+{"q": "Can I talk to someone on the phone?", "tier": null, "kind": "in", "expect": [{"doc": "escalation-and-contact", "path": ["Phone support"]}]}
+{"q": "How long is the audit log kept?", "tier": "pro", "kind": "in", "expect": [{"doc": "privacy-and-security-overview", "path": ["Audit log", "Pro"]}]}
+{"q": "Do you have a Linux desktop app?", "tier": null, "kind": "near", "expect": []}
+{"q": "Can I connect Fernhill to Microsoft Teams?", "tier": "pro", "kind": "near", "expect": []}
+{"q": "Is there a Jira importer?", "tier": "pro", "kind": "near", "expect": []}
+{"q": "Are you HIPAA compliant?", "tier": "enterprise", "kind": "near", "expect": []}
+{"q": "Can our data be hosted in the EU?", "tier": "enterprise", "kind": "near", "expect": []}
+{"q": "Do you offer a discount for nonprofits?", "tier": null, "kind": "near", "expect": []}
+{"q": "Can I pay with PayPal?", "tier": "pro", "kind": "near", "expect": []}
+{"q": "Does Fernhill have Gantt charts?", "tier": null, "kind": "near", "expect": []}
+{"q": "How do I set up time tracking on cards?", "tier": null, "kind": "near", "expect": []}
+{"q": "What was your uptime last month?", "tier": "enterprise", "kind": "near", "expect": []}
+{"q": "Do you support a Salesforce integration?", "tier": "pro", "kind": "near", "expect": []}
+{"q": "Can I get a student discount?", "tier": "free", "kind": "near", "expect": []}
+{"q": "Is there a dark mode?", "tier": null, "kind": "near", "expect": []}
+{"q": "Who is the CEO of Fernhill?", "tier": null, "kind": "far", "expect": []}
+{"q": "What's the weather in Boston tomorrow?", "tier": null, "kind": "far", "expect": []}
+{"q": "Write me a Python script to reverse a string", "tier": null, "kind": "far", "expect": []}
+{"q": "Can you recommend a good CRM for my sales team?", "tier": "pro", "kind": "far", "expect": []}
+{"q": "What's the capital of Australia?", "tier": null, "kind": "far", "expect": []}

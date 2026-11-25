@@ -1,0 +1,58 @@
+[project]
+name = "supportagent"
+version = "0.1.0"
+description = "Customer support agent with chat and voice on one session"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.165.0",
+    "fastembed>=0.9.1",
+    "httpx>=0.28.1",
+    "langchain-core>=1.8.4",
+    "langchain-openai>=1.8.5",
+    "langgraph>=1.2.24",
+    "langgraph-checkpoint-postgres>=3.2.1",
+    "numpy>=2.5.5",
+    "openai>=3.59.0",
+    "pgvector>=0.5.1",
+    "psycopg[binary,pool]>=3.3.9",
+    "pydantic>=2.14.4",
+    "pydantic-settings>=2.16.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/supportagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+# The formatter wraps code at 100 columns. It leaves long strings and docstrings alone, and so do we.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# uvicorn exposes `started` as a plain flag, so the test server fixture has to poll it.
+"tests/test_ws.py" = ["ASYNC110"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "ruff>=0.17.6",
+]
+lab = [
+    "torch>=2.15.0",
+    "transformers>=5.24.1",
+]

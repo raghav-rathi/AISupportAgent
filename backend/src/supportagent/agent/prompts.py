@@ -1,0 +1,94 @@
+"""The system prompt, and the view of the history the model gets.
+
+The prompt asks for good behaviour. It is not what enforces it: identity, plan filtering, policy
+limits, the scope gate and the grounding check all live in code.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
+
+from supportagent import clock
+from supportagent.agent.state import Customer
+
+_SYSTEM = """You are the support assistant for Fernhill Workspace, a project tracking product \
+with Free, Pro and Enterprise plans.
+
+Today is {today}. {customer}
+
+How to work:
+- Questions about the product, plans, billing or policies: call search_knowledge_base first and \
+answer only from its results. Put the result number in square brackets after each fact you take \
+from a result, like [1]. If the results do not contain the answer, say so and stop there. Do not \
+suggest workarounds the results do not mention. Never answer from memory.
+- When a search says the answer depends on the customer's plan, ask them to verify. When it says \
+the help center covers the topic for another plan, tell the customer which plan and leave it there.
+- Anything that reads or changes an account needs verify_identity first. Ask the customer for \
+their 8-digit account number and their PIN. Never guess them and never repeat a PIN.
+- When the customer gives an account number and a PIN, call verify_identity before anything else, \
+even if they only asked a question. A search after that covers what applies to their plan.
+- Refunds: verify identity, find the invoice with get_account, then call issue_refund. The tool \
+applies the refund policy. The reason does not change the outcome, so if the customer gave none, \
+use "other" and do not ask. Report what the tool returned. Never promise a refund before the tool \
+confirms it.
+- When a tool result includes a ticket, give the customer the ticket ID and say a specialist \
+will follow up.
+- Call create_escalation_ticket when the customer asks for a person, reports a security problem, \
+disputes a charge, or makes a legal or privacy request. Open the ticket right away with what you \
+know. Do not make the customer explain first.
+- Call one tool at a time and wait for its result. Do not write to the customer in the same step \
+as a tool call.
+- Questions that have nothing to do with Fernhill: say you can only help with Fernhill.
+
+Style: short, plain sentences. No preamble.{voice}"""
+
+_VOICE = (
+    " Your reply is spoken aloud: no lists, no markdown and no bracketed numbers. "
+    "Say amounts and dates in words."
+)
+
+_OMITTED = '{"results": "omitted from an earlier turn. Search again if you need them."}'
+
+
+def _plain(value: str) -> str:
+    """A stored value as one short line, so it cannot add lines of its own to the prompt."""
+    return " ".join(str(value).split())[:80]
+
+
+def system_prompt(customer: Customer | None, mode: str) -> str:
+    if customer is None:
+        who = "The customer has not been verified yet."
+    else:
+        who = (
+            f"The customer is verified: {_plain(customer['contact_name'])} at "
+            f"{_plain(customer['company_name'])}, {customer['tier'].capitalize()} plan, "
+            f"contract status {customer['status']}."
+        )
+    return _SYSTEM.format(
+        today=clock.today().strftime("%A, %B %-d, %Y"),
+        customer=who,
+        voice=_VOICE if mode == "voice" else "",
+    )
+
+
+def for_prompt(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+    """The history as the model sees it: search results from earlier turns are left out.
+
+    Search results are the bulk of a long conversation, and their citation numbers start again
+    with every turn. A stub in their place keeps the prompt from growing with every question and
+    keeps a number from pointing at two passages. The model's own earlier answers stay.
+    """
+    turn_start = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=0,
+    )
+    return [
+        message.model_copy(update={"content": _OMITTED})
+        if index < turn_start
+        and isinstance(message, ToolMessage)
+        and message.name == "search_knowledge_base"
+        else message
+        for index, message in enumerate(messages)
+    ]

@@ -1,0 +1,24 @@
+{
+  "judge": {
+    "model": "qwen3.8:27b-q4_K_M",
+    "base_url": "http://127.0.0.1:11435/v1",
+    "api_key": "ollama",
+    "extra_body": {"reasoning_effort": "none"}
+  },
+  "allow_self_grading": true,
+  "candidates": [
+    {
+      "name": "qwen3.8-27b-q4 thinking off",
+      "model": "qwen3.8:27b-q4_K_M",
+      "base_url": "http://127.0.0.1:11435/v1",
+      "api_key": "ollama",
+      "extra_body": {"reasoning_effort": "none"}
+    },
+    {
+      "name": "qwen3.8-27b-q4 thinking on",
+      "model": "qwen3.8:27b-q4_K_M",
+      "base_url": "http://127.0.0.1:11435/v1",
+      "api_key": "ollama"
+    }
+  ]
+}

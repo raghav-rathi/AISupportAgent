@@ -1,0 +1,42 @@
+{"q":"how many days to get my money back if i paid yearly","tier":"pro","kind":"in","group":"spoken_typo","expect":[{"doc":"refund-policy","path":["Pro plan refunds"]}],"source":"audit-neon"}
+{"q":"my sso login says clock skew","tier":"enterprise","kind":"in","group":"spoken_typo","expect":[{"doc":"sso-and-provisioning","path":["SAML single sign-on","SAML troubleshooting"]}],"source":"audit-neon"}
+{"q":"wanna stop gettin marketing emails","tier":"pro","kind":"in","group":"spoken_typo","expect":[{"doc":"account-changes-and-cancellation","path":["What support can change in chat"]}],"source":"audit-neon"}
+{"q":"two factor app broke and im out of backup codes","tier":null,"kind":"in","group":"spoken_typo","expect":[{"doc":"account-security","path":["Lost your two-factor device"]}],"source":"audit-neon"}
+{"q":"can i upload a 3 gig video file","tier":"pro","kind":"in","group":"spoken_typo","expect":[{"doc":"storage-and-file-limits","path":["Storage by plan","Pro"]}],"source":"audit-neon"}
+{"q":"Does getting a refund automatically cancel my subscription?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"refund-policy","path":["How refunds are paid"]}],"source":"audit-neon"}
+{"q":"Do archived projects count against my 3 project limit?","tier":"free","kind":"in","group":"negation_edge","expect":[{"doc":"plans-and-pricing","path":["Free plan"]}],"source":"audit-neon"}
+{"q":"Do 429 rate limited requests count toward my quota?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"api-and-rate-limits","path":["When you hit the limit"]}],"source":"audit-neon"}
+{"q":"Does deleting files immediately free up storage?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"storage-and-file-limits","path":["When storage is full"]}],"source":"audit-neon"}
+{"q":"Can you restore a single accidentally deleted card from yesterday's backup?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"data-export-and-retention","path":["Backups"]}],"source":"audit-neon"}
+{"q":"How long do I have to ask for a refund?","tier":"free","kind":"in","group":"tier_trap","expect":[{"doc":"refund-policy","path":["Free plan"]}],"source":"audit-neon"}
+{"q":"Do you have a SOC 2 Type II report?","tier":"pro","kind":"in","group":"tier_trap","expect":[{"doc":"privacy-and-security-overview","path":["Compliance documents"]}],"source":"audit-neon"}
+{"q":"What payment methods do you accept if we upgrade from Free to Pro?","tier":"free","kind":"in","group":"tier_trap","expect":[{"doc":"billing-and-invoices","path":["Payment methods","Pro"]}],"source":"audit-neon"}
+{"q":"Can we switch from monthly to annual billing?","tier":"pro","kind":"in","group":"tier_trap","expect":[{"doc":"plans-and-pricing","path":["Switching between monthly and annual billing"]}],"source":"audit-neon"}
+{"q":"Do you support SCIM provisioning with JumpCloud or custom OIDC?","tier":"enterprise","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
+{"q":"Can we pay for Enterprise in Euros or British Pounds?","tier":"enterprise","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
+{"q":"Does Fernhill offer a BAA for healthcare teams or ISO 27001 certification?","tier":"enterprise","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
+{"q":"What is the maximum webhook payload size in bytes?","tier":"pro","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
+{"q":"Can I schedule automatic weekly workspace exports via the API?","tier":"pro","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
+{"q":"How do I configure Slack workflows in Jira for sprint planning?","tier":null,"kind":"far","group":"adversarial_far","expect":[],"source":"audit-neon"}
+{"q":"What's the refund policy for Apple App Store subscriptions?","tier":"pro","kind":"far","group":"adversarial_far","expect":[],"source":"audit-neon"}
+{"q":"My Visa card was declined at the grocery store, what should I do?","tier":"pro","kind":"far","group":"adversarial_far","expect":[],"source":"audit-neon"}
+{"q":"We get clock_skew when testing SSO","tier":"enterprise","kind":"in","expect":[{"doc":"sso-and-provisioning","path":["SAML single sign-on","SAML troubleshooting"]}],"source":"audit-carbon"}
+{"q":"uh I lost all my 2FA backup codes and got a new iPhone what now","tier":null,"kind":"in","expect":[{"doc":"account-security","path":["Lost your two-factor device"]}],"source":"audit-carbon"}
+{"q":"how do we hook up Microsoft Entra login for our staff","tier":"enterprise","kind":"in","expect":[{"doc":"sso-and-provisioning","path":["SAML single sign-on"]}],"source":"audit-carbon"}
+{"q":"can a guest delete cards or move stuff on a shared board","tier":"pro","kind":"in","expect":[{"doc":"seats-and-user-management","path":["Roles"]}],"source":"audit-carbon"}
+{"q":"if two teammates edit the same card offline whose changes win","tier":null,"kind":"in","expect":[{"doc":"troubleshooting-sync-and-performance","path":["Changes are not syncing"]}],"source":"audit-carbon"}
+{"q":"I deleted a big video file yesterday why is my workspace storage still at 100 percent","tier":"free","kind":"in","expect":[{"doc":"storage-and-file-limits","path":["When storage is full"]}],"source":"audit-carbon"}
+{"q":"we're on Pro and our card failed 16 days ago, why can nobody edit cards","tier":"pro","kind":"in","expect":[{"doc":"billing-and-invoices","path":["When a payment fails"]}],"source":"audit-carbon"}
+{"q":"if we announce maintenance a week early does that count against our 99.9 SLA","tier":"enterprise","kind":"in","expect":[{"doc":"support-and-sla","path":["Enterprise plan support","Uptime commitment"]}],"source":"audit-carbon"}
+{"q":"our webhook endpoint went down over the long weekend and stopped receiving POSTs","tier":"pro","kind":"in","expect":[{"doc":"integrations","path":["Webhooks"]}],"source":"audit-carbon"}
+{"q":"can support restore just one accidentally deleted card from last night's daily backup","tier":"pro","kind":"in","expect":[{"doc":"data-export-and-retention","path":["Backups"]}],"source":"audit-carbon"}
+{"q":"if I add a VAT ID today will you reissue last month's paid invoice with it","tier":"pro","kind":"in","expect":[{"doc":"billing-and-invoices","path":["Tax"]}],"source":"audit-carbon"}
+{"q":"How long do I have to ask for a refund on the Free plan?","tier":"free","kind":"in","expect":[{"doc":"refund-policy","path":["Free plan"]}],"source":"audit-carbon"}
+{"q":"How do we set up Google sign-in for our company domain?","tier":null,"kind":"plan","expect":[],"source":"audit-carbon"}
+{"q":"How do I verify the X-Fernhill-Signature header on webhooks?","tier":null,"kind":"plan","expect":[],"source":"audit-carbon"}
+{"q":"How long do you keep our workspace data after we cancel our subscription?","tier":null,"kind":"plan","expect":[],"source":"audit-carbon"}
+{"q":"Can we stream our Pro plan audit log to Splunk or Datadog SIEM?","tier":"pro","kind":"near","expect":[],"source":"audit-carbon"}
+{"q":"Can we pay our annual Pro invoice with Discover or Diners Club?","tier":"pro","kind":"near","expect":[],"source":"audit-carbon"}
+{"q":"How do I enable SMS text-message codes for two-factor authentication?","tier":null,"kind":"near","expect":[],"source":"audit-carbon"}
+{"q":"What is your RPO and RTO disaster recovery guarantee in hours?","tier":"enterprise","kind":"near","expect":[],"source":"audit-carbon"}
+{"q":"What stock ticker does Fernhill Workspace trade under on NASDAQ?","tier":null,"kind":"far","expect":[],"source":"audit-carbon"}

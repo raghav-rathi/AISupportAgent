@@ -1,0 +1,29 @@
+# Secrets and machine config
+.env
+.env.*
+!.env.example
+
+# Planning and audit files stay out of the public repo
+PLAN.md
+AGENTS.md
+PHASE1_AUDIT.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Data, models, caches, eval output
+data/
+.cache/
+.tools/
+evals/runs/
+*.log
