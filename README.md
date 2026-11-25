@@ -198,7 +198,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 | Check | Result |
 |---|---|
 | Tests | More than 300 pass |
-| Scenario suite, 55 conversations | 53 of 55 in the last full run. Both failures have been fixed since, and the rerun on the current code is not finished. |
+| Scenario suite, 55 conversations | 54 of 55 in the last full run. The one failing turn ran into a time limit that only a very slow machine reaches. That is fixed and the scenario passes when run alone. A full run since the fix is still owed. |
 | Grounding judge, 44 replies | No false alarm on 22 correct replies and no miss on 22 seeded errors, in one run |
 | Retrieval, own questions | The right section is in the top 5 for 50 of 50, and first for 46 |
 | Scope gate, own questions | 2 of 50 answerable questions escalated. 1 of 5 off-topic and 2 of 13 near-miss questions pass the low threshold. |
@@ -206,7 +206,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 
 Read these with care.
 
-- The model is a 4-bit Qwen3.8-27B on one GPU, and it judged its own answers. No hosted model has run.
+- The model is a 4-bit Qwen3.8-27B run locally, and it judged its own answers. No hosted model has run. The last suite and judge runs were on a CPU, so this page quotes no timing from them.
 - The scenarios, the judge cases and the prompts have one author, and the prompts were tuned against the scenarios.
 - The gate does not hold on the reviewers' questions with the small local reranker. A question that passes the low threshold still has to pass the grounding check, but the gate should not lean on that. The hosted rerankers are the next thing to measure.
 
