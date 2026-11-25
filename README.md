@@ -94,7 +94,7 @@ One gap remains. A PIN typed in a message stays in the saved conversation until 
 
 ## When things fail
 
-- A model call has three time limits: until the first token, for one attempt, and for the whole call with its retries. Rate limits and server errors are retried with backoff, and a `retry-after` header is obeyed. A billing error is not retried, because waiting does not clear it.
+- A model call has four time limits: until the first token, between two chunks of the stream, for one attempt, and for the whole call with its retries. Rate limits and server errors are retried with backoff, and a `retry-after` header is obeyed. A billing error is not retried, because waiting does not clear it.
 - Each model has its own retry budget. When the first model is exhausted, a fallback model on another provider takes over, if one is configured.
 - An error that arrives in the middle of a stream is handled like one at the start. The half-written text is dropped and the client gets an `llm.reset` event.
 - A tool that keeps failing produces an error the model reads. The model then says so or opens a ticket.
@@ -147,6 +147,8 @@ LLM_FIRST_TOKEN_TIMEOUT_S=120
 LLM_TOTAL_TIMEOUT_S=240
 LLM_DEADLINE_S=300
 ```
+
+The three limits above suit a 24 GB GPU. On a slower machine raise `LLM_STALL_TIMEOUT_S` too. It is the longest silence allowed inside a stream, 10 seconds by default, and a local server sends a tool call in one piece, so the stream is silent for as long as the call takes to write.
 
 A judge on the same model as the agent is good enough to try things out. In production it would approve its own mistakes, so the example file puts the judge on another provider.
 

@@ -57,6 +57,7 @@ def build_model(settings: Settings, spec: ModelSettings) -> OpenAIChatModel:
 def llm_policy(settings: Settings) -> LLMPolicy:
     return LLMPolicy(
         first_token_timeout_s=settings.llm_first_token_timeout_s,
+        stall_timeout_s=settings.llm_stall_timeout_s,
         total_timeout_s=settings.llm_total_timeout_s,
         deadline_s=settings.llm_deadline_s,
     )

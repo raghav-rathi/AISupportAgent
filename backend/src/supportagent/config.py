@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     # How long a model call may take before it counts as failed. The defaults suit a hosted
     # model. A local model that has to load its weights first needs longer limits.
     llm_first_token_timeout_s: float = 8.0
+    llm_stall_timeout_s: float = 10.0  # longest silence between two chunks of one stream
     llm_total_timeout_s: float = 45.0  # one attempt
     llm_deadline_s: float = 90.0  # one call, with its retries and its fallback
 
