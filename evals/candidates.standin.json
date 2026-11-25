@@ -6,6 +6,7 @@
     "extra_body": {"reasoning_effort": "none"}
   },
   "allow_self_grading": true,
+  "limits": {"first_token_timeout_s": 120, "total_timeout_s": 240, "deadline_s": 300},
   "candidates": [
     {
       "name": "qwen3.8-27b-q4 thinking off",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from supportagent.config import ModelSettings, get_settings
+from supportagent.config import ModelSettings, Settings, get_settings
 from supportagent.evals.bakeoff import Standing, candidate_settings, pick, standing
 from supportagent.evals.suite import Result
 
@@ -90,3 +90,34 @@ def test_a_candidate_runs_without_a_fallback_and_never_grades_itself():
     # A development run on one local model may say that it accepts this.
     alone = {"judge": GEMINI, "allow_self_grading": True, "candidates": [{"name": "g", **GEMINI}]}
     assert candidate_settings(base, alone)["g"].judge.model == "google/gemini-3.6-flash"
+
+
+def _limits(settings: Settings) -> tuple[float, ...]:
+    return (
+        settings.llm_first_token_timeout_s,
+        settings.llm_stall_timeout_s,
+        settings.llm_total_timeout_s,
+        settings.llm_deadline_s,
+    )
+
+
+def test_a_candidate_runs_under_the_default_time_limits_whatever_the_environment_says():
+    # A machine set up for a slow local model has long limits in its environment. A hosted
+    # candidate measured under them would pass turns that time out for a customer.
+    patient = get_settings().model_copy(
+        update={
+            "llm_first_token_timeout_s": 120.0,
+            "llm_stall_timeout_s": 600.0,
+            "llm_total_timeout_s": 240.0,
+            "llm_deadline_s": 300.0,
+        }
+    )
+    spec = {"judge": GEMINI, "candidates": [CANDIDATE]}
+    defaults = _limits(Settings(database_url=patient.database_url, _env_file=None))
+    assert _limits(candidate_settings(patient, spec)["qwen"]) == defaults != _limits(patient)
+
+    # A file for a slow model says so itself, limit by limit.
+    slow = candidate_settings(patient, {**spec, "limits": {"first_token_timeout_s": 120}})
+    assert _limits(slow["qwen"]) == (120.0, *defaults[1:])
+    with pytest.raises(ValueError, match="unknown limits"):
+        candidate_settings(patient, {**spec, "limits": {"first_token_s": 8}})

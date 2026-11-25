@@ -191,7 +191,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 - `retrieval` measures ranking and the scope gate on labeled questions. One set of 68 questions was written alongside the documents. Outside reviewers wrote a second set of 42.
 - `judge` runs the grounding judge on 44 replies whose right verdict is known. Half are correct, half carry one seeded error.
 - `suite` runs 55 scripted conversations against the configured model and checks which tools ran, what the database holds afterwards and what the agent said.
-- `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost.
+- `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost. Every candidate runs without a fallback, is graded by another model, and gets the app's default time limits whatever the environment says.
 
 ### Results so far
 

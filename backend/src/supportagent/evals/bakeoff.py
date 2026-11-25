@@ -16,6 +16,11 @@ answers are checked by `judge`, or by `alternate_judge` when `judge` is the cand
 Nothing is taken from the JUDGE__ and FALLBACK__ settings of the environment. A file for a
 development run on one local model may set `"allow_self_grading": true` and say so in its results.
 
+The time limits of a model call are not taken from the environment either. A candidate runs under
+the app's defaults, which are the limits a customer would meet, unless the file has a `limits`
+object: `first_token_timeout_s`, `stall_timeout_s`, `total_timeout_s`, `deadline_s`. A machine
+set up for a slow local model would otherwise lend its patience to every hosted candidate.
+
 Stage 1 runs the 15 screening scenarios once per candidate. Stage 2 runs the full suite three
 times for the best three.
 
@@ -41,6 +46,7 @@ from supportagent.evals.scenarios import SCENARIOS
 
 PASS_BAR = 0.95
 TIE_MARGIN = 0.05
+_LIMITS = ("first_token_timeout_s", "stall_timeout_s", "total_timeout_s", "deadline_s")
 
 
 @dataclass(frozen=True)
@@ -87,8 +93,21 @@ def pick(standings: list[Standing]) -> Standing | None:
     return min(tied, key=lambda s: (cost(s), s.chain_ms))
 
 
+def time_limits(spec: dict[str, Any]) -> dict[str, float]:
+    """The four time limits of a model call, as settings: the file's, or else the app's defaults."""
+    given = spec.get("limits") or {}
+    unknown = sorted(set(given) - set(_LIMITS))
+    if unknown:
+        raise ValueError(f"unknown limits {unknown}: the names are {list(_LIMITS)}")
+    return {
+        f"llm_{name}": float(given.get(name, Settings.model_fields[f"llm_{name}"].default))
+        for name in _LIMITS
+    }
+
+
 def candidate_settings(base: Settings, spec: dict[str, Any]) -> dict[str, Settings]:
     """The settings each candidate runs under, by candidate name."""
+    limits = time_limits(spec)
     judge = ModelSettings(**spec["judge"])
     alternate = ModelSettings(**spec["alternate_judge"]) if spec.get("alternate_judge") else None
     chosen: dict[str, Settings] = {}
@@ -101,7 +120,7 @@ def candidate_settings(base: Settings, spec: dict[str, Any]) -> dict[str, Settin
             elif not spec.get("allow_self_grading"):
                 raise ValueError(f"{entry['name']} would grade itself: give an alternate_judge")
         chosen[entry["name"]] = base.model_copy(
-            update={"llm": model, "fallback": None, "judge": grader}
+            update={"llm": model, "fallback": None, "judge": grader, **limits}
         )
     return chosen
 
@@ -119,7 +138,17 @@ def _table(title: str, standings: list[Standing], results: dict[str, list[suite.
 
 
 async def compare(spec: dict[str, Any], finalists: int, runs: int, concurrency: int) -> None:
-    candidates = candidate_settings(get_settings(), spec)
+    base = get_settings()
+    candidates = candidate_settings(base, spec)
+    # What every candidate shares, printed so that the results say what they were measured under.
+    limits = ", ".join(
+        f"{name.removeprefix('llm_')} {value:g}" for name, value in time_limits(spec).items()
+    )
+    print(f"time limits in seconds: {limits}")
+    print(
+        f"retrieval: embedder {base.embed_model}, reranker {base.rerank_model}, "
+        f"gate {base.gate_low:g} / {base.gate_high:g} / gap {base.gate_gap:g}"
+    )
 
     screening = [s for s in SCENARIOS if s.screen]
     first_runs = {
