@@ -38,7 +38,11 @@ def test_nobody_wins_when_nobody_reaches_the_bar():
 
 
 def result(failures, chain_ms, turns, agent_cost, total_cost=None):
-    return Result("x", "happy", "sid", failures, turns, chain_ms, (), (), total_cost, agent_cost)
+    # The whole turn took a second longer than the candidate's own part: the judge's second.
+    whole = tuple(ms + 1000.0 for ms in chain_ms)
+    return Result(
+        "x", "happy", "sid", failures, turns, whole, chain_ms, (), (), total_cost, agent_cost
+    )
 
 
 def test_a_standing_counts_passes_and_takes_speed_from_the_runs_that_passed():

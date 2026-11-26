@@ -4,12 +4,14 @@ it scripted models, so they say nothing about any real endpoint.
 
 from __future__ import annotations
 
+import httpx
 import numpy as np
 from fakes import ScriptedModel, call, http_error, say
 
 from supportagent.cli.gateway_check import (
     check_chat,
     check_embedder,
+    check_health,
     check_judge,
     check_reranker,
 )
@@ -96,3 +98,35 @@ async def test_retrieval_models_must_put_the_related_passage_first():
         "r", FakeReranker(HostedModelRejected("HTTP 404: no such model"))
     )
     assert not refused.ok and "no such model" in refused.detail
+
+
+def _listing(**providers):
+    endpoints = [
+        {
+            "provider_name": name,
+            "uptime_last_1h": hour,
+            "uptime_last_1d": 99.0,
+            "latency_last_1h": {"p50": 400.0, "p95": 900.0} if hour else None,
+        }
+        for name, hour in providers.items()
+    ]
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"data": {"endpoints": endpoints}})
+        )
+    )
+
+
+async def test_a_named_provider_that_is_failing_or_missing_fails_the_health_check():
+    async with _listing(friendli=100.0, novita=0.0, parasail=None) as client:
+        rows = await check_health(
+            client, "http://gw.test/v1", "chat", "gemma", "g/gemma", ["novita", "friendli", "gone"]
+        )
+        by_provider = {row.detail.split(":")[0].split(" ")[0]: row for row in rows}
+        assert not by_provider["novita"].ok and "0.0% last hour" in by_provider["novita"].detail
+        assert by_provider["friendli"].ok and "median 400 ms" in by_provider["friendli"].detail
+        assert not by_provider["gone"].ok and "does not serve" in by_provider["gone"].detail
+        # With no provider named, every provider of the model is shown. No traffic is not a failure.
+        everyone = await check_health(client, "http://gw.test/v1", "judge", "j", "g/gemma", [])
+        assert [row.ok for row in everyone] == [True, False, True]
+        assert "unmeasured" in everyone[2].detail

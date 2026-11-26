@@ -23,6 +23,7 @@ from supportagent.evals.suite import (
 )
 from supportagent.events import (
     AssistantMessage,
+    GuardrailVerdict,
     LlmDelta,
     LlmFinished,
     ToolStarted,
@@ -221,6 +222,13 @@ def test_timings_come_from_finished_turns_and_cost_separates_the_judge():
     measured = measure(events)
     assert measured["turn_ms"] == [4000.0, 900.0]
     assert measured["chain_ms"] == [4000.0]  # only the turn with three tool calls is a chain
+    assert measured["own_chain_ms"] == [4000.0]  # no grounding check ran in that turn
+    checked = [
+        *events[:4],
+        GuardrailVerdict(verdict="grounded", held=False, unsupported=[], ms=1300.0, turn_id="t1"),
+        *events[4:],
+    ]
+    assert measure(checked)["own_chain_ms"] == [2700.0]  # the judge's time is not the agent's
     assert measured["first_tool_ms"] == [500.0]
     assert measured["cost_usd"] == pytest.approx(0.007)
     assert measured["agent_cost_usd"] == pytest.approx(0.006)
@@ -237,7 +245,7 @@ def test_the_interval_matches_known_values():
 
 def test_repeating_a_scenario_does_not_tighten_the_interval():
     def result(name, failures=()):
-        return Result(name, "happy", "sid", failures, (), (), (), (), None, None)
+        return Result(name, "happy", "sid", failures, (), (), (), (), (), None, None)
 
     once = [result(f"s{n}") for n in range(49)] + [result("s49", ("says: x",))]
     assert pass_interval(once) == wilson(49, 50)

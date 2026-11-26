@@ -126,7 +126,7 @@ Any Postgres with the `vector` extension works in place of the Docker script. Po
 
 The agent and the judge each need a chat endpoint. There are two ways to give them one.
 
-Through the Vercel AI Gateway. Set `AI_GATEWAY_API_KEY`. The example file is filled in for this. Nobody has run this path with a real key yet, so start with the check below. It sends one small request to every model and prints what came back.
+Through the Vercel AI Gateway. Set `AI_GATEWAY_API_KEY`. The example file is filled in for this. Nobody has run this path with a real key yet, so start with the check below. It sends one small request to every model and prints what came back. It starts with each provider's recent uptime and latency from the gateway's public listing, which works without a key.
 
 ```sh
 uv run python -m supportagent.cli.gateway_check ../evals/candidates.hosted.json
@@ -191,7 +191,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 - `retrieval` measures ranking and the scope gate on labeled questions. One set of 68 questions was written alongside the documents. Outside reviewers wrote a second set of 42.
 - `judge` runs the grounding judge on 44 replies whose right verdict is known. Half are correct, half carry one seeded error.
 - `suite` runs 55 scripted conversations against the configured model and checks which tools ran, what the database holds afterwards and what the agent said.
-- `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost. Every candidate runs without a fallback, is graded by another model, and gets the app's default time limits whatever the environment says.
+- `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost. Every candidate runs without a fallback, is graded by another model, and gets the app's default time limits whatever the environment says. The speed that is compared leaves out the grounding check, because another model runs it.
 
 ### Results so far
 

@@ -8,6 +8,10 @@ documentation alone: a model ID, a provider restriction, a reasoning setting, st
 a JSON schema on the judge's reply, the embedding endpoint, the rerank endpoint. A bake-off would
 find the same mistakes, one candidate at a time and an hour in.
 
+It starts with the health of every provider a gateway model names, read from the gateway's public
+listing without a key. A provider below 95% of attempts over the last hour fails the check: do
+not start a bake-off then.
+
 Without a candidates file it checks the models of the current settings.
 """
 
@@ -21,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 from langchain_core.messages import (
     BaseMessage,
@@ -183,6 +188,59 @@ def _chat_specs(
     return found + [("judge", model.model, settings, model) for model in judges.values()]
 
 
+HEALTHY = 95.0  # percent of attempts over the last hour: the bar the gateway's status page uses
+
+
+def _gateway_models(settings: Settings, specs: list[tuple[str, str, Settings, ModelSettings]]):
+    """The (kind, label, model ID, named providers) of every model that goes through the gateway."""
+    for kind, label, chosen, model in specs:
+        if (model.base_url or chosen.ai_gateway_base_url) != settings.ai_gateway_base_url:
+            continue
+        gateway = ((model.extra_body or {}).get("providerOptions") or {}).get("gateway") or {}
+        yield kind, label, model.model, list(gateway.get("only") or [])
+
+
+async def check_health(
+    client: httpx.AsyncClient, base_url: str, kind: str, label: str, model: str, only: list[str]
+) -> list[Row]:
+    """How each provider that may serve `model` has done lately, from the gateway's public listing.
+
+    It needs no key. A bake-off should not start while a provider it names is failing: a candidate
+    would be marked down for its provider's bad hour, and a judge that is down fails every turn it
+    was meant to check.
+    """
+    name = f"{label} health"
+    try:
+        reply = await client.get(f"{base_url.rstrip('/')}/models/{model}/endpoints")
+        reply.raise_for_status()
+        endpoints = {e["provider_name"]: e for e in reply.json()["data"]["endpoints"]}
+    except Exception as exc:
+        return [Row(False, kind, name, _error(exc))]
+    rows = []
+    for provider in only or sorted(endpoints):
+        entry = endpoints.get(provider)
+        if entry is None:
+            rows.append(Row(False, kind, name, f"{provider} does not serve {model} today"))
+            continue
+        hour, day = entry.get("uptime_last_1h"), entry.get("uptime_last_1d")
+        latency = entry.get("latency_last_1h") or {}
+        detail = (
+            f"{provider}: uptime {_percent(hour)} last hour and {_percent(day)} last day, "
+            f"latency median {_ms(latency.get('p50'))} and p95 {_ms(latency.get('p95'))}"
+        )
+        # No traffic in the last hour is not a failure. A measured bad hour is.
+        rows.append(Row(hour is None or hour >= HEALTHY, kind, name, detail))
+    return rows
+
+
+def _percent(value: float | None) -> str:
+    return "unmeasured" if value is None else f"{value:.1f}%"
+
+
+def _ms(value: float | None) -> str:
+    return "unmeasured" if value is None else f"{value:.0f} ms"
+
+
 async def run(
     settings: Settings,
     spec: dict[str, Any] | None,
@@ -191,7 +249,13 @@ async def run(
     timeout_s: float = 60.0,
 ) -> list[Row]:
     rows: list[Row] = []
-    for kind, label, chosen, model in _chat_specs(settings, spec):
+    specs = _chat_specs(settings, spec)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for kind, label, model_id, only in _gateway_models(settings, specs):
+            rows += await check_health(
+                client, settings.ai_gateway_base_url, kind, label, model_id, only
+            )
+    for kind, label, chosen, model in specs:
         try:
             built = build_model(chosen, model)
         except Exception as exc:  # no key, most likely

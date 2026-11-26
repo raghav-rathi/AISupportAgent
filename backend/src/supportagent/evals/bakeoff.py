@@ -25,7 +25,9 @@ Stage 1 runs the 15 screening scenarios once per candidate. Stage 2 runs the ful
 times for the best three.
 
 The rule: a candidate must pass at least 95% of stage 2. Among those, the fastest median turn with
-three or more tool calls wins, measured on the runs that passed. Candidates within 5% of the
+three or more tool calls wins, measured on the runs that passed and without the time of the
+grounding check. Another model runs that check, and not the same one for every candidate, so its
+speed would otherwise be credited to the candidate. Candidates within 5% of the
 fastest count as tied, and a tie goes to the lower cost per turn of the candidate's own calls. If
 nobody reaches 95%, nobody wins and the bar stays where it is.
 """
@@ -54,7 +56,8 @@ class Standing:
     name: str
     passed: int
     total: int
-    chain_ms: float | None  # median turn with three or more tool calls, over the runs that passed
+    # Median turn with three or more tool calls, over the runs that passed, without the check.
+    chain_ms: float | None
     cost_per_turn: float | None  # the candidate's own calls. None when its price is not known.
 
     @property
@@ -66,7 +69,7 @@ def standing(name: str, results: list[suite.Result]) -> Standing:
     """Sum up a candidate's runs. A failed run's timings say nothing about a working answer:
     a run that gave up early would look fast, and one that looped would look slow."""
     good = [r for r in results if r.passed]
-    chains = [ms for r in good for ms in r.chain_ms]
+    chains = [ms for r in good for ms in r.own_chain_ms]
     turns = sum(len(r.turn_ms) for r in results)
     costs = [r.agent_cost_usd for r in results]
     priced = turns and all(cost is not None for cost in costs)

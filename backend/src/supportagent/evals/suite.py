@@ -70,6 +70,7 @@ class Result:
     failures: tuple[str, ...]
     turn_ms: tuple[float, ...]
     chain_ms: tuple[float, ...]  # turns with CHAIN_TOOLS or more tool calls
+    own_chain_ms: tuple[float, ...]  # the same turns without the time of the grounding check
     first_tool_ms: tuple[float, ...]  # per turn that called a tool
     first_text_ms: tuple[float, ...]  # per turn that produced text
     cost_usd: float | None  # every model call of the run. None when one had no price.
@@ -227,13 +228,23 @@ def _total(costs: list[float | None]) -> float | None:
 
 def measure(events: list[BaseModel]) -> dict:
     """The timing and cost fields of a result, read from the event stream."""
-    measured: dict = {"turn_ms": [], "chain_ms": [], "first_tool_ms": [], "first_text_ms": []}
+    measured: dict = {
+        "turn_ms": [],
+        "chain_ms": [],
+        "own_chain_ms": [],
+        "first_tool_ms": [],
+        "first_text_ms": [],
+    }
     for turn in _by_turn(events):
         start = turn[0].ts
         for done in (e for e in turn if e.type == "turn.finished"):
             measured["turn_ms"].append(done.total_ms)
             if done.tool_calls >= CHAIN_TOOLS:
                 measured["chain_ms"].append(done.total_ms)
+                # Another model runs the grounding check, and not the same one for every
+                # candidate of a bake-off. Its time is no part of the agent model's speed.
+                checks = sum(e.ms for e in turn if e.type == "guardrail.verdict")
+                measured["own_chain_ms"].append(max(0.0, done.total_ms - checks))
         tools = [e.ts for e in turn if e.type == "tool.started"]
         texts = [e.ts for e in turn if e.type in ("llm.delta", "assistant.message")]
         if tools:
