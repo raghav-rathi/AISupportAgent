@@ -177,6 +177,28 @@ npm run dev          # http://localhost:3000, talks to ws://localhost:8787/ws
 
 `NEXT_PUBLIC_WS_URL` points the page at another backend. It is read when the frontend is built.
 
+### On a host
+
+The backend needs no `.env` file. Give it the same settings as environment variables and run:
+
+```sh
+cd backend
+uv sync --frozen --no-dev
+uv run --no-dev python -m supportagent.cli.ingest     # migrations and the help center, safe to repeat
+uv run --no-dev uvicorn --factory supportagent.api.app:create_app --host 0.0.0.0 --port "$PORT" --ws-max-size 65536
+```
+
+Set at least `DATABASE_URL`, `OPENROUTER_API_KEY`, the model lines of `.env.example`, and for a public address:
+
+```sh
+ALLOWED_ORIGINS=["https://your-frontend.example"]
+REQUIRE_ORIGIN=true        # refuse clients that send no Origin
+TRUSTED_PROXIES=1          # the host's proxy appends the visitor's address to X-Forwarded-For
+SESSION_TTL_HOURS=48
+```
+
+This was checked from a clean clone on Linux with only environment variables and the production dependencies: the database was migrated and loaded, `/health` answered, a page from the allowed origin got a session, and a page from another origin and a client without one were refused. It has not run on a hosting platform yet.
+
 ### Demo accounts
 
 Each session gets a private copy of this data. A refund in one session does not exist in the next.
