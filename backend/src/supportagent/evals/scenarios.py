@@ -452,7 +452,8 @@ SCENARIOS: tuple[Scenario, ...] = (
         "oos-last-months-uptime",
         "out_of_scope",
         (f"{creds(ELENA)} What was your uptime last month?",),
-        Expect(declines=True, never_says=(r"(?i)(last month|uptime)[^.]{0,30}(was|of) \d",)),
+        # The monthly commitment of 99.9% is in the help center. Last month's figure is not.
+        Expect(declines=True, never_says=(r"(?i)last month[^.]{0,30}(was|of|at) \d",)),
     ),
     Scenario(
         "oos-weather",

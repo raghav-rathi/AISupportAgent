@@ -36,11 +36,12 @@ from supportagent.session import ensure_world, run_turn
 # Wording that admits the agent cannot answer. A hand-off shows in the turn's outcome, not here:
 # an answer that makes something up and then mentions a ticket has not declined.
 _DECLINES = re.compile(
-    r"(?i)\b(can't|cannot|unable to|don't have|do not have|couldn't|could not"
-    r"|(doesn't|does not|don't|do not) (say|list|mention|cover|offer|include)"
-    r"|(not|isn't|aren't) (listed|mentioned|covered|available|something|part of)"
+    # Straight and curly apostrophes: some models write "couldn’t".
+    r"(?i)\b(can['’]t|cannot|unable to|don['’]t have|do not have|couldn['’]t|could not"
+    r"|(doesn['’]t|does not|don['’]t|do not) (say|list|mention|cover|offer|include|contain)"
+    r"|(not|isn['’]t|aren['’]t) (listed|mentioned|covered|available|something|part of)"
     r"|no (information|mention)|only help with fernhill"
-    r"|(did not|didn't|has not|hasn't) (go|gone) through)"
+    r"|(did not|didn['’]t|has not|hasn['’]t) (go|gone) through)"
 )
 # Tickets the graph opens when a guardrail fires. In a scenario that expects a plain answer, one
 # of these means a correct answer was taken back or a question was wrongly given up on.

@@ -269,12 +269,15 @@ def test_gate_bands(score, band):
     [
         (None, 5.0, False, "verify"),  # nothing public, and a plan's passage answers
         (None, 5.0, True, "restricted"),
-        (-9.0, -0.5, False, "verify"),  # a fair match is enough to ask a visitor to verify
-        (-9.0, -0.5, True, "escalate"),  # and too weak to tell a customer whose topic it is
+        # Nothing visible is relevant: a fair match for another plan decides for both.
+        (-9.0, -0.5, False, "verify"),
+        (-9.0, -0.5, True, "restricted"),
         (-3.5, 7.9, False, "verify"),  # something weak is visible, a plan answers far better
         (-3.5, 7.9, True, "restricted"),
         (1.0, 3.5, False, "check"),  # a little better is not enough
         (-3.5, 1.5, False, "check"),  # better by the gap, yet no confident match itself
+        # Something weak is visible: the customer is not told their plan lacks it on a fair match.
+        (-3.5, 1.5, True, "check"),
         (5.0, 9.0, True, "answer"),  # what the customer may see already answers
         (-9.0, -5.0, False, "escalate"),  # no plan answers
         (-9.0, None, False, "escalate"),

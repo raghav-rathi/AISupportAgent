@@ -47,10 +47,13 @@ class Gate:
         passages written for other plans. The other passage matters only when what the customer
         may see does not clearly answer and the other passage beats it by `gap`.
 
-        How sure the other passage has to be depends on what follows from it. Asking a visitor
-        to verify costs little, so when nothing public is relevant at all, any relevant passage
-        will do. Telling a verified customer that their topic belongs to another plan is a claim
-        about the product, so that passage has to be a confident match.
+        When nothing the customer may see is relevant at all, any relevant passage for another
+        plan decides: the visitor is asked to verify, the verified customer is told which plan
+        covers the topic. `low` is set so that no off-topic question reaches it.
+
+        When something visible is relevant but weak, the other passage has to beat it by `gap`.
+        For a verified customer it must also be a confident match, because the reply then says
+        their own plan does not cover a topic it partly covers.
         """
         band = self.band(visible)
         if band == "answer" or other is None:
@@ -59,7 +62,8 @@ class Gate:
         if not beats:
             return band
         if verified:
-            return "restricted" if other >= self.high else band
+            confident = other >= self.high or (band == "escalate" and other >= self.low)
+            return "restricted" if confident else band
         if other >= self.high or (band == "escalate" and other >= self.low):
             return "verify"
         return band
