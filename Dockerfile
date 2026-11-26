@@ -22,4 +22,5 @@ RUN python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge
 
 WORKDIR /app/backend
 # Migrations and the help center load on every start. Both do nothing when nothing changed.
-CMD ["sh", "-c", "python -m supportagent.cli.ingest && exec uvicorn --factory supportagent.api.app:create_app --host 0.0.0.0 --port ${PORT:-8787} --ws-max-size 65536"]
+# uvicorn's own trust in X-Forwarded-For is off: CLIENT_ADDRESS_HEADER names the one header believed.
+CMD ["sh", "-c", "python -m supportagent.cli.ingest && exec uvicorn --factory supportagent.api.app:create_app --host 0.0.0.0 --port ${PORT:-8787} --ws-max-size 65536 --no-proxy-headers"]

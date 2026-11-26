@@ -38,15 +38,13 @@ class SlidingWindow:
         return True
 
 
-def client_address(direct: str | None, forwarded_for: str | None, trusted_proxies: int) -> str:
+def client_address(direct: str | None, from_proxy: str | None) -> str:
     """The address to count a visitor by.
 
-    Each proxy appends the address it took the request from to X-Forwarded-For. So with
-    `trusted_proxies` of our own proxies in front, the entry that many places from the end is the
-    visitor as the outermost of them saw it. Everything before that entry was sent by the visitor
-    and can say anything. With no proxy the header is ignored altogether.
+    `from_proxy` is the value of the header named in CLIENT_ADDRESS_HEADER, in which the host's
+    proxy reports the visitor, for example X-Real-IP on Railway. Name only a header that the
+    proxy sets on every request, replacing whatever the client sent, or a visitor can pick its
+    own address. X-Forwarded-For is not such a header: on Railway its last entry was the same for
+    every visitor, which turned the limit per visitor into one limit for the world.
     """
-    hops = [hop.strip() for hop in (forwarded_for or "").split(",") if hop.strip()]
-    if 0 < trusted_proxies <= len(hops):
-        return hops[-trusted_proxies]
-    return direct or "unknown"
+    return (from_proxy or "").strip() or direct or "unknown"

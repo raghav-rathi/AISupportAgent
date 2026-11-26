@@ -98,11 +98,10 @@ class Settings(BaseSettings):
     max_message_chars: int = 2_000
     max_sessions: int = 200  # live sessions in this process
     # What one visitor may use. A new conversation costs a copy of the mock CRM, a message costs
-    # model calls. The address is the socket's unless proxies of ours sit in front: see
-    # api/limits.py for which entry of X-Forwarded-For is then believed.
+    # model calls. The address is the socket's, or the value of a header the host's proxy sets.
     max_new_sessions_per_hour: int = 30  # per address
     max_turns_per_session: int = 60
-    trusted_proxies: int = 0
+    client_address_header: str | None = None  # for example x-real-ip on Railway
     # Conversations and their CRM copies older than this are deleted, hourly. None keeps them.
     session_ttl_hours: float | None = None
     hello_timeout_s: float = 10.0  # how long a new connection has to say hello

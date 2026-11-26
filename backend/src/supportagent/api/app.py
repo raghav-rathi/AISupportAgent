@@ -159,8 +159,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         known = await hubs.known(hello.session_id)
         visitor = client_address(
             socket.client.host if socket.client else None,
-            headers.get("x-forwarded-for"),
-            settings.trusted_proxies,
+            headers.get(settings.client_address_header) if settings.client_address_header else None,
         )
         if not known and not new_sessions.allow(visitor):
             await socket.close(

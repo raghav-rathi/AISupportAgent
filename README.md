@@ -185,7 +185,7 @@ The backend needs no `.env` file. Give it the same settings as environment varia
 cd backend
 uv sync --frozen --no-dev
 uv run --no-dev python -m supportagent.cli.ingest     # migrations and the help center, safe to repeat
-uv run --no-dev uvicorn --factory supportagent.api.app:create_app --host 0.0.0.0 --port "$PORT" --ws-max-size 65536
+uv run --no-dev uvicorn --factory supportagent.api.app:create_app --host 0.0.0.0 --port "$PORT" --ws-max-size 65536 --no-proxy-headers
 ```
 
 Set at least `DATABASE_URL`, `OPENROUTER_API_KEY`, the model lines of `.env.example`, and for a public address:
@@ -193,7 +193,7 @@ Set at least `DATABASE_URL`, `OPENROUTER_API_KEY`, the model lines of `.env.exam
 ```sh
 ALLOWED_ORIGINS=["https://your-frontend.example"]
 REQUIRE_ORIGIN=true        # refuse clients that send no Origin
-TRUSTED_PROXIES=1          # the host's proxy appends the visitor's address to X-Forwarded-For
+CLIENT_ADDRESS_HEADER=x-real-ip   # the header in which the host's proxy reports the visitor
 SESSION_TTL_HOURS=48
 ```
 

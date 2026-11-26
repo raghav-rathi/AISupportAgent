@@ -14,7 +14,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from supportagent.api.app import create_app, origin_allowed
-from supportagent.api.limits import SlidingWindow, client_address
+from supportagent.api.limits import SlidingWindow
 from supportagent.config import get_settings
 from supportagent.llm.client import ResilientLLM
 
@@ -36,8 +36,13 @@ async def serve(pool, retriever):
                 **overrides,
             }
         )
+        # As in production: uvicorn does not rewrite the client address from X-Forwarded-For.
         config = uvicorn.Config(
-            create_app(rt, settings), host="127.0.0.1", port=0, log_level="error"
+            create_app(rt, settings),
+            host="127.0.0.1",
+            port=0,
+            log_level="error",
+            proxy_headers=False,
         )
         server = uvicorn.Server(config)
         task = asyncio.create_task(server.serve())
@@ -58,8 +63,9 @@ class Client:
         self.ws, self.events, self.ready = ws, [], None
 
     @classmethod
-    async def open(cls, address, session_id=None, last_seq=0, origin=ORIGIN):
-        client = cls(await connect(f"ws://{address}/ws", origin=origin))
+    async def open(cls, address, session_id=None, last_seq=0, origin=ORIGIN, headers=None):
+        socket = await connect(f"ws://{address}/ws", origin=origin, additional_headers=headers)
+        client = cls(socket)
         hello = {"type": "hello", "session_id": session_id, "last_seq": last_seq}
         await client.ws.send(json.dumps(hello))
         client.ready = await client.next()
@@ -365,15 +371,28 @@ async def test_a_conversation_has_a_limit_of_messages_that_outlives_the_connecti
     await back.ws.close()
 
 
-def test_a_visitor_is_counted_by_the_address_a_trusted_proxy_saw():
-    # No proxy of ours in front: the header is whatever the client sent, so it is ignored.
-    assert client_address("203.0.113.9", "198.51.100.1", 0) == "203.0.113.9"
-    # One proxy: it appended the address it saw. What the client put before that does not count.
-    assert client_address("192.0.2.10", "1.1.1.1, 203.0.113.9", 1) == "203.0.113.9"
-    assert client_address("192.0.2.10", "203.0.113.9, 192.0.2.11", 2) == "203.0.113.9"
-    # A header shorter than the proxies we expect is not ours to trust.
-    assert client_address("192.0.2.10", None, 1) == "192.0.2.10"
-    assert client_address(None, "", 1) == "unknown"
+async def test_visitors_are_told_apart_by_the_header_the_hosts_proxy_sets(serve):
+    _, address = await serve(
+        ScriptedModel("m", say("Hello.")),
+        max_new_sessions_per_hour=1,
+        client_address_header="x-real-ip",
+    )
+    first = await Client.open(address, headers={"X-Real-IP": "203.0.113.9"})
+    # Every test client connects from the same socket address. The header is what tells them apart.
+    second = await Client.open(address, headers={"X-Real-IP": "198.51.100.4"})
+    with pytest.raises(ConnectionClosed):
+        await Client.open(address, headers={"X-Real-IP": "203.0.113.9"})
+    await first.ws.close()
+    await second.ws.close()
+
+
+async def test_without_that_setting_no_header_can_buy_a_visitor_more_conversations(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), max_new_sessions_per_hour=1)
+    first = await Client.open(address, headers={"X-Real-IP": "203.0.113.9"})
+    for forged in ({"X-Real-IP": "198.51.100.4"}, {"X-Forwarded-For": "198.51.100.4"}):
+        with pytest.raises(ConnectionClosed):
+            await Client.open(address, headers=forged)
+    await first.ws.close()
 
 
 def test_the_window_lets_the_limit_through_and_forgets_after_its_time():
