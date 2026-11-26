@@ -48,6 +48,7 @@ class FaultInject(BaseModel):
         "llm_timeout",
         "llm_rate_limit",
         "llm_server_error",
+        "llm_primary_down",
         "llm_down",
         "judge_down",
         "tool_failure",

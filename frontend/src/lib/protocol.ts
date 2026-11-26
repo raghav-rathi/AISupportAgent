@@ -181,6 +181,7 @@ export interface SessionReady {
   tickets: Ticket[];
   busy: boolean;
   resumable: boolean;
+  fault_injection: boolean;
 }
 
 export interface SessionState {
@@ -327,7 +328,7 @@ export type ServerEvent =
 /** Queue a failure for the next model or tool calls of this session, to show how it recovers. The server acts on it only when fault injection is switched on in its settings. */
 export interface FaultInject {
   type: "fault.inject";
-  kind: "llm_timeout" | "llm_rate_limit" | "llm_server_error" | "llm_down" | "judge_down" | "tool_failure";
+  kind: "llm_timeout" | "llm_rate_limit" | "llm_server_error" | "llm_primary_down" | "llm_down" | "judge_down" | "tool_failure";
   tool?: string | null;
   times?: number;
 }

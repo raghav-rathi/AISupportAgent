@@ -94,6 +94,7 @@ class SessionReady(_Event):
     tickets: list[Ticket]
     busy: bool  # a turn is running right now
     resumable: bool  # the last turn stopped early and `turn.retry` will pick it up
+    fault_injection: bool = False  # this server acts on `fault.inject`, so a UI may offer it
 
 
 class ProtocolError(_Event):

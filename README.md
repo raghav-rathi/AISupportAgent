@@ -6,20 +6,20 @@ The project follows a brief that asks for streaming chat, live voice, multi-step
 
 ## Status
 
-Phase 1 of 4, finished on 2026-11-26. The backend exists: the agent, its guardrails, a WebSocket server and the evals, measured on hosted models. There is no web UI, no voice mode and no deployment yet.
+Phase 2 of 4. The backend and the chat UI exist and work together on hosted models. The UI runs locally and is not deployed yet. There is no voice mode.
 
 | What the brief asks for | State today |
 |---|---|
-| Streaming chat UI with live step status | The server streams every step over a WebSocket and two terminal clients print them. The Next.js UI is phase 2. |
+| Streaming chat UI with live step status | Done, in Next.js over a WebSocket. Each tool shows as a step while it runs and with its result once it is done. |
 | Live voice with waveform, transcripts and interruption | Not started. Phase 3. |
-| Observability drawer | The data exists. Each model call reports its prompt, latency, tokens and cost. The drawer is phase 2. |
+| Observability drawer | Done. Per turn: end-to-end latency, first token, tokens, estimated cost, a timeline of every model and tool call, retrieval scores, the grounding verdict, and the full prompts with PINs masked. |
 | Vector database with custom chunking | Done. pgvector and full-text search fused in SQL, a chunker that follows the heading tree, a reranker. |
 | Confidence guardrails that route to a person | Done. A gate on the reranker's score, and a second model that checks each answer. |
 | A chain of three or more tool calls | Done. Six tools, with the business rules in code. |
-| Tool start and finish streamed to the UI | Done on the wire. |
-| Fallback states for timeouts, rate limits and tool failures | The backend retries, fails over and resumes. The UI states are phase 2. |
-| One memory across text and voice | A session is stored under its ID and any client can continue it. Voice does not exist yet. |
-| Deployed | No. The plan is Vercel for the frontend, Railway for the backend and Postgres. |
+| Tool start and finish streamed to the UI | Done. |
+| Fallback states for timeouts, rate limits and tool failures | Done. The UI shows a retry, a switch to the backup model, a failed turn with Try again, a stopped turn with Resume, and a dropped connection. A panel can inject each failure on demand. |
+| One memory across text and voice | A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. Voice does not exist yet. |
+| Deployed | Not yet. The plan is Vercel for the frontend, Railway for the backend and Postgres. |
 
 ## How a turn runs
 
@@ -154,6 +154,8 @@ A judge on the same model as the agent is good enough to try things out. In prod
 
 ### Talk to it
 
+In a terminal:
+
 ```sh
 uv run python -m supportagent.cli.chat --verbose      # the agent inside this process
 
@@ -163,6 +165,16 @@ uv run python -m supportagent.cli.ws_chat --verbose   # and a client on its WebS
 ```
 
 Both clients print every event: tool steps, the band of each search, the verdict of the grounding check, retries, tickets.
+
+In the browser. You need Node 20 or newer, and the backend running as above. Add the page's address to the backend's `.env` first, as `ALLOWED_ORIGINS=["http://localhost:3000"]`, and `FAULT_INJECTION=true` if you want the panel that simulates failures.
+
+```sh
+cd frontend
+npm install
+npm run dev          # http://localhost:3000, talks to ws://localhost:8787/ws
+```
+
+`NEXT_PUBLIC_WS_URL` points the page at another backend. It is read when the frontend is built.
 
 ### Demo accounts
 
@@ -178,6 +190,20 @@ Each session gets a private copy of this data. A refund in one session does not 
 | 75148302 | 3390 | Jun Watanabe, Pellam Studio | Free | No refunds on this plan |
 
 Six more accounts are in `backend/src/supportagent/crm/fixtures.py`.
+
+## The chat UI
+
+The page is a fold over the event stream. `lib/state.ts` is one reducer that turns events into turns, steps and metrics, and every part of the page reads its result. Stored events replay through the same reducer, so a reload shows the conversation exactly as it happened, steps and traces included.
+
+- Step indicators. Each tool call is a row: a spinner and "Searching the knowledge base…" while it runs, then its result and duration. Retries, a switch to the backup model and the grounding check are rows too.
+- The answer streams as it is written. Text the model wrote before a tool call is dropped, and a withdrawn answer is replaced by the hand-off with a note that says so.
+- A reply in progress can be stopped and resumed. A failed turn offers Try again, which picks up after the last finished step.
+- The connection reconnects by itself and asks for the events it missed.
+- The observability drawer reads the same state: no second data path, so what it shows cannot disagree with the chat.
+
+The look follows a design file the project owner supplied: a dark, flat, monochrome system with one action colour. Its typefaces are not licensed for this repo, so Inter stands in, as the design file suggests.
+
+Checked in a browser against the live backend: the full chain of identity check, policy search, account read and refund, a hand-off, an injected rate limit, a failing search, a switch to the backup model, a failed turn and its retry, stop and resume, a dropped connection, a reload, and a phone-sized screen. The reducer has nine tests.
 
 ## Evals
 
@@ -253,14 +279,19 @@ backend/src/supportagent/
 backend/tests/   the tests
 kb/              16 help center documents, 96 chunks after ingest
 evals/           question sets and bake-off candidate files
-frontend/        the generated protocol types, and nothing else yet
+frontend/src/
+  app/           layout, the one page, design tokens in globals.css
+  components/    conversation, one turn, composer, top bar, observability drawer
+  lib/state.ts   the reducer that folds the event stream into what the page shows
+  lib/session.ts the WebSocket client: resume, reconnect, retry, cancel
+  lib/protocol.ts generated from the backend's models
 scripts/         dev database and dev server
 ```
 
 ## What comes next
 
 1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
-2. Phase 2: the Next.js chat UI, the observability drawer, the failure states, and the first deploy.
+2. Phase 2 has its UI. Still open in it: the first deploy, with a rate limit on new sessions before the address is public.
 3. Phase 3: voice through the same session, with Deepgram Flux for speech to text and text to speech.
 4. Phase 4: hardening and the write-up.
 

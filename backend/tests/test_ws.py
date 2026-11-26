@@ -8,13 +8,14 @@ import json
 import httpx
 import pytest
 import uvicorn
-from agent_harness import llm_for, runtime
+from agent_harness import FAST, llm_for, runtime
 from fakes import ScriptedModel, http_error, say, usage
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from supportagent.api.app import create_app, origin_allowed
 from supportagent.config import get_settings
+from supportagent.llm.client import ResilientLLM
 
 ORIGIN = "http://ui.test"
 
@@ -246,9 +247,35 @@ async def test_an_injected_fault_shows_up_as_a_retry_in_the_stream(serve):
     await client.ws.close()
 
 
+async def test_a_primary_outage_switches_to_the_fallback_model_and_says_so(serve):
+    rt, address = await serve(ScriptedModel("first", say("From the first.")))
+
+    async def no_sleep(_seconds):
+        return None
+
+    models = [ScriptedModel("first", say("From the first.")), ScriptedModel("second", say("Hi."))]
+    rt.llm = ResilientLLM(models, policy=FAST, sleep=no_sleep, jitter=lambda: 0.0)
+    client = await Client.open(address)
+    assert client.ready["fault_injection"] is True  # a UI may offer the controls
+    await client.send(type="fault.inject", kind="llm_primary_down")
+    await client.say("Hi")
+    await client.until("turn.finished")
+    switch = next(e for e in client.events if e["type"] == "llm.fallback")
+    assert (switch["from_model"], switch["to_model"]) == ("first", "second")
+    assert next(e for e in client.events if e["type"] == "assistant.message")["text"] == "Hi."
+    # The fault was for one call. The next turn is back on the first model.
+    await client.say("Again")
+    await client.until("turn.finished")
+    assert [e["text"] for e in client.events if e["type"] == "assistant.message"][-1] == (
+        "From the first."
+    )
+    await client.ws.close()
+
+
 async def test_faults_cannot_be_injected_unless_the_server_allows_it(serve):
     _, address = await serve(ScriptedModel("m", say("Hello.")), fault_injection=False)
     client = await Client.open(address)
+    assert client.ready["fault_injection"] is False
     await client.send(type="fault.inject", kind="llm_down")
     assert (await client.next())["code"] == "not_allowed"
     await client.say("Hi")

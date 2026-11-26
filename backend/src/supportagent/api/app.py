@@ -145,6 +145,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 tickets=[Ticket(**t) for t in state.values.get("tickets", [])],
                 busy=hub.busy,
                 resumable=not hub.busy and bool(state.next),
+                fault_injection=settings.fault_injection,
             )
             pump = asyncio.create_task(_pump(socket, [ready, *backlog], subscription))
             while True:

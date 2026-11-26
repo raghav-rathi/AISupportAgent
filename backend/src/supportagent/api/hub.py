@@ -180,6 +180,9 @@ class SessionHub:
             self.faults.add(presets.rate_limit(retry_after_s=1.0), request.times)
         elif request.kind == "llm_server_error":
             self.faults.add(presets.server_error(), request.times)
+        elif request.kind == "llm_primary_down":
+            # The first model refuses and is not retried, so the fallback model takes the call.
+            self.faults.add(presets.quota("primary"), request.times)
         elif request.kind == "llm_down":
             # Every model refuses: one fault per model is enough, because quota errors are not retried.
             self.faults.add(presets.quota("any"), len(self.rt.llm.models) * request.times)
