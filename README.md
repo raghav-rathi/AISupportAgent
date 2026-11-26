@@ -6,7 +6,7 @@ The project follows a brief that asks for streaming chat, live voice, multi-step
 
 ## Status
 
-Phase 1 of 4. The backend exists: the agent, its guardrails, a WebSocket server and the evals. There is no web UI, no voice mode and no deployment yet. No hosted model has run it either, so every number below comes from a local model.
+Phase 1 of 4, finished on 2026-11-26. The backend exists: the agent, its guardrails, a WebSocket server and the evals, measured on hosted models. There is no web UI, no voice mode and no deployment yet.
 
 | What the brief asks for | State today |
 |---|---|
@@ -14,7 +14,7 @@ Phase 1 of 4. The backend exists: the agent, its guardrails, a WebSocket server 
 | Live voice with waveform, transcripts and interruption | Not started. Phase 3. |
 | Observability drawer | The data exists. Each model call reports its prompt, latency, tokens and cost. The drawer is phase 2. |
 | Vector database with custom chunking | Done. pgvector and full-text search fused in SQL, a chunker that follows the heading tree, a reranker. |
-| Confidence guardrails that route to a person | Done. A gate on the reranker's score, and a second model that checks each answer. The thresholds fit the local reranker only. |
+| Confidence guardrails that route to a person | Done. A gate on the reranker's score, and a second model that checks each answer. |
 | A chain of three or more tool calls | Done. Six tools, with the business rules in code. |
 | Tool start and finish streamed to the UI | Done on the wire. |
 | Fallback states for timeouts, rate limits and tool failures | The backend retries, fails over and resumes. The UI states are phase 2. |
@@ -195,20 +195,22 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 
 ### Results so far
 
+Hosted models through OpenRouter, measured on 2026-11-26.
+
 | Check | Result |
 |---|---|
-| Tests | More than 300 pass |
-| Scenario suite, 55 conversations | 54 of 55 in the last full run. The one failing turn ran into a time limit that only a very slow machine reaches. That is fixed and the scenario passes when run alone. A full run since the fix is still owed. |
-| Grounding judge, 44 replies | No false alarm on 22 correct replies and no miss on 22 seeded errors, in one run |
-| Retrieval, own questions | The right section is in the top 5 for 50 of 50, and first for 46 |
-| Scope gate, own questions | 2 of 50 answerable questions escalated. 1 of 5 off-topic and 2 of 13 near-miss questions pass the low threshold. |
-| Scope gate, reviewers' questions | 2 of 26 answerable questions escalated. 3 of 4 off-topic and 6 of 9 near-miss questions pass the low threshold. |
+| Tests | 320 pass |
+| Bake-off, 55 conversations run 3 times | Gemma 4 31B passed 164 of 165 with a median tool chain of 2.0 s at $0.0005 a turn, and is the agent model. Gemini 3.6 Flash passed 156 and GPT-6 Luna 155. |
+| Grounding judge, Gemini 3.6 Flash, 44 replies run 3 times | 0 misses on 66 seeded errors, 1 false alarm on 66 correct replies |
+| Retrieval, Cohere rerank-5-pro | The right section is first for 69 of 76 answerable questions and in the top 5 for 74 |
+| Scope gate, 110 questions | 1 of 76 answerable questions escalated. 0 of 9 off-topic questions accepted. 2 of 22 near misses pass the threshold and are held for the grounding check. |
 
 Read these with care.
 
-- The model is a 4-bit Qwen3.8-27B run locally, and it judged its own answers. No hosted model has run. The last suite and judge runs were on a CPU, so this page quotes no timing from them.
-- The scenarios, the judge cases and the prompts have one author, and the prompts were tuned against the scenarios.
-- The gate does not hold on the reviewers' questions with the small local reranker. A question that passes the low threshold still has to pass the grounding check, but the gate should not lean on that. The hosted rerankers are the next thing to measure.
+- Qwen3.8-27B on Cerebras passed 15 of 15 screening conversations with the fastest tool chain, 1.6 s, in an earlier run. In the full bake-off Cerebras answered with rate limits at three conversations at once, so it was not compared. It may be the better model at a higher rate limit.
+- Claude Haiku 4.5 and GLM-5.2 passed 13 and 12 of 15 in screening and did not reach the full run.
+- The scenarios, the judge cases and the prompts have one author. The gate thresholds were tuned on the same 110 questions they are reported on, and two suite checks were loosened after a first bake-off run showed them failing correct answers.
+- Nine off-topic questions are few.
 
 ## WebSocket protocol
 
@@ -257,7 +259,7 @@ scripts/         dev database and dev server
 
 ## What comes next
 
-1. Finish phase 1 with hosted models: the bake-off, the reranker and embedding comparison, final gate thresholds, and the judge on another provider than the agent.
+1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
 2. Phase 2: the Next.js chat UI, the observability drawer, the failure states, and the first deploy.
 3. Phase 3: voice through the same session, with Deepgram Flux for speech to text and text to speech.
 4. Phase 4: hardening and the write-up.
@@ -266,5 +268,5 @@ scripts/         dev database and dev server
 
 - The backend has no rate limit on new sessions. The only check on a browser is an origin allowlist.
 - The wrong-PIN lockout counts per conversation. A new conversation starts a new count.
-- The scope gate needs a better reranker, as the results above show.
+- The local reranker does not hold the scope gate. Use the hosted one, as the example settings do.
 - The CRM is a set of fixtures. Nothing here talks to a real billing system.
