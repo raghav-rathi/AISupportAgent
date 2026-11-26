@@ -1,0 +1,9 @@
+# The image holds the backend and the help center documents, nothing else.
+*
+!backend
+!kb
+backend/.venv
+backend/tests
+backend/.pytest_cache
+backend/.ruff_cache
+**/__pycache__
