@@ -1,16 +1,16 @@
 """Send one small request to every hosted model and say what came back. Exit code 1 on a failure.
 
     uv run python -m supportagent.cli.gateway_check ../evals/candidates.hosted.json \
-        --embedder gateway:alibaba/qwen3-embedding-8b --reranker gateway:cohere/rerank-v5-pro
+        --embedder openrouter:qwen/qwen3-embedding-8b --reranker openrouter:cohere/rerank-5-pro
 
 Run it once when a key arrives, before any eval. Until then every line it prints rests on
 documentation alone: a model ID, a provider restriction, a reasoning setting, strict tool schemas,
 a JSON schema on the judge's reply, the embedding endpoint, the rerank endpoint. A bake-off would
 find the same mistakes, one candidate at a time and an hour in.
 
-It starts with the health of every provider a gateway model names, read from the gateway's public
-listing without a key. A provider below 95% of attempts over the last hour fails the check: do
-not start a bake-off then.
+It starts with the health of every provider an OpenRouter model names, read from OpenRouter's
+public listing without a key. A provider below 95% of attempts over the last 30 minutes fails the
+check: do not start a bake-off then.
 
 Without a candidates file it checks the models of the current settings.
 """
@@ -188,48 +188,54 @@ def _chat_specs(
     return found + [("judge", model.model, settings, model) for model in judges.values()]
 
 
-HEALTHY = 95.0  # percent of attempts over the last hour: the bar the gateway's status page uses
+HEALTHY = 95.0  # percent of attempts over the last 30 minutes that a provider must reach
 
 
-def _gateway_models(settings: Settings, specs: list[tuple[str, str, Settings, ModelSettings]]):
-    """The (kind, label, model ID, named providers) of every model that goes through the gateway."""
+def _hosted_models(settings: Settings, specs: list[tuple[str, str, Settings, ModelSettings]]):
+    """The (kind, label, model ID, named providers) of every model that goes through OpenRouter."""
     for kind, label, chosen, model in specs:
-        if (model.base_url or chosen.ai_gateway_base_url) != settings.ai_gateway_base_url:
+        if (model.base_url or chosen.openrouter_base_url) != settings.openrouter_base_url:
             continue
-        gateway = ((model.extra_body or {}).get("providerOptions") or {}).get("gateway") or {}
-        yield kind, label, model.model, list(gateway.get("only") or [])
+        provider = (model.extra_body or {}).get("provider") or {}
+        yield kind, label, model.model, list(provider.get("only") or [])
 
 
 async def check_health(
     client: httpx.AsyncClient, base_url: str, kind: str, label: str, model: str, only: list[str]
 ) -> list[Row]:
-    """How each provider that may serve `model` has done lately, from the gateway's public listing.
+    """How each endpoint that may serve `model` has done lately, from OpenRouter's public listing.
 
     It needs no key. A bake-off should not start while a provider it names is failing: a candidate
     would be marked down for its provider's bad hour, and a judge that is down fails every turn it
-    was meant to check.
+    was meant to check. A provider slug such as `google-vertex` covers all its regions, but not
+    its service tiers such as `flex` or `priority`, so those are left out.
     """
     name = f"{label} health"
     try:
         reply = await client.get(f"{base_url.rstrip('/')}/models/{model}/endpoints")
         reply.raise_for_status()
-        endpoints = {e["provider_name"]: e for e in reply.json()["data"]["endpoints"]}
+        endpoints = [e for e in reply.json()["data"]["endpoints"] if not e.get("service_tier")]
     except Exception as exc:
         return [Row(False, kind, name, _error(exc))]
+    by_slug: dict[str, list[dict[str, Any]]] = {}
+    for entry in endpoints:
+        by_slug.setdefault(str(entry.get("tag") or "").split("/")[0], []).append(entry)
     rows = []
-    for provider in only or sorted(endpoints):
-        entry = endpoints.get(provider)
-        if entry is None:
+    for provider in only or sorted(by_slug):
+        if provider not in by_slug:
             rows.append(Row(False, kind, name, f"{provider} does not serve {model} today"))
             continue
-        hour, day = entry.get("uptime_last_1h"), entry.get("uptime_last_1d")
-        latency = entry.get("latency_last_1h") or {}
-        detail = (
-            f"{provider}: uptime {_percent(hour)} last hour and {_percent(day)} last day, "
-            f"latency median {_ms(latency.get('p50'))} and p95 {_ms(latency.get('p95'))}"
-        )
-        # No traffic in the last hour is not a failure. A measured bad hour is.
-        rows.append(Row(hour is None or hour >= HEALTHY, kind, name, detail))
+        for entry in by_slug[provider]:
+            recent, day = entry.get("uptime_last_30m"), entry.get("uptime_last_1d")
+            latency = entry.get("latency_last_30m")
+            median = latency.get("p50") if isinstance(latency, dict) else None
+            detail = (
+                f"{entry.get('tag')}: uptime {_percent(recent)} last 30 minutes and "
+                f"{_percent(day)} last day, quantization {entry.get('quantization') or 'unknown'}, "
+                f"latency median {_ms(median)}"
+            )
+            # No recent traffic is not a failure. A measured bad half hour is.
+            rows.append(Row(recent is None or recent >= HEALTHY, kind, name, detail))
     return rows
 
 
@@ -251,9 +257,9 @@ async def run(
     rows: list[Row] = []
     specs = _chat_specs(settings, spec)
     async with httpx.AsyncClient(timeout=10.0) as client:
-        for kind, label, model_id, only in _gateway_models(settings, specs):
+        for kind, label, model_id, only in _hosted_models(settings, specs):
             rows += await check_health(
-                client, settings.ai_gateway_base_url, kind, label, model_id, only
+                client, settings.openrouter_base_url, kind, label, model_id, only
             )
     for kind, label, chosen, model in specs:
         try:

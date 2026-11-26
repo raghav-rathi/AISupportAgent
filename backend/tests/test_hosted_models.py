@@ -1,4 +1,4 @@
-"""The gateway embedder and reranker against a fake transport, and the tool guard's handling of
+"""The OpenRouter embedder and reranker against a fake transport, and the tool guard's handling of
 their failures. Nothing here reaches the network.
 """
 
@@ -17,10 +17,10 @@ from pydantic import SecretStr
 from supportagent.config import get_settings
 from supportagent.kb.factory import make_embedder, make_reranker
 from supportagent.kb.hosted import (
-    GatewayEmbedder,
-    GatewayReranker,
+    HostedEmbedder,
     HostedModelError,
     HostedModelRejected,
+    HostedReranker,
     MissingKey,
 )
 
@@ -39,8 +39,8 @@ def ranked(*pairs: tuple[int, float]):
     return handler
 
 
-def reranker(handler) -> GatewayReranker:
-    return GatewayReranker("cohere/rerank-v5-pro", api_key="k", client=client(handler))
+def reranker(handler) -> HostedReranker:
+    return HostedReranker("cohere/rerank-5-pro", api_key="k", client=client(handler))
 
 
 async def test_the_reranker_sends_the_documented_request():
@@ -56,10 +56,10 @@ async def test_the_reranker_sends_the_documented_request():
 
     await reranker(handler).score("refund window", ["first", "second"])
     assert seen == {
-        "url": "https://ai-gateway.vercel.sh/v2/rerank",
+        "url": "https://openrouter.ai/api/v1/rerank",
         "auth": "Bearer k",
         "body": {
-            "model": "cohere/rerank-v5-pro",
+            "model": "cohere/rerank-5-pro",
             "query": "refund window",
             "documents": ["first", "second"],
             "top_n": 2,
@@ -115,7 +115,7 @@ async def test_the_embedder_batches_keeps_order_and_instructs_queries_only():
         ]
         return httpx.Response(200, json={"data": data[::-1]})  # out of order on purpose
 
-    embedder = GatewayEmbedder(
+    embedder = HostedEmbedder(
         "alibaba/qwen3-embedding-8b",
         api_key="k",
         query_instruction="Find the passage that answers the question",
@@ -134,18 +134,18 @@ async def test_the_embedder_batches_keeps_order_and_instructs_queries_only():
     }
 
 
-def test_a_gateway_name_needs_the_key_and_loses_its_prefix():
+def test_an_openrouter_name_needs_the_key_and_loses_its_prefix():
     settings = get_settings()
-    without = settings.model_copy(update={"ai_gateway_api_key": None})
-    with pytest.raises(MissingKey, match="AI_GATEWAY_API_KEY"):
-        make_reranker("gateway:cohere/rerank-v5-pro", without)
+    without = settings.model_copy(update={"openrouter_api_key": None})
+    with pytest.raises(MissingKey, match="OPENROUTER_API_KEY"):
+        make_reranker("openrouter:cohere/rerank-5-pro", without)
     with pytest.raises(MissingKey):
-        make_embedder("gateway:alibaba/qwen3-embedding-8b", without)
+        make_embedder("openrouter:qwen/qwen3-embedding-8b", without)
 
-    keyed = settings.model_copy(update={"ai_gateway_api_key": SecretStr("k")})
-    assert make_reranker("gateway:cohere/rerank-v5-pro", keyed).name == "cohere/rerank-v5-pro"
-    embedder = make_embedder("gateway:alibaba/qwen3-embedding-8b", keyed)
-    assert embedder.name == "alibaba/qwen3-embedding-8b"
+    keyed = settings.model_copy(update={"openrouter_api_key": SecretStr("k")})
+    assert make_reranker("openrouter:cohere/rerank-5-pro", keyed).name == "cohere/rerank-5-pro"
+    embedder = make_embedder("openrouter:qwen/qwen3-embedding-8b", keyed)
+    assert embedder.name == "qwen/qwen3-embedding-8b"
 
 
 class Flaky:

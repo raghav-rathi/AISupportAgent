@@ -34,9 +34,9 @@ class ModelSettings(BaseModel):
     """One chat model behind an OpenAI-compatible endpoint."""
 
     model: str
-    base_url: str | None = None  # defaults to the AI Gateway
-    api_key: SecretStr | None = None  # defaults to the AI Gateway key
-    extra_body: dict[str, Any] | None = None  # for example {"reasoning_effort": "none"}
+    base_url: str | None = None  # defaults to OpenRouter
+    api_key: SecretStr | None = None  # defaults to the OpenRouter key
+    extra_body: dict[str, Any] | None = None  # for example {"reasoning": {"effort": "none"}}
     strict_tools: bool = False
     json_schema: bool = True  # false for an endpoint that rejects structured output
     # Dollars per million tokens. Without both, calls on this model report no cost.
@@ -54,8 +54,8 @@ class Settings(BaseSettings):
 
     database_url: str
 
-    ai_gateway_api_key: SecretStr | None = None
-    ai_gateway_base_url: str = "https://ai-gateway.vercel.sh/v1"
+    openrouter_api_key: SecretStr | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     deepgram_api_key: SecretStr | None = None
 
     llm: ModelSettings | None = None  # the model that runs the agent
@@ -75,8 +75,8 @@ class Settings(BaseSettings):
     capture_prompts: bool = True
 
     kb_dir: Path = _REPO_ROOT / "kb"
-    # A name that starts with "gateway:" is served by the AI Gateway, for example
-    # gateway:cohere/rerank-v5-fast. Any other name is a small ONNX model run in this process.
+    # A name that starts with "openrouter:" is served by OpenRouter, for example
+    # openrouter:cohere/rerank-5-pro. Any other name is a small ONNX model run in this process.
     embed_model: str = "BAAI/bge-small-en-v1.5"
     rerank_model: str = "Xenova/ms-marco-MiniLM-L-12-v2"
     # Put in front of queries, not documents, for embedding models trained with an instruction.

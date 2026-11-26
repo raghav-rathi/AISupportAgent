@@ -1,9 +1,7 @@
-"""Embedding and reranking through the Vercel AI Gateway, behind the same interfaces as the local
-models.
+"""Embedding and reranking through OpenRouter, behind the same interfaces as the local models.
 
-The request and response shapes follow the gateway's documentation: `/v1/embeddings` in OpenAI's
-format, and `/v2/rerank` in Cohere's. Written from the documentation and tested against a fake
-transport. They have not yet met the real service.
+The request and response shapes follow OpenRouter's API reference: `/embeddings` in OpenAI's
+format, and `/rerank` in Cohere's, both under the same base URL as chat completions.
 """
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from typing import Any
 import httpx
 import numpy as np
 
-GATEWAY_URL = "https://ai-gateway.vercel.sh/v1"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
 
 class MissingKey(Exception):
@@ -28,7 +26,7 @@ class HostedModelError(Exception):
 
 class HostedModelRejected(Exception):
     """A hosted model refused the request and will refuse it again: a bad key, a spend cap, a
-    model the gateway does not have, a malformed request."""
+    model OpenRouter does not have, a malformed request."""
 
 
 async def _post(client: httpx.AsyncClient, url: str, key: str, body: dict[str, Any]) -> Any:
@@ -60,13 +58,13 @@ def _logit(probability: float) -> float:
     return math.log(clipped / (1 - clipped))
 
 
-class GatewayEmbedder:
+class HostedEmbedder:
     def __init__(
         self,
         model: str,
         *,
         api_key: str,
-        base_url: str = GATEWAY_URL,
+        base_url: str = OPENROUTER_URL,
         query_instruction: str | None = None,
         dimensions: int | None = None,
         batch_size: int = 64,
@@ -83,7 +81,7 @@ class GatewayEmbedder:
         self._query_prefix = f"Instruct: {query_instruction}\nQuery:" if query_instruction else ""
         self._dimensions = dimensions
         self._batch_size = batch_size
-        self._client = client or httpx.AsyncClient(timeout=6.0)
+        self._client = client or httpx.AsyncClient(timeout=10.0)
 
     async def _embed(self, texts: list[str]) -> list[np.ndarray]:
         request: dict[str, Any] = {"model": self.name, "input": texts}
@@ -109,19 +107,18 @@ class GatewayEmbedder:
         return (await self._embed([self._query_prefix + text]))[0]
 
 
-class GatewayReranker:
+class HostedReranker:
     def __init__(
         self,
         model: str,
         *,
         api_key: str,
-        base_url: str = GATEWAY_URL,
+        base_url: str = OPENROUTER_URL,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.name = model
         self._key = api_key
-        # The rerank endpoint sits beside /v1, not under it.
-        self._url = f"{base_url.rstrip('/').removesuffix('/v1')}/v2/rerank"
+        self._url = f"{base_url.rstrip('/')}/rerank"
         self._client = client or httpx.AsyncClient(timeout=5.0)
 
     async def score(self, query: str, documents: list[str]) -> list[float]:

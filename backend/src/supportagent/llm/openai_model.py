@@ -1,4 +1,4 @@
-"""A chat model behind any OpenAI-compatible endpoint: the AI Gateway, a provider, or a local server."""
+"""A chat model behind any OpenAI-compatible endpoint: OpenRouter, a provider, or a local server."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class OpenAIChatModel:
         """`name` is the label in events. `model` is the ID the endpoint expects.
 
         `extra_body` carries provider-specific fields, such as the reasoning effort or the
-        gateway's provider order. `json_schema` false is for an endpoint that rejects structured
+        provider routing OpenRouter should follow. `json_schema` false is for an endpoint that rejects structured
         output: a caller's schema is then left out and the prompt alone asks for JSON.
         `silence_timeout_s` only stops a dead connection and must be longer than the client's own
         first-token and stall limits. It is set twice: as the socket's read limit, and as the
@@ -43,6 +43,7 @@ class OpenAIChatModel:
         self.price = price
         self._strict_tools = strict_tools
         self._json_schema = json_schema
+        self._extra_body = extra_body or {}
         self._chat = ChatOpenAI(
             model=model,
             base_url=base_url,
@@ -70,8 +71,10 @@ class OpenAIChatModel:
             )
             return bound.astream(list(messages))
         if json_schema and self._json_schema:
-            shaped = self._chat.bind(
-                response_format={"type": "json_schema", "json_schema": json_schema}
-            )
+            # The schema goes in the request body. Given as `response_format`, langchain-openai
+            # switches to the SDK's parsing stream, which drops the token usage, so the judge's
+            # calls would report no cost.
+            format_ = {"type": "json_schema", "json_schema": json_schema}
+            shaped = self._chat.bind(extra_body={**self._extra_body, "response_format": format_})
             return shaped.astream(list(messages))
         return self._chat.astream(list(messages))

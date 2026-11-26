@@ -126,7 +126,7 @@ Any Postgres with the `vector` extension works in place of the Docker script. Po
 
 The agent and the judge each need a chat endpoint. There are two ways to give them one.
 
-Through the Vercel AI Gateway. Set `AI_GATEWAY_API_KEY`. The example file is filled in for this. Nobody has run this path with a real key yet, so start with the check below. It sends one small request to every model and prints what came back. It starts with each provider's recent uptime and latency from the gateway's public listing, which works without a key.
+Through OpenRouter. Set `OPENROUTER_API_KEY`. The example file is filled in for this. Start with the check below. It reads each provider's recent uptime from OpenRouter's public listing, then sends one small request to every model and prints what came back.
 
 ```sh
 uv run python -m supportagent.cli.gateway_check ../evals/candidates.hosted.json

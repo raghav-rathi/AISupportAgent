@@ -3,7 +3,7 @@
 Run with: uv run python -m supportagent.cli.ingest [--embedder NAME]
 
 Each embedding model keeps its own vectors, so a second model can be ingested beside the first and
-the two compared. A name that starts with "gateway:" is served by the AI Gateway.
+the two compared. A name that starts with "openrouter:" is served by OpenRouter.
 """
 
 from __future__ import annotations

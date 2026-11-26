@@ -3,11 +3,11 @@
 Run with:
     uv run python -m supportagent.evals.retrieval ../evals/retrieval_dev.jsonl --reranker NAME ...
     uv run python -m supportagent.evals.retrieval ../evals/retrieval_heldout.jsonl \
-        --reranker gateway:cohere/rerank-v5-pro --embedder gateway:alibaba/qwen3-embedding-8b
+        --reranker openrouter:cohere/rerank-5-pro --embedder openrouter:qwen/qwen3-embedding-8b
     uv run --group lab python -m supportagent.evals.retrieval ../evals/retrieval_dev.jsonl \
         --teacher Qwen/Qwen3-Reranker-4B
 
-A name that starts with "gateway:" is served by the AI Gateway and needs its key. Any other name
+A name that starts with "openrouter:" is served by OpenRouter and needs its key. Any other name
 is a small ONNX model that runs on CPU. `--teacher` names a Qwen3-Reranker that runs on a GPU
 and needs the `lab` dependency group. The knowledge base must have been ingested with the embedder
 in use: `python -m supportagent.cli.ingest --embedder NAME`.

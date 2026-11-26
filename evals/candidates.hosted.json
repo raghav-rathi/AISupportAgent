@@ -1,24 +1,27 @@
 {
   "judge": {
     "model": "google/gemini-3.6-flash",
-    "extra_body": {"reasoning_effort": "minimal"},
+    "extra_body": {
+      "reasoning": {"effort": "minimal"},
+      "provider": {"only": ["google-ai-studio", "google-vertex"]}
+    },
     "input_price": 0.75,
     "output_price": 3.75
   },
   "alternate_judge": {
     "model": "anthropic/claude-haiku-4.5",
-    "extra_body": {"providerOptions": {"gateway": {"only": ["anthropic"]}}},
+    "extra_body": {"provider": {"only": ["anthropic"]}},
     "input_price": 1.0,
     "output_price": 5.0
   },
   "candidates": [
     {
       "name": "qwen3.8-27b on cerebras, reasoning off",
-      "model": "alibaba/qwen3.8-27b",
+      "model": "qwen/qwen3.8-27b",
       "strict_tools": true,
       "extra_body": {
-        "reasoning_effort": "none",
-        "providerOptions": {"gateway": {"only": ["cerebras"]}}
+        "reasoning": {"effort": "none"},
+        "provider": {"only": ["cerebras"]}
       },
       "input_price": 0.99,
       "output_price": 1.49
@@ -26,32 +29,35 @@
     {
       "name": "gemini-3.6-flash, minimal thinking",
       "model": "google/gemini-3.6-flash",
-      "extra_body": {"reasoning_effort": "minimal"},
+      "extra_body": {
+        "reasoning": {"effort": "minimal"},
+        "provider": {"only": ["google-ai-studio", "google-vertex"]}
+      },
       "input_price": 0.75,
       "output_price": 3.75
     },
     {
       "name": "claude-haiku-4.5",
       "model": "anthropic/claude-haiku-4.5",
-      "extra_body": {"providerOptions": {"gateway": {"only": ["anthropic"]}}},
+      "extra_body": {"provider": {"only": ["anthropic"]}},
       "input_price": 1.0,
       "output_price": 5.0
     },
     {
       "name": "glm-5.2 unquantized, reasoning off",
-      "model": "zai/glm-5.2",
+      "model": "z-ai/glm-5.2",
       "extra_body": {
-        "reasoning_effort": "none",
-        "providerOptions": {"gateway": {"only": ["parasail", "friendli"], "sort": "ttft"}}
+        "reasoning": {"effort": "none"},
+        "provider": {"only": ["friendli", "together"], "sort": "latency"}
       },
       "input_price": 1.4,
       "output_price": 4.4
     },
     {
-      "name": "gemma-4-31b",
+      "name": "gemma-4-31b unquantized",
       "model": "google/gemma-4-31b-it",
       "extra_body": {
-        "providerOptions": {"gateway": {"only": ["novita", "friendli"], "sort": "ttft"}}
+        "provider": {"only": ["crusoe", "friendli"], "sort": "latency"}
       },
       "input_price": 0.14,
       "output_price": 0.4
@@ -60,8 +66,8 @@
       "name": "gpt-6-luna, reasoning off",
       "model": "openai/gpt-6-luna",
       "extra_body": {
-        "reasoning_effort": "none",
-        "providerOptions": {"gateway": {"only": ["openai"]}}
+        "reasoning": {"effort": "none"},
+        "provider": {"only": ["openai"]}
       },
       "input_price": 0.1,
       "output_price": 0.5

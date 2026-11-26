@@ -100,33 +100,41 @@ async def test_retrieval_models_must_put_the_related_passage_first():
     assert not refused.ok and "no such model" in refused.detail
 
 
-def _listing(**providers):
-    endpoints = [
+def _listing(*endpoints):
+    """A model's endpoint listing as OpenRouter returns it: (tag, uptime over 30 minutes)."""
+    rows = [
         {
-            "provider_name": name,
-            "uptime_last_1h": hour,
+            "tag": tag,
+            "service_tier": "flex" if tag.endswith("/flex") else None,
+            "quantization": "bf16",
+            "uptime_last_30m": recent,
             "uptime_last_1d": 99.0,
-            "latency_last_1h": {"p50": 400.0, "p95": 900.0} if hour else None,
+            "latency_last_30m": {"p50": 400.0} if recent else None,
         }
-        for name, hour in providers.items()
+        for tag, recent in endpoints
     ]
     return httpx.AsyncClient(
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json={"data": {"endpoints": endpoints}})
+            lambda request: httpx.Response(200, json={"data": {"endpoints": rows}})
         )
     )
 
 
 async def test_a_named_provider_that_is_failing_or_missing_fails_the_health_check():
-    async with _listing(friendli=100.0, novita=0.0, parasail=None) as client:
+    listing = _listing(
+        ("friendli", 100.0), ("novita/fp8", 0.0), ("novita/fp8/flex", 100.0), ("parasail", None)
+    )
+    async with listing as client:
         rows = await check_health(
-            client, "http://gw.test/v1", "chat", "gemma", "g/gemma", ["novita", "friendli", "gone"]
+            client, "http://or.test/v1", "chat", "gemma", "g/gemma", ["novita", "friendli", "gone"]
         )
-        by_provider = {row.detail.split(":")[0].split(" ")[0]: row for row in rows}
-        assert not by_provider["novita"].ok and "0.0% last hour" in by_provider["novita"].detail
-        assert by_provider["friendli"].ok and "median 400 ms" in by_provider["friendli"].detail
-        assert not by_provider["gone"].ok and "does not serve" in by_provider["gone"].detail
+        by_tag = {row.detail.split(":")[0]: row for row in rows}
+        # A slug covers the provider's endpoints but not its service tiers.
+        assert set(by_tag) == {"novita/fp8", "friendli", "gone does not serve g/gemma today"}
+        assert not by_tag["novita/fp8"].ok and "0.0% last 30 minutes" in by_tag["novita/fp8"].detail
+        assert by_tag["friendli"].ok and "median 400 ms" in by_tag["friendli"].detail
+        assert not by_tag["gone does not serve g/gemma today"].ok
         # With no provider named, every provider of the model is shown. No traffic is not a failure.
-        everyone = await check_health(client, "http://gw.test/v1", "judge", "j", "g/gemma", [])
+        everyone = await check_health(client, "http://or.test/v1", "judge", "j", "g/gemma", [])
         assert [row.ok for row in everyone] == [True, False, True]
         assert "unmeasured" in everyone[2].detail

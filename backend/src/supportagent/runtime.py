@@ -36,14 +36,14 @@ class NotConfigured(Exception):
 
 
 def build_model(settings: Settings, spec: ModelSettings) -> OpenAIChatModel:
-    key = spec.api_key or settings.ai_gateway_api_key
+    key = spec.api_key or settings.openrouter_api_key
     if key is None:
-        raise NotConfigured(f"no API key for {spec.model}: set its API_KEY or AI_GATEWAY_API_KEY")
+        raise NotConfigured(f"no API key for {spec.model}: set its API_KEY or OPENROUTER_API_KEY")
     priced = spec.input_price is not None and spec.output_price is not None
     return OpenAIChatModel(
         spec.model,
         model=spec.model,
-        base_url=spec.base_url or settings.ai_gateway_base_url,
+        base_url=spec.base_url or settings.openrouter_base_url,
         api_key=key.get_secret_value(),
         strict_tools=spec.strict_tools,
         json_schema=spec.json_schema,

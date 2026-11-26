@@ -19,7 +19,7 @@ from supportagent import db
 from supportagent.config import ModelSettings, Settings, get_settings
 
 HOSTS = {
-    "AI Gateway": "https://ai-gateway.vercel.sh/v1/models",
+    "OpenRouter": "https://openrouter.ai/api/v1/models",
     "Deepgram": "https://api.deepgram.com/v1/projects",
 }
 
@@ -57,8 +57,10 @@ async def _check_host(client: httpx.AsyncClient, name: str, url: str) -> tuple[b
 
 def _describe(settings: Settings, spec: ModelSettings) -> str:
     """One model as the app will call it. The key itself is never printed."""
-    host = urlsplit(spec.base_url or settings.ai_gateway_base_url).netloc
-    key = "own key" if spec.api_key else "gateway key" if settings.ai_gateway_api_key else "NO KEY"
+    host = urlsplit(spec.base_url or settings.openrouter_base_url).netloc
+    key = (
+        "own key" if spec.api_key else "OpenRouter key" if settings.openrouter_api_key else "NO KEY"
+    )
     priced = spec.input_price is not None and spec.output_price is not None
     price = f"${spec.input_price}/{spec.output_price} per M" if priced else "no price"
     options = [f"extra_body={spec.extra_body}"] if spec.extra_body else []
@@ -110,7 +112,7 @@ async def main() -> int:
     for level, message in models:
         print(f"{level:4} {message}")
     keys = {
-        "AI_GATEWAY_API_KEY": settings.ai_gateway_api_key,
+        "OPENROUTER_API_KEY": settings.openrouter_api_key,
         "DEEPGRAM_API_KEY": settings.deepgram_api_key,
     }
     for name, value in keys.items():
