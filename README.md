@@ -132,7 +132,7 @@ Through OpenRouter. Set `OPENROUTER_API_KEY`. The example file is filled in for 
 uv run python -m supportagent.cli.gateway_check ../evals/candidates.hosted.json
 ```
 
-Through a local server such as Ollama. This is where all results on this page come from. Replace the `LLM__` and `JUDGE__` lines of `.env` with these:
+Through a local server such as Ollama. Replace the `LLM__` and `JUDGE__` lines of `.env` with these, and leave `RERANK_MODEL` and the three `GATE_` lines out:
 
 ```sh
 LLM__MODEL=qwen3.8:27b-q4_K_M
