@@ -82,9 +82,11 @@ export function useSession(): Session {
         }
         dispatch({ type: "event", event });
       };
-      ws.onclose = () => {
+      ws.onclose = (closed) => {
         if (stopped || socket.current !== ws) return;
-        dispatch({ type: "connection", status: "reconnecting" });
+        // The server gives a reason when it turns a visitor away, for example at its limit of
+        // new conversations. A dropped network gives none.
+        dispatch({ type: "connection", status: "reconnecting", reason: closed.reason });
         timer = window.setTimeout(open, Math.min(MAX_WAIT_MS, 500 * 2 ** attempt));
         attempt += 1;
       };

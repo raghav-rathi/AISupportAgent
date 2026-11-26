@@ -101,6 +101,7 @@ One gap remains. A PIN typed in a message stays in the saved conversation until 
 - A client that reconnects sends the last event number it saw. It gets the stored events it missed, then the live stream, each exactly once.
 - `turn.cancel` stops a running turn. `turn.retry` resumes a failed turn from its last saved step.
 - With `FAULT_INJECTION=true` a client can queue simulated timeouts, rate limits, outages and tool failures for its own session. That is how the failure paths get shown in a demo.
+- One address can start 30 conversations an hour and a conversation takes 60 messages, both settings. Coming back to an existing conversation is not counted. The page says so when the server turns it away.
 
 ## Run it
 
@@ -291,13 +292,14 @@ scripts/         dev database and dev server
 ## What comes next
 
 1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
-2. Phase 2 has its UI. Still open in it: the first deploy, with a rate limit on new sessions before the address is public.
+2. Phase 2 has its UI. Still open in it: the first deploy.
 3. Phase 3: voice through the same session, with Deepgram Flux for speech to text and text to speech.
 4. Phase 4: hardening and the write-up.
 
 ## Known gaps
 
-- The backend has no rate limit on new sessions. The only check on a browser is an origin allowlist.
+- The limit on new conversations is counted per address in one process's memory. Several backend processes would each count for themselves, and a restart forgets the counts.
+- A browser is checked by an origin allowlist. A client that is not a browser can send any origin, so the limits above and a spending cap on the model key are what bound the cost.
 - The wrong-PIN lockout counts per conversation. A new conversation starts a new count.
 - The local reranker does not hold the scope gate. Use the hosted one, as the example settings do.
 - The CRM is a set of fixtures. Nothing here talks to a real billing system.

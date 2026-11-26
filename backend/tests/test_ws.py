@@ -11,9 +11,10 @@ import uvicorn
 from agent_harness import FAST, llm_for, runtime
 from fakes import ScriptedModel, http_error, say, usage
 from websockets.asyncio.client import connect
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from supportagent.api.app import create_app, origin_allowed
+from supportagent.api.limits import SlidingWindow, client_address
 from supportagent.config import get_settings
 from supportagent.llm.client import ResilientLLM
 
@@ -326,3 +327,61 @@ def test_origins_are_compared_without_case_or_trailing_slash_and_same_origin_is_
     assert not origin_allowed(None, host, settings)
     nobody = settings.model_copy(update={"allowed_origins": []})
     assert not origin_allowed("https://support.example", host, nobody)
+
+
+async def test_one_address_cannot_start_conversations_without_end(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), max_new_sessions_per_hour=2)
+    first = await Client.open(address)
+    second = await Client.open(address)
+    with pytest.raises(ConnectionClosed) as refused:
+        await Client.open(address)
+    assert refused.value.rcvd.code == 1013  # try again later
+    # Coming back to a conversation that exists is not a new one.
+    again = await Client.open(address, session_id=first.ready["session_id"])
+    assert again.ready["session_id"] == first.ready["session_id"]
+    # An ID the server does not know would start a conversation, so it is counted like one.
+    with pytest.raises(ConnectionClosed):
+        await Client.open(address, session_id="0" * 32)
+    for client in (first, second, again):
+        await client.ws.close()
+
+
+async def test_a_conversation_has_a_limit_of_messages_that_outlives_the_connection(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), max_turns_per_session=2)
+    client = await Client.open(address)
+    for text in ("one", "two"):
+        await client.say(text)
+        await client.until("turn.finished")
+    await client.say("three")
+    refusal = await client.next()
+    assert (refusal["code"], "limit of 2 messages" in refusal["message"]) == ("rate_limited", True)
+    await client.ws.close()
+
+    # The count is read from the stored conversation, so reconnecting does not reset it.
+    back = await Client.open(address, session_id=client.ready["session_id"])
+    await back.say("four")
+    assert (await back.until("error"))["code"] == "rate_limited"
+    assert sum(e["type"] == "turn.started" for e in back.events) == 2
+    await back.ws.close()
+
+
+def test_a_visitor_is_counted_by_the_address_a_trusted_proxy_saw():
+    # No proxy of ours in front: the header is whatever the client sent, so it is ignored.
+    assert client_address("203.0.113.9", "198.51.100.1", 0) == "203.0.113.9"
+    # One proxy: it appended the address it saw. What the client put before that does not count.
+    assert client_address("192.0.2.10", "1.1.1.1, 203.0.113.9", 1) == "203.0.113.9"
+    assert client_address("192.0.2.10", "203.0.113.9, 192.0.2.11", 2) == "203.0.113.9"
+    # A header shorter than the proxies we expect is not ours to trust.
+    assert client_address("192.0.2.10", None, 1) == "192.0.2.10"
+    assert client_address(None, "", 1) == "unknown"
+
+
+def test_the_window_lets_the_limit_through_and_forgets_after_its_time():
+    now = [0.0]
+    window = SlidingWindow(limit=2, window_s=60.0, clock=lambda: now[0])
+    assert [window.allow("a"), window.allow("a"), window.allow("a")] == [True, True, False]
+    assert window.allow("b")  # another visitor has its own count
+    now[0] = 59.0
+    assert not window.allow("a")  # a refused attempt was not counted, and the first two still are
+    now[0] = 60.0
+    assert window.allow("a")

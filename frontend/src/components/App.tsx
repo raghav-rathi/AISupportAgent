@@ -41,9 +41,11 @@ export function App() {
               <div role="status" className="flex items-center gap-12 rounded-cards bg-graphite-card px-20 py-12 text-body-sm leading-[1.45]">
                 <Glyph name="alert" />
                 <p className="flex-1">
-                  {state.connection === "reconnecting"
-                    ? "The connection dropped. Reconnecting. A reply in progress keeps running and will show up here."
-                    : `The server did not accept that: ${state.notice}.`}
+                  {state.connection !== "reconnecting"
+                    ? `The server did not accept that: ${state.notice}.`
+                    : state.closeReason
+                      ? `The server closed the connection: ${state.closeReason}. Trying again.`
+                      : "The connection dropped. Reconnecting. A reply in progress keeps running and will show up here."}
                 </p>
                 {state.connection !== "reconnecting" ? (
                   <Button variant="quiet" onClick={session.dismiss} className="h-32 px-12">

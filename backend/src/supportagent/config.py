@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     require_origin: bool = False
     max_message_chars: int = 2_000
     max_sessions: int = 200  # live sessions in this process
+    # What one visitor may use. A new conversation costs a copy of the mock CRM, a message costs
+    # model calls. The address is the socket's unless proxies of ours sit in front: see
+    # api/limits.py for which entry of X-Forwarded-For is then believed.
+    max_new_sessions_per_hour: int = 30  # per address
+    max_turns_per_session: int = 60
+    trusted_proxies: int = 0
+    # Conversations and their CRM copies older than this are deleted, hourly. None keeps them.
+    session_ttl_hours: float | None = None
     hello_timeout_s: float = 10.0  # how long a new connection has to say hello
     # Lets a client queue simulated failures for its own session, to show how the app recovers.
     fault_injection: bool = False

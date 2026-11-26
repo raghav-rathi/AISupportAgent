@@ -6,8 +6,10 @@ Run with: uv run uvicorn --factory supportagent.api.app:create_app --host 127.0.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
@@ -15,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
 from supportagent.api.hub import Hubs, Subscription, TooManySessions
+from supportagent.api.limits import SlidingWindow, client_address
 from supportagent.api.protocol import (
     CLIENT_ADAPTER,
     FaultInject,
@@ -24,11 +27,28 @@ from supportagent.api.protocol import (
     UserMessage,
 )
 from supportagent.config import Settings, get_settings
+from supportagent.crm import world as worlds
 from supportagent.events import CustomerSummary, ProtocolError, SessionReady, Ticket
 from supportagent.runtime import Runtime, open_runtime
 
+logger = logging.getLogger(__name__)
+
 _POLICY_VIOLATION = 1008  # WebSocket close codes
 _TRY_AGAIN_LATER = 1013
+_PURGE_EVERY_S = 3600.0
+
+
+async def _purge_forever(rt: Runtime, ttl_hours: float) -> None:
+    """Delete conversations older than the limit, now and then for as long as the app runs."""
+    while True:
+        try:
+            async with rt.pool.connection() as conn:
+                gone = await worlds.purge_worlds(conn, timedelta(hours=ttl_hours))
+            if gone:
+                logger.info("purged %s conversations older than %s hours", gone, ttl_hours)
+        except Exception:
+            logger.exception("purging old conversations failed")
+        await asyncio.sleep(_PURGE_EVERY_S)
 
 
 async def _pump(socket: WebSocket, backlog: list[BaseModel], subscription: Subscription) -> None:
@@ -83,13 +103,23 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with _serving_runtime(rt, settings) as runtime:
             hubs = app.state.hubs = Hubs(runtime, settings.max_sessions)
+            purge = (
+                asyncio.create_task(_purge_forever(runtime, settings.session_ttl_hours))
+                if settings.session_ttl_hours is not None
+                else None
+            )
             try:
                 yield
             finally:
+                if purge is not None:
+                    purge.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await purge
                 # Turns still running are stopped and stored while the database is still there.
                 await hubs.close()
 
     app = FastAPI(title="Support agent", lifespan=lifespan)
+    new_sessions = SlidingWindow(settings.max_new_sessions_per_hour, 3600.0)
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.allowed_origins, allow_methods=["GET"]
     )
@@ -124,8 +154,21 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 await socket.close(code=_POLICY_VIOLATION, reason="the first message must be hello")
             return
 
+        # Coming back to a conversation is free. Starting one is counted per visitor, and an ID
+        # the server does not know starts one.
+        known = await hubs.known(hello.session_id)
+        visitor = client_address(
+            socket.client.host if socket.client else None,
+            headers.get("x-forwarded-for"),
+            settings.trusted_proxies,
+        )
+        if not known and not new_sessions.allow(visitor):
+            await socket.close(
+                code=_TRY_AGAIN_LATER, reason="too many new conversations, try again later"
+            )
+            return
         try:
-            hub, resumed = await hubs.open(hello.session_id)
+            hub, resumed = await hubs.open(hello.session_id if known else None)
         except TooManySessions:
             await socket.close(code=_TRY_AGAIN_LATER, reason="too many sessions, try again later")
             return
@@ -161,6 +204,13 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                         refuse("too_long", f"at most {settings.max_message_chars} characters")
                     elif not text.strip():
                         refuse("bad_message", "the message is empty")
+                    elif hub.turns >= settings.max_turns_per_session and not hub.busy:
+                        limit = settings.max_turns_per_session
+                        refuse(
+                            "rate_limited",
+                            f"this conversation has reached its limit of {limit} messages, "
+                            "start a new one",
+                        )
                     elif not hub.start_turn(text, message.mode):
                         refuse("turn_in_progress", "wait for the current turn to finish")
                 elif isinstance(message, TurnRetry):

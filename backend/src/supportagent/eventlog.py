@@ -92,6 +92,16 @@ class EventLog:
             row = await cur.fetchone()
         return cls(pool, session_id, row["world_id"], row["last_seq"])
 
+    async def turn_count(self) -> int:
+        """How many customer messages this session has stored."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM session_events "
+                "WHERE session_id = %s AND type = 'turn.started'",
+                (self.session_id,),
+            )
+            return (await cur.fetchone())["n"]
+
     def stamp(self, event: BaseModel, turn_id: str) -> BaseModel:
         """Give the event its place in the stream. Call `save` before the turn is over."""
         self.last_seq += 1

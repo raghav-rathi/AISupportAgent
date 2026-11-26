@@ -180,3 +180,28 @@ async def test_update_field_validates_changes_and_audits(pool, world):
     assert (
         await scalar(pool, "SELECT count(*) FROM account_changes WHERE world_id = %s", world) == 1
     )
+
+
+async def test_purging_removes_old_conversations_and_keeps_recent_ones(pool, today):
+    old, recent = (f"test-{uuid.uuid4().hex[:12]}" for _ in range(2))
+    async with pool.connection() as conn:
+        for world_id in (old, recent):
+            await worlds.create_world(conn, world_id, today)
+            await conn.execute(
+                "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (world_id, world_id)
+            )
+        await conn.execute(
+            "UPDATE worlds SET created_at = now() - interval '3 days' WHERE id = %s", (old,)
+        )
+    try:
+        async with pool.connection() as conn:
+            assert await worlds.purge_worlds(conn, timedelta(days=2)) == 1
+            cur = await conn.execute("SELECT id FROM sessions WHERE id = ANY(%s)", ([old, recent],))
+            assert [row["id"] for row in await cur.fetchall()] == [recent]
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM customers WHERE world_id = %s", (old,)
+            )
+            assert (await cur.fetchone())["n"] == 0
+    finally:
+        async with pool.connection() as conn:
+            await worlds.delete_world(conn, recent)

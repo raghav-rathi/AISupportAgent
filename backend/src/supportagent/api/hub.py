@@ -58,9 +58,12 @@ class Subscription:
 
 
 class SessionHub:
-    def __init__(self, rt: Runtime, log: EventLog, on_idle: Callable[[SessionHub], None]) -> None:
+    def __init__(
+        self, rt: Runtime, log: EventLog, on_idle: Callable[[SessionHub], None], turns: int = 0
+    ) -> None:
         self.rt = rt
         self.log = log
+        self.turns = turns  # customer messages so far, for the limit per conversation
         self.session_id = log.session_id
         self.busy = False  # a turn is running
         self.redactor = Redactor()
@@ -89,6 +92,8 @@ class SessionHub:
         if self.busy:
             return False
         self.busy = True
+        if text is not None:
+            self.turns += 1
         self._turn_events = []
         self._task = asyncio.create_task(self._run(text, mode))
         return True
@@ -207,6 +212,16 @@ class Hubs:
     def __len__(self) -> int:
         return len(self._hubs)
 
+    async def known(self, session_id: str | None) -> bool:
+        """Whether a session with this ID exists. Opening an unknown ID starts a new session."""
+        if not session_id:
+            return False
+        if session_id in self._hubs:
+            return True
+        async with self.rt.pool.connection() as conn:
+            cur = await conn.execute("SELECT 1 FROM sessions WHERE id = %s", (session_id,))
+            return await cur.fetchone() is not None
+
     async def open(self, session_id: str | None) -> tuple[SessionHub, bool]:
         """Find or create the hub for a session. The flag says whether the session already existed."""
         if session_id and session_id in self._hubs:
@@ -227,7 +242,8 @@ class Hubs:
             session_id = world_id = uuid.uuid4().hex
             await ensure_world(self.rt, world_id)
         log = await EventLog.open(self.rt.pool, session_id, world_id)
-        hub = self._hubs.setdefault(session_id, SessionHub(self.rt, log, self._release))
+        turns = await log.turn_count() if resumed else 0
+        hub = self._hubs.setdefault(session_id, SessionHub(self.rt, log, self._release, turns))
         return hub, resumed
 
     def _release(self, hub: SessionHub) -> None:

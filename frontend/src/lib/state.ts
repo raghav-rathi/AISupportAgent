@@ -98,6 +98,7 @@ export interface Turn {
 
 export interface AppState {
   connection: Connection;
+  closeReason: string | null; // what the server said when it closed the connection, if anything
   sessionId: string | null;
   lastSeq: number;
   /** Events up to this number are a replay of the past. They rebuild turns and nothing else. */
@@ -114,6 +115,7 @@ export interface AppState {
 
 export const initialState: AppState = {
   connection: "connecting",
+  closeReason: null,
   sessionId: null,
   lastSeq: 0,
   replayUntil: 0,
@@ -129,7 +131,7 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: "event"; event: ServerEvent }
-  | { type: "connection"; status: Connection }
+  | { type: "connection"; status: Connection; reason?: string }
   | { type: "sent"; text: string }
   | { type: "reset" }
   | { type: "dismiss" };
@@ -139,7 +141,7 @@ export function reduce(state: AppState, action: Action): AppState {
     case "event":
       return applyEvent(state, action.event);
     case "connection":
-      return { ...state, connection: action.status };
+      return { ...state, connection: action.status, closeReason: action.reason || null };
     case "sent":
       return { ...state, pending: action.text, notice: null };
     case "reset":
@@ -179,6 +181,7 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     return {
       ...kept,
       connection: "open",
+      closeReason: null,
       sessionId: e.session_id,
       replayUntil: e.last_seq,
       customer: e.customer,
