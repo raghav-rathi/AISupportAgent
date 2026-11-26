@@ -67,7 +67,7 @@ class HostedEmbedder:
         base_url: str = OPENROUTER_URL,
         query_instruction: str | None = None,
         dimensions: int | None = None,
-        batch_size: int = 64,
+        batch_size: int = 16,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         """`query_instruction` is put in front of queries only, for models trained that way.
@@ -81,7 +81,8 @@ class HostedEmbedder:
         self._query_prefix = f"Instruct: {query_instruction}\nQuery:" if query_instruction else ""
         self._dimensions = dimensions
         self._batch_size = batch_size
-        self._client = client or httpx.AsyncClient(timeout=10.0)
+        # Measured through OpenRouter: 3 to 4 seconds for a handful of texts, and over 10 for 64.
+        self._client = client or httpx.AsyncClient(timeout=30.0)
 
     async def _embed(self, texts: list[str]) -> list[np.ndarray]:
         request: dict[str, Any] = {"model": self.name, "input": texts}

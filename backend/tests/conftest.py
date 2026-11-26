@@ -13,7 +13,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg_pool import AsyncConnectionPool
 
 from supportagent import clock, db
-from supportagent.config import get_settings
+from supportagent.config import Settings, get_settings
 from supportagent.crm import world as worlds
 from supportagent.kb.chunker import load_kb
 from supportagent.kb.ingest import ingest
@@ -68,9 +68,13 @@ async def world(pool: AsyncConnectionPool) -> AsyncIterator[str]:
 
 @pytest.fixture(scope="session")
 async def retriever(pool: AsyncConnectionPool) -> Retriever:
-    """The real knowledge base, ingested once, behind the small local models."""
+    """The real knowledge base, ingested once, behind the small local models.
+
+    The models are the defaults of the settings, not the values of a .env file, which may name
+    hosted models that tests must not call.
+    """
     settings = get_settings()
-    embedder = FastEmbedEmbedder(settings.embed_model)
+    embedder = FastEmbedEmbedder(Settings.model_fields["embed_model"].default)
     async with pool.connection() as conn:
         await ingest(conn, load_kb(settings.kb_dir), embedder)
-    return Retriever(embedder, FastEmbedReranker(settings.rerank_model))
+    return Retriever(embedder, FastEmbedReranker(Settings.model_fields["rerank_model"].default))

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from supportagent.config import get_settings
+from supportagent.config import Settings, get_settings
 from supportagent.kb.chunker import load_kb
 from supportagent.kb.ingest import ingest
 from supportagent.kb.models import FastEmbedEmbedder, FastEmbedReranker
@@ -41,14 +41,14 @@ def kb():
 
 @pytest.fixture(scope="module")
 def embedder():
-    return CountingEmbedder(FastEmbedEmbedder(get_settings().embed_model))
+    return CountingEmbedder(FastEmbedEmbedder(Settings.model_fields["embed_model"].default))
 
 
 @pytest.fixture(scope="module")
 async def retriever(pool, kb, embedder):
     async with pool.connection() as conn:
         await ingest(conn, kb, embedder)
-    return Retriever(embedder, FastEmbedReranker(get_settings().rerank_model))
+    return Retriever(embedder, FastEmbedReranker(Settings.model_fields["rerank_model"].default))
 
 
 async def search(pool, retriever, query, tier, limit=5):
