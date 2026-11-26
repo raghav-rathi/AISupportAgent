@@ -13,6 +13,10 @@ import numpy as np
 from fastembed import TextEmbedding
 from fastembed.rerank.cross_encoder import TextCrossEncoder
 
+# Texts per ONNX batch. Memory grows with the batch: 96 help center chunks in one batch peaked at
+# 2.3 GB, which a 1 GB host kills, and in batches of 8 at 0.6 GB while finishing sooner.
+_BATCH = 8
+
 
 class Embedder(Protocol):
     name: str
@@ -47,7 +51,8 @@ class FastEmbedEmbedder:
     async def embed_documents(self, texts: list[str]) -> list[np.ndarray]:
         def run() -> list[np.ndarray]:
             with self._lock:
-                return [np.asarray(v, dtype=np.float32) for v in self._model.passage_embed(texts)]
+                vectors = self._model.passage_embed(texts, batch_size=_BATCH)
+                return [np.asarray(v, dtype=np.float32) for v in vectors]
 
         return await asyncio.to_thread(run)
 
@@ -73,6 +78,6 @@ class FastEmbedReranker:
 
         def run() -> list[float]:
             with self._lock:
-                return [float(s) for s in self._model.rerank(query, documents)]
+                return [float(s) for s in self._model.rerank(query, documents, batch_size=_BATCH)]
 
         return await asyncio.to_thread(run)
