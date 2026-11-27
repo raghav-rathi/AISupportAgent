@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     # What every visitor together may spend on model calls in 24 hours, in dollars. At the limit
     # no new turn starts until old spend has aged out. None means no limit of our own.
     daily_budget_usd: float | None = Field(default=None, gt=0)
+    # The same for speech, which is another provider's bill. At the limit voice does not come
+    # on and a spoken message starts no turn. Typed messages go on.
+    daily_speech_budget_usd: float | None = Field(default=None, gt=0)
     client_address_header: str | None = None  # for example x-real-ip on Railway
     # Conversations and their CRM copies older than this are deleted, hourly. None keeps them.
     session_ttl_hours: float | None = Field(default=None, gt=0)

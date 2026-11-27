@@ -501,6 +501,29 @@ async def test_a_turn_that_fails_says_so_aloud(serve, speech):
     await caller.ws.close()
 
 
+async def test_voice_has_a_daily_budget_of_its_own(serve, speech, pool, world):
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (f"spent-{world}", world)
+        )
+        await conn.execute(
+            "INSERT INTO session_events (session_id, seq, type, payload) "
+            "VALUES (%s, 1, 'speech.spoken', '{\"cost_usd\": 1000}'::jsonb)",
+            (f"spent-{world}",),
+        )
+    _, address = await serve(
+        ScriptedModel("m", say("Hello.")), **voice(speech, daily_speech_budget_usd=999.0)
+    )
+    caller = await Caller.open(address)
+    await caller.send(type="voice.start")
+    refused = await caller.until("error")
+    assert refused["code"] == "voice_unavailable" and "budget" in refused["message"]
+    # Typed questions are paid for elsewhere and go on.
+    await caller.say("Hi")
+    assert (await caller.until("assistant.message"))["text"] == "Hello."
+    await caller.ws.close()
+
+
 async def test_a_conversation_has_one_voice_and_the_server_a_limit_of_them(serve, speech):
     _, address = await serve(
         ScriptedModel("m", say("Hello.")), **voice(speech, max_voice_sessions=1)

@@ -118,7 +118,7 @@ One gap remains. A PIN typed in a message stays in the saved conversation until 
 - `turn.cancel` stops a running turn. `turn.retry` resumes a failed or stopped turn from its last saved step, at most 3 times per turn.
 - The server closes a connection with a code that says what to do next: come back at once after falling behind, come back when the visitor returns after idling, wait after too many conversations, start a new conversation when the old one has expired. The page follows the code.
 - With `FAULT_INJECTION=true` a client can queue simulated timeouts, rate limits, outages and tool failures for its own session. That is how the failure paths get shown in a demo, and it is on at the public address.
-- One address can start 30 conversations an hour and hold 12 connections. A conversation takes 60 messages and 4 connections. `DAILY_BUDGET_USD` stops new turns once the stored cost of the last 24 hours reaches it. All are settings, and the page says so when the server turns it away.
+- One address can start 30 conversations an hour and hold 12 connections. A conversation takes 60 messages and 4 connections. `DAILY_BUDGET_USD` stops new turns once the stored model cost of the last 24 hours reaches it. `DAILY_SPEECH_BUDGET_USD` does the same for voice with the stored cost of speech, which is another provider's bill: at that limit voice stays off and typed messages go on. All are settings, and the page says so when the server turns it away.
 - `/health` answers once the database is reachable and the embedding model is loaded, so a host that waits for it sends no visitor to a process that is still starting.
 
 ## Run it
@@ -215,6 +215,7 @@ REQUIRE_ORIGIN=true        # refuse clients that send no Origin
 CLIENT_ADDRESS_HEADER=x-real-ip   # the header in which the host's proxy reports the visitor
 SESSION_TTL_HOURS=48        # delete conversations that have been idle for longer
 DAILY_BUDGET_USD=1          # stop new turns at this much model cost in 24 hours
+DAILY_SPEECH_BUDGET_USD=3   # keep voice off beyond this much speech cost in 24 hours
 SECRET_KEY=...              # any long random value. It keys the hashes of PINs
 ```
 

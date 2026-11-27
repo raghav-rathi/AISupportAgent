@@ -125,43 +125,66 @@ def client_address(direct: str | None, from_proxy: str | None) -> str:
 
 
 class Budget:
-    """What every visitor together may spend on models in 24 hours.
+    """What every visitor together may spend in 24 hours, on models and on speech.
 
-    The figure is the cost the stored events report: every model call, every search on a hosted
-    reranker, and what speech to text and text to speech charged. It is read at most once per
-    `refresh_s`, so a burst can overshoot by what is started within that time. The provider's
-    own cap on the key stays the hard limit.
+    They are two budgets because they are two bills. Models and the hosted reranker are paid
+    for through one key, speech to text and text to speech through another. A day of talking
+    must not use up what typed questions need, and the other way round.
+
+    The figures are the costs the stored events report. They are read at most once per
+    `refresh_s`, so a burst can overshoot by what is started within that time. Each provider's
+    own cap on its key stays the hard limit.
     """
 
     def __init__(
         self,
         pool: AsyncConnectionPool,
         limit_usd: float | None,
+        speech_limit_usd: float | None = None,
         *,
         refresh_s: float = 20.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._pool, self.limit_usd, self._refresh_s, self._clock = pool, limit_usd, refresh_s, clock
-        self._spent = 0.0
+        self._pool, self._refresh_s, self._clock = pool, refresh_s, clock
+        self.limit_usd, self.speech_limit_usd = limit_usd, speech_limit_usd
+        self._spent = self._speech = 0.0
         self._read_at: float | None = None
 
-    async def spent(self) -> float:
-        """Dollars spent in the last 24 hours, as of the last reading."""
+    async def _read(self) -> None:
         now = self._clock()
-        if self._read_at is None or now - self._read_at >= self._refresh_s:
-            async with self._pool.connection() as conn:
-                cur = await conn.execute(
-                    "SELECT coalesce(sum(CASE WHEN type = 'llm.finished' "
-                    "THEN coalesce((payload->>'cost_usd')::float8, %s) "
-                    "ELSE coalesce((payload->>'cost_usd')::float8, 0) END), 0) AS usd "
-                    "FROM session_events WHERE created_at > now() - interval '24 hours' "
-                    "AND type IN ('llm.finished', 'retrieval.result', 'speech.heard', "
-                    "'speech.spoken', 'voice.usage')",
-                    (_UNPRICED_CALL_USD,),
-                )
-                self._spent = float((await cur.fetchone())["usd"])
-            self._read_at = now
+        if self._read_at is not None and now - self._read_at < self._refresh_s:
+            return
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT coalesce(sum(CASE WHEN type = 'llm.finished' "
+                "THEN coalesce((payload->>'cost_usd')::float8, %s) "
+                "ELSE coalesce((payload->>'cost_usd')::float8, 0) END) "
+                "FILTER (WHERE type IN ('llm.finished', 'retrieval.result')), 0) AS models, "
+                "coalesce(sum(coalesce((payload->>'cost_usd')::float8, 0)) "
+                "FILTER (WHERE type IN ('speech.heard', 'speech.spoken', 'voice.usage')), 0) "
+                "AS speech FROM session_events "
+                "WHERE created_at > now() - interval '24 hours' "
+                "AND type IN ('llm.finished', 'retrieval.result', 'speech.heard', "
+                "'speech.spoken', 'voice.usage')",
+                (_UNPRICED_CALL_USD,),
+            )
+            row = await cur.fetchone()
+        self._spent, self._speech = float(row["models"]), float(row["speech"])
+        self._read_at = now
+
+    async def spent(self) -> float:
+        """Dollars spent on models and searches in the last 24 hours, as of the last reading."""
+        await self._read()
         return self._spent
+
+    async def speech_spent(self) -> float:
+        """Dollars spent on speech in the last 24 hours, as of the last reading."""
+        await self._read()
+        return self._speech
 
     async def exhausted(self) -> bool:
         return self.limit_usd is not None and await self.spent() >= self.limit_usd
+
+    async def speech_exhausted(self) -> bool:
+        limit = self.speech_limit_usd
+        return limit is not None and await self.speech_spent() >= limit

@@ -179,7 +179,9 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with _serving_runtime(rt, settings) as runtime:
             hubs = app.state.hubs = Hubs(runtime, settings.max_sessions)
-            app.state.budget = Budget(runtime.pool, settings.daily_budget_usd)
+            app.state.budget = Budget(
+                runtime.pool, settings.daily_budget_usd, settings.daily_speech_budget_usd
+            )
             purge = (
                 asyncio.create_task(_purge_forever(runtime, settings.session_ttl_hours))
                 if settings.session_ttl_hours is not None
@@ -444,6 +446,8 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             )
         if await budget.exhausted():
             return "budget_exhausted", "the demo has used its budget for today"
+        if spoken and await budget.speech_exhausted():
+            return "budget_exhausted", "voice has used its budget for today, go on in text"
         return None
 
     async def _on_voice_start(
@@ -459,6 +463,9 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             return None
         if await budget.exhausted():
             refuse("budget_exhausted", "the demo has used its budget for today")
+            return None
+        if await budget.speech_exhausted():
+            refuse("voice_unavailable", "voice has used its budget for today, go on in text")
             return None
         if hub.voice is not None:
             await hub.voice.stop("replaced", "voice is now on in another window")

@@ -654,6 +654,7 @@ async def test_no_turn_starts_once_the_daily_budget_is_spent(serve):
 async def test_the_budget_adds_up_model_calls_and_hosted_searches(pool, world):
     session_id = f"budget-{world}"
     before = await Budget(pool, 1.0).spent()
+    speech_before = await Budget(pool, 1.0).speech_spent()
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (session_id, world)
@@ -672,11 +673,13 @@ async def test_the_budget_adds_up_model_calls_and_hosted_searches(pool, world):
                 "INSERT INTO session_events (session_id, seq, type, payload) VALUES (%s, %s, %s, %s::jsonb)",
                 (session_id, seq, kind, f'{{"cost_usd": {cost}}}'),
             )
-    budget = Budget(pool, 0.7)
+    budget = Budget(pool, 0.7, 0.05)
     # A model call without a price still counts for something. A search that named no cost ran
-    # on a local model and counts for nothing. Speech counts with what it reports.
-    assert await budget.spent() - before == pytest.approx(0.5 + 0.25 + 0.002 + 0.06)
-    assert await budget.exhausted()
+    # on a local model and counts for nothing. Speech is another bill and has its own budget.
+    assert await budget.spent() - before == pytest.approx(0.5 + 0.25 + 0.002)
+    assert await budget.speech_spent() - speech_before == pytest.approx(0.06)
+    assert await budget.exhausted() and await budget.speech_exhausted()
+    assert not await Budget(pool, 0.7, None).speech_exhausted()
     assert not await Budget(pool, None).exhausted()
 
 
