@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     max_voice_sessions_per_address: int = Field(default=2, gt=0)  # of those, for one visitor
     max_voice_starts_per_minute: int = Field(default=6, gt=0)  # per address
     # Seconds of voice one address may use in 24 hours. None means no limit of this kind.
-    voice_seconds_per_address_per_day: float | None = Field(default=1800.0, gt=0)
+    voice_seconds_per_address_per_day: float | None = Field(default=3600.0, gt=0)
     # The recogniser's early word that a turn may be over. From this confidence up, the
     # agent's first model call starts on what has been heard so far, and its result is used
     # if the turn ends on those words. Lower starts sooner and throws more calls away:
