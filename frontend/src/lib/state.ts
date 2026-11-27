@@ -10,6 +10,7 @@ import type {
   LlmFinished,
   LlmRetry,
   LlmTrace,
+  PassageDetail,
   RetrievalHit,
   RetrievalResult,
   ServerEvent,
@@ -17,7 +18,11 @@ import type {
   TurnFinished,
 } from "./protocol";
 
-export type Connection = "connecting" | "open" | "reconnecting";
+/**
+ * `paused` waits for the visitor to come back before it connects again. `stopped` does not
+ * connect again unless the visitor asks: the server said no, and asking again would not help.
+ */
+export type Connection = "connecting" | "open" | "reconnecting" | "paused" | "stopped";
 export type FailureReason = LlmRetry["reason"];
 
 export interface ToolStep {
@@ -25,14 +30,16 @@ export interface ToolStep {
   id: string; // the tool call's ID
   name: string;
   args: Record<string, unknown>;
-  status: "running" | "retrying" | "ok" | "refused" | "failed";
+  /** `stopped`: the turn ended while this step was still running. */
+  status: "running" | "retrying" | "ok" | "refused" | "failed" | "stopped";
   summary: string | null;
   error: string | null; // what the last failed attempt said
   attempt: number;
   maxAttempts: number | null;
-  startedTs: number;
+  atMs: number; // when it started, on the turn's own clock
   durationMs: number | null;
   retrieval: RetrievalResult | null;
+  receipt: Record<string, string> | null; // what an action did, as the tool reported it
 }
 
 /** The model failed once and the client is waiting to try again. */
@@ -61,10 +68,9 @@ export interface ModelCall {
   id: string;
   purpose: "agent" | "judge";
   model: string;
-  startedTs: number;
+  atMs: number; // when it started, on the turn's own clock
   attempts: number;
   finished: LlmFinished | null;
-  trace: LlmTrace | null;
 }
 
 export type TurnStatus = "running" | "answered" | "escalated" | "failed" | "interrupted";
@@ -78,6 +84,7 @@ export interface Answer {
 
 export interface Turn {
   id: string;
+  clientId: string | null; // the ID this client gave the message, if it was sent from here
   userText: string;
   mode: "text" | "voice";
   startedTs: number;
@@ -85,32 +92,59 @@ export interface Turn {
   phase: Phase;
   steps: Step[];
   calls: ModelCall[];
-  streaming: string; // text of the answer in flight
+  streaming: string; // text of the answer in flight, not confirmed yet
   streamCallId: string | null;
-  answer: Answer | null;
+  answer: Answer | null; // set once the answer has passed its check
   retracted: string | null; // why a streamed answer was taken back
   verdict: GuardrailVerdict | null;
   tickets: Ticket[];
   failure: { code: string; message: string; retryable: boolean } | null;
+  resumable: boolean | null; // for a stopped turn: whether the server can pick it up
   finished: TurnFinished | null;
   totalMs: number | null;
+  /**
+   * What the customer waited for, in milliseconds from their message. Kept as events arrive and
+   * replaced by the server's own figures when the turn ends, which a reload also has.
+   */
+  firstStepMs: number | null;
+  firstTextMs: number | null;
+  answerMs: number | null;
+  /** Time the turn spent stopped, waiting to be picked up. It is not part of the turn's clock. */
+  idleMs: number;
+  stoppedTs: number | null;
 }
+
+/** The prompt traces of one turn, which the client asks for when it shows them. */
+export interface TraceSet {
+  status: "loading" | "ready";
+  items: LlmTrace[];
+  forCalls: number; // how many model calls the turn had finished when these were asked for
+}
+
+export type Passage = PassageDetail | "loading" | "missing";
 
 export interface AppState {
   connection: Connection;
-  closeReason: string | null; // what the server said when it closed the connection, if anything
+  closeReason: string | null; // why the connection is down, when the server or the client said
   sessionId: string | null;
   lastSeq: number;
-  /** Events up to this number are a replay of the past. They rebuild turns and nothing else. */
-  replayUntil: number;
+  /** The server is sending what this client missed. Those events rebuild turns and nothing else. */
+  replaying: boolean;
+  epoch: number; // counts the connections this page has had: a message belongs to one of them
   customer: CustomerSummary | null;
   tickets: Ticket[];
   turns: Turn[];
   busy: boolean; // a turn is running on the server
   resumable: boolean; // the last turn stopped early and can be picked up
   faultInjection: boolean; // the server lets this client simulate failures
-  pending: string | null; // a message sent and not yet confirmed by the server
+  /** A message sent and not yet answered by the server, with the connection it was sent on. */
+  pending: { id: string; text: string; epoch: number } | null;
+  /** Text to put back into the composer: a message that turned out not to have been accepted. */
+  draft: { text: string; n: number } | null;
+  drafts: number;
   notice: string | null; // the server turned something down
+  traces: Record<string, TraceSet>;
+  passages: Record<string, Passage>;
 }
 
 export const initialState: AppState = {
@@ -118,7 +152,8 @@ export const initialState: AppState = {
   closeReason: null,
   sessionId: null,
   lastSeq: 0,
-  replayUntil: 0,
+  replaying: false,
+  epoch: 0,
   customer: null,
   tickets: [],
   turns: [],
@@ -126,34 +161,65 @@ export const initialState: AppState = {
   resumable: false,
   faultInjection: false,
   pending: null,
+  draft: null,
+  drafts: 0,
   notice: null,
+  traces: {},
+  passages: {},
 };
 
 export type Action =
   | { type: "event"; event: ServerEvent }
   | { type: "connection"; status: Connection; reason?: string }
-  | { type: "sent"; text: string }
+  | { type: "sent"; id: string; text: string }
+  | { type: "asked"; turnId: string }
+  | { type: "looked"; chunkId: string }
   | { type: "reset" }
   | { type: "dismiss" };
+
+/** Hand a message that was not accepted back to the composer. */
+function unsend(state: AppState): AppState {
+  if (!state.pending) return state;
+  const drafts = state.drafts + 1;
+  return { ...state, pending: null, draft: { text: state.pending.text, n: drafts }, drafts };
+}
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "event":
       return applyEvent(state, action.event);
-    case "connection":
-      return { ...state, connection: action.status, closeReason: action.reason || null };
+    case "connection": {
+      const next = { ...state, connection: action.status, closeReason: action.reason || null };
+      // Nothing will come back on a connection that is not being reopened, so nothing will say
+      // whether the message arrived. The text goes back to the visitor.
+      return action.status === "paused" || action.status === "stopped" ? unsend(next) : next;
+    }
     case "sent":
-      return { ...state, pending: action.text, notice: null };
+      return { ...state, pending: { id: action.id, text: action.text, epoch: state.epoch }, notice: null };
+    case "asked": {
+      const turn = state.turns.find((t) => t.id === action.turnId);
+      const before = state.traces[action.turnId];
+      const forCalls = turn ? finishedCalls(turn) : 0;
+      return {
+        ...state,
+        traces: { ...state.traces, [action.turnId]: { status: "loading", items: before?.items ?? [], forCalls } },
+      };
+    }
+    case "looked":
+      return typeof state.passages[action.chunkId] === "object"
+        ? state
+        : { ...state, passages: { ...state.passages, [action.chunkId]: "loading" } };
     case "reset":
-      return { ...initialState };
+      return { ...initialState, drafts: state.drafts };
     case "dismiss":
       return { ...state, notice: null };
   }
 }
 
-function newTurn(id: string, text: string, mode: "text" | "voice", ts: number): Turn {
+function newTurn(id: string, text: string, mode: "text" | "voice", ts: number, clientId: string | null): Turn {
   return {
     id,
+    clientId,
     userText: text,
     mode,
     startedTs: ts,
@@ -168,22 +234,33 @@ function newTurn(id: string, text: string, mode: "text" | "voice", ts: number): 
     verdict: null,
     tickets: [],
     failure: null,
+    resumable: null,
     finished: null,
     totalMs: null,
+    firstStepMs: null,
+    firstTextMs: null,
+    answerMs: null,
+    idleMs: 0,
+    stoppedTs: null,
   };
+}
+
+function withTicket(tickets: Ticket[], ticket: Ticket): Ticket[] {
+  return tickets.some((t) => t.id === ticket.id) ? tickets : [...tickets, ticket];
 }
 
 function applyEvent(state: AppState, e: ServerEvent): AppState {
   if (e.type === "session.ready") {
     // A different ID means the server started a new session: the old one is gone.
     const same = state.sessionId === e.session_id;
-    const kept = same ? state : { ...initialState };
+    const kept = same ? state : { ...initialState, pending: state.pending, draft: state.draft, drafts: state.drafts };
     return {
       ...kept,
       connection: "open",
       closeReason: null,
       sessionId: e.session_id,
-      replayUntil: e.last_seq,
+      replaying: true,
+      epoch: state.epoch + 1,
       customer: e.customer,
       tickets: e.tickets,
       busy: e.busy,
@@ -191,8 +268,33 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
       faultInjection: e.fault_injection,
     };
   }
+  if (e.type === "session.caught_up") {
+    // Everything this client missed has arrived. A message sent on an earlier connection that
+    // shows up in none of it never reached the server. Its text goes back to the visitor, who
+    // decides whether to send it again: the client never sends a message twice by itself.
+    const next = { ...state, replaying: false };
+    return next.pending && next.pending.epoch < next.epoch ? unsend(next) : next;
+  }
   if (e.type === "error") {
-    return { ...state, notice: e.message, pending: null };
+    const next = { ...state, notice: e.message };
+    if (e.code === "not_found") {
+      const passages = Object.fromEntries(
+        Object.entries(state.passages).map(([id, passage]) => [id, passage === "loading" ? "missing" : passage]),
+      ) as Record<string, Passage>;
+      return { ...next, notice: null, passages };
+    }
+    // The server answers every message under the ID the client gave it. This one started no turn.
+    return e.client_id && state.pending?.id === e.client_id ? unsend(next) : next;
+  }
+  if (e.type === "trace.list") {
+    const turn = state.turns.find((t) => t.id === e.turn_id);
+    const forCalls = state.traces[e.turn_id ?? ""]?.forCalls ?? (turn ? finishedCalls(turn) : 0);
+    return e.turn_id
+      ? { ...state, traces: { ...state.traces, [e.turn_id]: { status: "ready", items: e.traces, forCalls } } }
+      : state;
+  }
+  if (e.type === "passage.detail") {
+    return { ...state, passages: { ...state.passages, [e.chunk_id]: e } };
   }
   if (e.seq > 0) {
     if (e.seq <= state.lastSeq) return state; // seen before the connection dropped
@@ -201,10 +303,11 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   if (e.type === "session.state") {
     return { ...state, customer: e.customer, tickets: e.tickets };
   }
-  const live = e.seq > state.replayUntil;
+  const live = !state.replaying;
   if (e.type === "turn.started") {
-    const turn = newTurn(e.turn_id ?? `turn-${e.seq}`, e.text, e.mode, e.ts);
-    const next = { ...state, turns: [...state.turns, turn], pending: null };
+    const turn = newTurn(e.turn_id ?? `turn-${e.seq}`, e.text, e.mode, e.ts, e.client_id);
+    const mine = e.client_id !== null && state.pending?.id === e.client_id;
+    const next = { ...state, turns: [...state.turns, turn], pending: mine ? null : state.pending };
     return live ? { ...next, busy: true, resumable: false, notice: null } : next;
   }
   if (!e.turn_id) return state;
@@ -212,11 +315,12 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   let turns = state.turns;
   let index = turns.findLastIndex((turn) => turn.id === e.turn_id);
   if (index < 0) {
-    turns = [...turns, newTurn(e.turn_id, "", "text", e.ts)];
+    turns = [...turns, newTurn(e.turn_id, "", "text", e.ts, null)];
     index = turns.length - 1;
   }
   turns = turns.with(index, applyToTurn(turns[index], e));
-  const next = { ...state, turns };
+  const tickets = e.type === "escalation.created" ? withTicket(state.tickets, e.ticket) : state.tickets;
+  const next = { ...state, turns, tickets };
   if (!live) return next;
   switch (e.type) {
     case "turn.finished":
@@ -224,7 +328,7 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     case "turn.failed":
       return { ...next, busy: false, resumable: e.retryable };
     case "turn.interrupted":
-      return { ...next, busy: false, resumable: true };
+      return { ...next, busy: false, resumable: e.resumable };
     default:
       return { ...next, busy: true };
   }
@@ -240,31 +344,55 @@ function withTool(turn: Turn, id: string, change: (step: ToolStep) => ToolStep):
   return turn.steps.map((step) => (step.kind === "tool" && step.id === id ? change(step) : step));
 }
 
+/** A turn that ended while a step was still running: that step did not finish. */
+function stopSteps(steps: Step[]): Step[] {
+  return steps.map((step) =>
+    step.kind === "tool" && (step.status === "running" || step.status === "retrying") ? { ...step, status: "stopped" } : step,
+  );
+}
+
 function applyToTurn(before: Turn, e: ServerEvent): Turn {
-  // An event after a failure means the turn was picked up again.
-  const stopped = before.status === "failed" || before.status === "interrupted";
-  const t: Turn = stopped ? { ...before, status: "running", failure: null, totalMs: null } : before;
+  let t = before;
+  if (before.status === "failed" || before.status === "interrupted") {
+    // An event after a stop means the turn was picked up again. What the stopped attempt left
+    // on screen as its ending goes, and the time in between is not the turn's.
+    const idle = before.stoppedTs == null ? 0 : Math.max(0, (e.ts - before.stoppedTs) * 1000);
+    t = {
+      ...before,
+      status: "running",
+      failure: null,
+      resumable: null,
+      totalMs: null,
+      retracted: null,
+      verdict: null,
+      idleMs: before.idleMs + idle,
+      stoppedTs: null,
+    };
+  }
+  const at = Math.max(0, (e.ts - t.startedTs) * 1000 - t.idleMs);
   switch (e.type) {
     case "llm.started": {
-      const fresh: ModelCall = {
-        id: e.call_id,
-        purpose: e.purpose,
-        model: e.model,
-        startedTs: e.ts,
-        attempts: e.attempt,
-        finished: null,
-        trace: null,
-      };
+      const fresh: ModelCall = { id: e.call_id, purpose: e.purpose, model: e.model, atMs: at, attempts: e.attempt, finished: null };
       const calls = withCall(t, e.call_id, (c) => ({ ...c, model: e.model, attempts: e.attempt }), fresh);
       return { ...t, calls, phase: e.purpose === "judge" ? "checking" : "thinking" };
     }
     case "llm.delta": {
-      const text = t.streamCallId === e.call_id ? t.streaming + e.text : e.text;
-      return { ...t, streaming: text, streamCallId: e.call_id, phase: "writing" };
+      const first = t.streamCallId !== e.call_id;
+      return {
+        ...t,
+        streaming: first ? e.text : t.streaming + e.text,
+        streamCallId: e.call_id,
+        phase: "writing",
+        firstStepMs: t.firstStepMs ?? at,
+        firstTextMs: first ? at : t.firstTextMs,
+      };
     }
     case "llm.reset":
-      // The text came with a tool call, or the attempt died half way. Either way it is not the answer.
-      return t.streamCallId === e.call_id ? { ...t, streaming: "", streamCallId: null, phase: "thinking" } : t;
+      // The text came with a tool call, the attempt died half way, or the turn was stopped.
+      // Either way it is not the answer.
+      return t.streamCallId === e.call_id
+        ? { ...t, streaming: "", streamCallId: null, phase: "thinking", firstTextMs: null }
+        : t;
     case "llm.retry": {
       const notice: RetryNotice = {
         kind: "retry",
@@ -292,25 +420,12 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
         id: e.call_id,
         purpose: e.purpose,
         model: e.model,
-        startedTs: e.ts - e.total_ms / 1000,
+        atMs: Math.max(0, at - e.total_ms),
         attempts: e.attempts,
         finished: null,
-        trace: null,
       };
       const calls = withCall(t, e.call_id, (c) => ({ ...c, model: e.model, attempts: e.attempts, finished: e }), fresh);
       return { ...t, calls };
-    }
-    case "llm.trace": {
-      const fresh: ModelCall = {
-        id: e.call_id,
-        purpose: e.purpose,
-        model: e.model,
-        startedTs: e.ts,
-        attempts: 1,
-        finished: null,
-        trace: null,
-      };
-      return { ...t, calls: withCall(t, e.call_id, (c) => ({ ...c, trace: e }), fresh) };
     }
     case "tool.started": {
       const step: ToolStep = {
@@ -323,11 +438,16 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
         error: null,
         attempt: 1,
         maxAttempts: null,
-        startedTs: e.ts,
+        atMs: at,
         durationMs: null,
         retrieval: null,
+        receipt: null,
       };
-      return { ...t, steps: [...t.steps, step], phase: null };
+      // A turn that was stopped inside a tool runs that same call again when it is picked up.
+      // It is one step, not two.
+      const again = t.steps.some((s) => s.kind === "tool" && s.id === e.tool_call_id);
+      const steps = again ? withTool(t, e.tool_call_id, () => step) : [...t.steps, step];
+      return { ...t, steps, phase: null, firstStepMs: t.firstStepMs ?? at };
     }
     case "tool.error":
       return { ...t, steps: withTool(t, e.tool_call_id, (s) => ({ ...s, error: e.message })) };
@@ -349,6 +469,7 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
           status: e.outcome,
           summary: e.summary,
           durationMs: e.duration_ms,
+          receipt: e.receipt,
         })),
       };
     case "retrieval.result":
@@ -356,7 +477,7 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
     case "guardrail.verdict":
       return { ...t, verdict: e, phase: null };
     case "answer.retracted":
-      return { ...t, retracted: e.reason, answer: null, streaming: "", streamCallId: null };
+      return { ...t, retracted: e.reason, answer: null, streaming: "", streamCallId: null, firstTextMs: null };
     case "assistant.message":
       return {
         ...t,
@@ -364,23 +485,51 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
         streaming: "",
         streamCallId: null,
         phase: null,
+        firstTextMs: t.firstTextMs ?? at,
+        answerMs: at,
       };
     case "escalation.created":
-      return { ...t, tickets: [...t.tickets, e.ticket] };
+      return { ...t, tickets: withTicket(t.tickets, e.ticket) };
     case "turn.finished":
-      return { ...t, status: e.outcome, finished: e, totalMs: e.total_ms, phase: null, streaming: "", streamCallId: null };
+      return {
+        ...t,
+        status: e.outcome,
+        finished: e,
+        totalMs: e.total_ms,
+        phase: null,
+        streaming: "",
+        streamCallId: null,
+        // The server measured these at the source. A reload has them too, where the events that
+        // carried the first text are no longer there to be timed.
+        firstStepMs: e.first_step_ms ?? t.firstStepMs,
+        firstTextMs: e.first_text_ms ?? t.firstTextMs,
+        answerMs: e.answer_ms ?? t.answerMs,
+      };
     case "turn.failed":
       return {
         ...t,
         status: "failed",
         failure: { code: e.code, message: e.message, retryable: e.retryable },
+        resumable: e.retryable,
         totalMs: e.total_ms,
         phase: null,
         streaming: "",
         streamCallId: null,
+        steps: stopSteps(t.steps),
+        stoppedTs: e.ts,
       };
     case "turn.interrupted":
-      return { ...t, status: "interrupted", totalMs: e.total_ms, phase: null, streaming: "", streamCallId: null };
+      return {
+        ...t,
+        status: "interrupted",
+        resumable: e.resumable,
+        totalMs: e.total_ms,
+        phase: null,
+        streaming: "",
+        streamCallId: null,
+        steps: stopSteps(t.steps),
+        stoppedTs: e.ts,
+      };
     default:
       return t;
   }
@@ -396,11 +545,14 @@ export function shownStatus(state: AppState, turn: Turn): TurnStatus {
   return newest && state.busy ? "running" : "interrupted";
 }
 
-/** Milliseconds from the customer's message to the first token of the answer. */
-export function firstTokenMs(turn: Turn): number | null {
-  const answering = turn.calls.findLast((call) => call.purpose === "agent" && call.finished?.ttft_ms != null);
-  if (!answering?.finished || answering.finished.ttft_ms == null) return null;
-  return Math.max(0, (answering.startedTs - turn.startedTs) * 1000) + answering.finished.ttft_ms;
+function finishedCalls(turn: Turn): number {
+  return turn.calls.filter((call) => call.finished).length;
+}
+
+/** True when the traces the client holds for this turn are older than the turn's model calls. */
+export function tracesAreStale(state: AppState, turn: Turn): boolean {
+  const held = state.traces[turn.id];
+  return !held || (held.status === "ready" && held.forCalls < finishedCalls(turn));
 }
 
 export interface Usage {
@@ -424,18 +576,23 @@ export function turnUsage(turn: Turn): Usage {
     };
   }
   const done = turn.calls.flatMap((call) => (call.finished ? [call.finished] : []));
+  const searches = turn.steps.flatMap((step) => (step.kind === "tool" && step.retrieval ? [step.retrieval.cost_usd ?? 0] : []));
   return {
     modelCalls: done.length,
     toolCalls: turn.steps.filter((step) => step.kind === "tool").length,
     inputTokens: done.reduce((sum, call) => sum + (call.input_tokens ?? 0), 0),
     outputTokens: done.reduce((sum, call) => sum + (call.output_tokens ?? 0), 0),
-    costUsd: done.some((call) => call.cost_usd == null) ? null : done.reduce((sum, call) => sum + (call.cost_usd ?? 0), 0),
+    costUsd: done.some((call) => call.cost_usd == null)
+      ? null
+      : done.reduce((sum, call) => sum + (call.cost_usd ?? 0), 0) + searches.reduce((sum, cost) => sum + cost, 0),
   };
 }
 
 export function sessionUsage(turns: Turn[]): Usage & { turns: number; medianMs: number | null } {
   const each = turns.map(turnUsage);
-  const times = turns.flatMap((turn) => (turn.totalMs == null ? [] : [turn.totalMs])).sort((a, b) => a - b);
+  // A turn that failed or was stopped has a time too, and it says nothing about how long an
+  // answer takes.
+  const times = turns.flatMap((turn) => (turn.finished && turn.totalMs != null ? [turn.totalMs] : [])).sort((a, b) => a - b);
   return {
     turns: turns.length,
     modelCalls: each.reduce((sum, u) => sum + u.modelCalls, 0),

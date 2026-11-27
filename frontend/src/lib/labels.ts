@@ -21,6 +21,8 @@ export const BAND_LABELS: Record<RetrievalResult["band"], string> = {
   escalate: "No answer in the help center",
 };
 
+export const PLAN_LABELS: Record<Ticket["tier"] & string, string> = { free: "Free", pro: "Pro", enterprise: "Enterprise" };
+
 /** What happened to a model call, as the end of "The model ...". */
 export const FAILURE_LABELS: Record<FailureReason, string> = {
   timeout: "timed out",
@@ -50,7 +52,8 @@ const whole = new Intl.NumberFormat("en-US");
 
 export function formatMs(ms: number | null | undefined): string {
   if (ms == null) return "n/a";
-  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+  const whole = Math.round(ms);
+  return whole < 1000 ? `${whole} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
 }
 
 export function formatCount(n: number | null | undefined): string {

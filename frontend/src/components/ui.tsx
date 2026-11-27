@@ -1,11 +1,14 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode, Ref } from "react";
 
 /**
  * The few controls the design allows. Every control is a pill. Cobalt fills exactly one of them
  * per screen, the primary action. Everything else is ivory on dark.
  */
 
-type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "ghost" | "quiet" | "surface" };
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "ghost" | "quiet" | "surface";
+  ref?: Ref<HTMLButtonElement>;
+};
 
 const BUTTON_BASE =
   "inline-flex h-40 shrink-0 items-center justify-center gap-8 whitespace-nowrap px-20 text-body-sm font-regular " +

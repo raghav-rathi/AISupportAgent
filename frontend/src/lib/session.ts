@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import type { ClientMessage, FaultInject, ServerEvent } from "./protocol";
+import { planAfterClose } from "./reconnect";
 import { type AppState, initialState, reduce } from "./state";
 
 const STORAGE_KEY = "fernhill.session";
-const MAX_WAIT_MS = 8_000;
 
 /** The backend's WebSocket. Set at build time, or the same host on the backend's dev port. */
 function socketUrl(): string {
@@ -33,14 +33,28 @@ function remember(sessionId: string | null): void {
   }
 }
 
+/** An ID for one message. The server answers the message under it. */
+function messageId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 export interface Session {
   state: AppState;
-  say(text: string): void;
+  /** Send a message. False when it could not be sent, and then nothing has changed. */
+  say(text: string): boolean;
   retry(): void;
   cancel(): void;
   inject(kind: FaultInject["kind"], tool?: string): void;
   startOver(): void;
   dismiss(): void;
+  /** Connect again, when the connection is paused or stopped. */
+  reconnect(): void;
+  /** Ask for the prompt traces of one turn. They are stored on the server and not streamed. */
+  requestTraces(turnId: string): void;
+  /** Ask for the text of a passage that a search of this conversation returned. */
+  requestPassage(chunkId: string): void;
 }
 
 /**
@@ -54,6 +68,16 @@ export function useSession(): Session {
   const socket = useRef<WebSocket | null>(null);
   // Where this client is in which stream. Kept outside the state so a reconnect reads it at once.
   const cursor = useRef<{ sessionId: string | null; lastSeq: number }>({ sessionId: null, lastSeq: 0 });
+  // How to connect again while no connection is open or due. `auto` says whether the visitor
+  // coming back to the tab is reason enough, or whether they have to ask.
+  const wake = useRef<{ go: () => void; auto: boolean } | null>(null);
+
+  const startOver = useCallback(() => {
+    remember(null);
+    cursor.current = { sessionId: null, lastSeq: 0 };
+    dispatch({ type: "reset" });
+    setGeneration((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -63,14 +87,27 @@ export function useSession(): Session {
 
     const open = () => {
       if (stopped) return;
+      wake.current = null;
       const ws = new WebSocket(socketUrl());
+      ws.binaryType = "arraybuffer";
       socket.current = ws;
+      // A socket that was replaced still delivers what was in flight. None of it may touch the
+      // cursor, the stored ID or the state of the conversation that replaced it.
+      const current = () => !stopped && socket.current === ws;
+
       ws.onopen = () => {
+        if (!current()) return;
         const { sessionId, lastSeq } = cursor.current;
         ws.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seq: lastSeq }));
       };
       ws.onmessage = (message) => {
-        const event = JSON.parse(String(message.data)) as ServerEvent;
+        if (!current() || typeof message.data !== "string") return; // binary frames are audio
+        let event: ServerEvent;
+        try {
+          event = JSON.parse(message.data) as ServerEvent;
+        } catch {
+          return; // not ours to understand, and no reason to take the page down
+        }
         if (event.type === "session.ready") {
           attempt = 0;
           if (event.session_id !== cursor.current.sessionId) {
@@ -81,25 +118,56 @@ export function useSession(): Session {
           cursor.current.lastSeq = event.seq;
         }
         dispatch({ type: "event", event });
+        if (event.type === "error" && event.code === "session_expired") startOver();
       };
       ws.onclose = (closed) => {
-        if (stopped || socket.current !== ws) return;
-        // The server gives a reason when it turns a visitor away, for example at its limit of
-        // new conversations. A dropped network gives none.
-        dispatch({ type: "connection", status: "reconnecting", reason: closed.reason });
-        timer = window.setTimeout(open, Math.min(MAX_WAIT_MS, 500 * 2 ** attempt));
+        if (!current()) return;
+        socket.current = null;
+        const plan = planAfterClose(closed.code, attempt);
         attempt += 1;
+        if (plan.kind === "restart") {
+          startOver();
+        } else if (plan.kind === "stop") {
+          dispatch({ type: "connection", status: "stopped", reason: plan.why });
+          wake.current = { go: again, auto: false };
+        } else if (plan.kind === "pause") {
+          dispatch({ type: "connection", status: "paused" });
+          wake.current = { go: again, auto: true };
+        } else {
+          dispatch({ type: "connection", status: "reconnecting", reason: closed.reason });
+          timer = window.setTimeout(() => {
+            // A tab nobody is looking at needs no connection. It gets one when it is looked at.
+            if (document.visibilityState === "hidden") wake.current = { go: open, auto: true };
+            else open();
+          }, plan.delayMs);
+        }
       };
     };
+    const again = () => {
+      attempt = 0;
+      dispatch({ type: "connection", status: "connecting" });
+      open();
+    };
+    const onBack = () => {
+      const waiting = wake.current;
+      if (waiting?.auto && document.visibilityState === "visible") {
+        wake.current = null;
+        waiting.go();
+      }
+    };
+    const signs = ["visibilitychange", "focus", "pointerdown", "keydown"] as const;
+    for (const sign of signs) window.addEventListener(sign, onBack);
     open();
 
     return () => {
       stopped = true;
+      wake.current = null;
       window.clearTimeout(timer);
+      for (const sign of signs) window.removeEventListener(sign, onBack);
       socket.current?.close();
       socket.current = null;
     };
-  }, [generation]);
+  }, [generation, startOver]);
 
   const send = useCallback((message: ClientMessage): boolean => {
     const ws = socket.current;
@@ -109,24 +177,50 @@ export function useSession(): Session {
   }, []);
 
   const say = useCallback(
-    (text: string) => {
-      if (send({ type: "user.message", text })) dispatch({ type: "sent", text });
+    (text: string): boolean => {
+      const id = messageId();
+      if (!send({ type: "user.message", text, client_id: id })) return false;
+      dispatch({ type: "sent", id, text });
+      return true;
     },
     [send],
   );
-  const retry = useCallback(() => void send({ type: "turn.retry" }), [send]);
-  const cancel = useCallback(() => void send({ type: "turn.cancel" }), [send]);
+  // A second click on Try again or Stop, before the page has caught up with the first, would be
+  // turned down by the server and show up as an error for nothing.
+  const lastAsk = useRef({ what: "", at: 0 });
+  const once = useCallback(
+    (message: ClientMessage) => {
+      const now = Date.now();
+      if (lastAsk.current.what === message.type && now - lastAsk.current.at < 1_000) return;
+      lastAsk.current = { what: message.type, at: now };
+      send(message);
+    },
+    [send],
+  );
+  const retry = useCallback(() => once({ type: "turn.retry" }), [once]);
+  const cancel = useCallback(() => once({ type: "turn.cancel" }), [once]);
   const inject = useCallback(
     (kind: FaultInject["kind"], tool?: string) => void send({ type: "fault.inject", kind, tool, times: 1 }),
     [send],
   );
-  const startOver = useCallback(() => {
-    remember(null);
-    cursor.current = { sessionId: null, lastSeq: 0 };
-    dispatch({ type: "reset" });
-    setGeneration((n) => n + 1);
-  }, []);
   const dismiss = useCallback(() => dispatch({ type: "dismiss" }), []);
+  const reconnect = useCallback(() => {
+    const waiting = wake.current;
+    wake.current = null;
+    waiting?.go();
+  }, []);
+  const requestTraces = useCallback(
+    (turnId: string) => {
+      if (send({ type: "trace.get", turn_id: turnId })) dispatch({ type: "asked", turnId });
+    },
+    [send],
+  );
+  const requestPassage = useCallback(
+    (chunkId: string) => {
+      if (send({ type: "passage.get", chunk_id: chunkId })) dispatch({ type: "looked", chunkId });
+    },
+    [send],
+  );
 
-  return { state, say, retry, cancel, inject, startOver, dismiss };
+  return { state, say, retry, cancel, inject, startOver, dismiss, reconnect, requestTraces, requestPassage };
 }
