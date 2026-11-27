@@ -41,6 +41,7 @@ export const TICKET_REASONS: Record<Ticket["reason"], string> = {
   security: "Security",
   privacy_request: "Privacy request",
   customer_request: "Customer asked for a person",
+  unanswered_question: "Question the help center does not answer",
   step_limit: "Step limit reached",
   other: "Other",
 };

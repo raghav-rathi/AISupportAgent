@@ -152,7 +152,7 @@ describe("a connection", () => {
     const s = new Stream().ready();
     s.state = reduce(s.state, { type: "sent", text: "Hi" });
     expect(s.state.pending).toBe("Hi");
-    s.raw({ seq: 0, ts: 0, turn_id: null, type: "error", code: "turn_in_progress", message: "wait for the current turn to finish" });
+    s.raw({ seq: 0, ts: 0, turn_id: null, type: "error", code: "turn_in_progress", message: "wait for the current turn to finish", client_id: null });
     expect([s.state.pending, s.state.notice]).toEqual([null, "wait for the current turn to finish"]);
   });
 });
