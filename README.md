@@ -276,7 +276,7 @@ Hosted models through OpenRouter. The bake-off, retrieval and gate rows are from
 
 | Check | Result |
 |---|---|
-| Tests | 459 backend and 35 frontend pass, locally and in CI |
+| Tests | 460 backend and 35 frontend pass, locally and in CI |
 | Bake-off, 55 conversations run 3 times | Gemma 4 31B passed 164 of 165 with a median tool chain of 2.0 s at $0.0005 a turn, and is the agent model. Gemini 3.6 Flash passed 156 and GPT-6 Luna 155. |
 | Scenario suite after the hardening pass, 55 conversations once | 54 passed, interval 90.4% to 99.7%. From the customer's message: first sign of work after 0.4 s, approved answer after 2.6 s at the median and 5.2 s at the 95th percentile. |
 | Grounding judge, Gemini 3.6 Flash, 52 replies run twice | 0 misses on 52 seeded errors, 0 false alarms on 52 correct replies. Of the replies that leave a question open, 8 of 8 were flagged. Of the others, 1 of 44, a "that is on another plan" reply, which code now exempts. |

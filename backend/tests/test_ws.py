@@ -163,6 +163,28 @@ async def test_a_client_that_returns_later_gets_what_it_missed_from_storage(serv
     await second.ws.close()
 
 
+async def test_a_client_that_arrives_while_a_finished_turn_is_tidied_up_reads_it_from_storage(
+    serve, monkeypatch
+):
+    rt, address = await serve(ScriptedModel("m", say("Hello there.")))
+
+    async def slow(_session_id):
+        await asyncio.sleep(0.3)
+
+    # The turn tells its clients that it is over, then tidies up its saved state for a while.
+    monkeypatch.setattr(rt, "prune", slow)
+    first = await Client.open(address)
+    await first.say("Hi")
+    await first.until("turn.finished")
+    second = await Client.open(address, first.ready["session_id"])
+    stored = [e for e in first.stream() if e["type"] != "llm.delta"]
+    # What the store holds, and none of the token deltas the hub had buffered for the turn.
+    assert [await second.next() for _ in stored] == stored
+    assert second.ready["busy"] is False
+    await first.ws.close()
+    await second.ws.close()
+
+
 async def test_a_second_message_during_a_turn_is_refused(serve):
     _, address = await serve(ScriptedModel("m", ["Hel", 0.25, "lo.", usage(10, 3)]))
     client = await Client.open(address)

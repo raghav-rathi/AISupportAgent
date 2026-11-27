@@ -91,9 +91,14 @@ class SessionHub:
             return  # stored by the turn, and read back on request
         if event.type in TURN_ENDED:
             # run_turn has stored the turn by now. The session is free before any client hears of
-            # it, so a message sent in reply to this event is not turned away.
+            # it, so a message sent in reply to this event is not turned away. And a client that
+            # attaches from here on reads the turn from the store. The buffer of the turn in
+            # flight goes at this moment and not when the turn's task returns: the task still
+            # tidies up for a few milliseconds, and a client that arrived in between was sent
+            # the finished turn's token deltas, which the store does not hold.
             self.busy = False
-        if event.seq:
+            self._turn_events = []
+        elif event.seq:
             self._turn_events.append(event)
         for subscriber in self._subscribers:
             subscriber.offer(event)
