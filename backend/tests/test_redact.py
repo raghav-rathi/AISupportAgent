@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from supportagent.events import (
+    LlmDelta,
+    LlmFinished,
+    LlmReset,
     LlmTrace,
     RetrievalResult,
     ToolStarted,
     TraceMessage,
     TurnStarted,
 )
-from supportagent.redact import MASK, Redactor, digits_of, scrub_messages, spoken_digits
+from supportagent.redact import (
+    MASK,
+    Redactor,
+    digits_of,
+    scrub_messages,
+    session_key,
+    spoken_digits,
+)
 
 # How people give a PIN in chat and in a voice transcript. An unverified session masks all of them.
 PHRASINGS = [
@@ -197,3 +209,193 @@ def test_scrubbing_replaces_only_the_messages_that_show_the_pin():
     assert [m.id for m in replaced] == ["h2", "a1"]
     assert replaced[0].content == f"Account 10482917 and it's {MASK}"
     assert replaced[1].tool_calls[0]["args"] == {"account_number": "10482917", "pin": MASK}
+
+
+# Forms an outside audit got past the redactor with. The slash, colon, asterisk and dash forms
+# verify as 4721, so they have to be masked as 4721. The last three are how a speech-to-text
+# service writes a PIN that was read out.
+ODD_FORMS = [
+    "4/7/2/1",
+    "47/21",
+    "47:21",
+    "4\u20137\u20132\u20131",
+    "4*7*2*1",
+    "PIN: 4  7  2  1",
+    "Four. Seven. Two. One.",
+    "4. 7. 2. 1.",
+    "four, seven, two, one",
+]
+
+
+@pytest.mark.parametrize("text", ODD_FORMS)
+def test_a_learned_pin_is_masked_with_any_short_separator(text):
+    redactor = Redactor(strict=False)
+    redactor.learn("4721")
+    assert not shows_pin(redactor.text(f"it is {text} ok", customer=True)), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "my pin is 47/21",
+        "PIN 4/7/2/1",
+        "pin: 47:21",
+        "PIN: 4  7  2  1",
+        "my PIN is Four. Seven. Two. One.",
+        "the pin is nine o three four",
+        "My PIN is 12345678",
+    ],
+)
+def test_the_word_pin_masks_the_number_in_these_forms_too(text):
+    masked = Redactor(strict=False).text(text, customer=True)
+    assert not re.search(r"\d", masked) and "four" not in masked.lower(), masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Account-PIN: 10482917-4721",
+        "10482917/4721",
+        "PIN: 10482917:4721",
+        "10482917, 4721 \u2014 what plan am I on?",
+        "Switch to 53920164, 2458",
+    ],
+)
+def test_a_number_right_after_an_account_number_is_a_pin_even_once_verified(text):
+    masked = Redactor(strict=False).text(text, customer=True)
+    assert "4721" not in masked and "2458" not in masked, masked
+
+
+def test_spoken_o_counts_as_zero():
+    assert spoken_digits("nine o three four") == "9034"
+    assert digits_of("Four. Seven. Two. One.") == "4721"
+    assert digits_of(4721.0) == "4721"  # not "47210"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We have 1500 seats",
+        "We got HTTP error 5003 on port 8080",
+        "Our zip code is 94107",
+        "Please refund Invoice 30417",
+        "My account is 104 829 17",
+        "Q1 2026 invoice",
+        "The renewal is on 11/26 at 10:30",
+    ],
+)
+def test_strict_mode_leaves_numbers_that_say_what_they_are(text):
+    assert Redactor().text(text, customer=True) == text
+
+
+def test_a_learned_pin_does_not_garble_amounts_ids_and_dates_the_app_wrote():
+    redactor = Redactor(strict=False)
+    for value in ("4721", "1440", "2026", "30417"):
+        redactor.learn(value)
+    written = "Invoice INV-30417 is $1,440.00, refunded on 2026-11-26. Your charge of $47.21 went through."
+    assert redactor.text(written) == written
+    # The same digits in the customer's own words are still a PIN.
+    assert not shows_pin(redactor.text("ok it's 47.21", customer=True))
+    assert redactor.text("Your code 4721 is on file.") == f"Your code {MASK} is on file."
+
+
+def test_a_pin_under_another_argument_name_or_as_a_number_is_masked():
+    redactor = Redactor(strict=False)
+    as_number = redactor.event(
+        ToolStarted(
+            tool_call_id="t1",
+            name="verify_identity",
+            args={"account_number": "10482917", "pin": 4721.0},
+        )
+    )
+    assert as_number.args["pin"] == MASK
+    assert redactor.text("it was 4721") == f"it was {MASK}"  # and it was learned as 4721
+
+
+def test_a_new_process_recognises_the_pins_an_earlier_one_hashed():
+    key = session_key("server secret", "session-1")
+    first = Redactor(strict=False, key=key)
+    first.learn("4721")
+    first.learn("9034")
+    stored = first.hashes
+    assert len(stored) == 2 and not any("4721" in h for h in stored)
+
+    later = Redactor(strict=False, key=key, known=stored)
+    assert later.text("Did 4721 work earlier?", customer=True) == f"Did {MASK} work earlier?"
+    assert later.text("Your code 4 7 2 1 is on file.") == f"Your code {MASK} is on file."
+    assert later.text("was it nine o three four", customer=True) == f"was it {MASK}"
+    assert later.text("I have 1234 cards", customer=True) == "I have 1234 cards"
+    # Another session's key, or another server's secret, does not recognise them.
+    for other in (session_key("server secret", "session-2"), session_key("another", "session-1")):
+        assert Redactor(strict=False, key=other, known=stored).text("4721") == "4721"
+
+
+def texts(events):
+    return "".join(e.text for e in events if isinstance(e, LlmDelta))
+
+
+def done(call_id="c1"):
+    return LlmFinished(
+        call_id=call_id, purpose="agent", model="m", attempts=1, used_fallback=False,
+        ttft_ms=1.0, total_ms=2.0, input_tokens=1, output_tokens=1, cost_usd=None,
+    )  # fmt: skip
+
+
+def test_a_pin_split_over_two_streamed_chunks_is_masked():
+    redactor = Redactor(strict=False)
+    redactor.learn("4721")
+    out = []
+    for piece in ("Confirmed, code 47", "21 worked", ". Your PIN is 9", "03", "4."):
+        out += redactor.outgoing(LlmDelta(call_id="c1", text=piece))
+    out += redactor.outgoing(done())
+    assert texts(out) == f"Confirmed, code {MASK} worked. Your PIN is {MASK}."
+    assert out[-1].type == "llm.finished"
+
+
+def test_streamed_text_arrives_whole_and_in_order_when_nothing_is_secret():
+    redactor = Redactor(strict=False)
+    answer = (
+        "Pro costs $12 per seat per month, or $120 per seat per year [1]. Refund window in days: 14"
+    )
+    out = []
+    for start in range(0, len(answer), 7):
+        out += redactor.outgoing(LlmDelta(call_id="c1", text=answer[start : start + 7]))
+    assert texts(out) == answer[:-2]  # a number at the very end waits for what follows it
+    out += redactor.outgoing(done())
+    assert texts(out) == answer
+
+
+def test_a_reset_drops_what_a_stream_was_holding_back():
+    redactor = Redactor(strict=False)
+    out = redactor.outgoing(LlmDelta(call_id="c1", text="Order 12"))
+    out += redactor.outgoing(LlmReset(call_id="c1", reason="tool_call"))
+    out += redactor.outgoing(LlmDelta(call_id="c1", text="Hello"))
+    assert texts(out) == "Order Hello"
+
+
+def test_scrubbing_reaches_block_content_and_malformed_tool_calls():
+    redactor = Redactor(strict=False)
+    redactor.learn("4721")
+    blocks = HumanMessage(
+        [{"type": "text", "text": "it's 4721"}, {"type": "image_url", "image_url": "x"}], id="h1"
+    )
+    broken = AIMessage(
+        "",
+        id="a1",
+        invalid_tool_calls=[
+            {
+                "name": "verify_identity",
+                "args": '{"account_number": "10482917", "pin": "4721"',
+                "id": "c1",
+                "error": "parse",
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    replaced = scrub_messages([blocks, broken], redactor)
+    assert [m.id for m in replaced] == ["h1", "a1"]
+    assert (
+        replaced[0].content[0]["text"] == f"it's {MASK}"
+        and replaced[0].content[1]["type"] == "image_url"
+    )
+    assert "4721" not in replaced[1].invalid_tool_calls[0]["args"]

@@ -39,14 +39,16 @@ def _type(schema: dict[str, Any]) -> str:
         return json.dumps(schema["const"])
     if "enum" in schema:
         return " | ".join(json.dumps(value) for value in schema["enum"])
-    if "anyOf" in schema:
-        return " | ".join(dict.fromkeys(_type(option) for option in schema["anyOf"]))
+    for union in ("anyOf", "oneOf"):
+        if union in schema:
+            return " | ".join(dict.fromkeys(_type(option) for option in schema[union]))
     kind = schema.get("type")
     if kind == "array":
         inner = _type(schema.get("items", {}))
         return f"({inner})[]" if " | " in inner else f"{inner}[]"
     if kind == "object":
-        return "Record<string, unknown>"
+        values = schema.get("additionalProperties")
+        return f"Record<string, {_type(values) if isinstance(values, dict) else 'unknown'}>"
     return _PRIMITIVES.get(kind, "unknown")
 
 

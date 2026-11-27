@@ -303,6 +303,120 @@ def test_headings_inside_code_fences_are_not_headings():
     assert intro.content == "```\n# not a heading\n\n## nor this\n```"
 
 
+def test_an_indented_fence_keeps_its_section_and_its_plans():
+    doc = (
+        "---\nid: d4\ntitle: D4\ntiers: free, pro, enterprise\n---\n\n# D4\n\n"
+        "## Enterprise Proc\n<!-- tiers: enterprise -->\n\n"
+        "1. Run this:\n\n   ```bash\n# shell comment\necho ok\n   ```\n\n2. Done.\n"
+    )
+    chunks = chunk_document(doc, "d4.md")
+    assert [(c.heading_path, c.tiers, c.content) for c in chunks] == [
+        (
+            ("Enterprise Proc",),
+            ("enterprise",),
+            "1. Run this:\n\n   ```bash\n# shell comment\necho ok\n   ```\n\n2. Done.",
+        ),
+    ]
+
+    # A shorter fence does not close a longer one.
+    tildes = "  ~~~~\n## not a heading\n~~~\n ~~~~~"
+    intro = by_path(chunk_document(DOC.replace("Intro paragraph.", tildes)))[()]
+    assert intro.content == tildes
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- plan_tiers: enterprise -->",
+        "<!-- tier_list: enterprise -->",
+        "<!-- mytiers: enterprise -->",
+    ],
+)
+def test_a_misspelled_plan_marker_fails_loudly(marker):
+    doc = (
+        "---\nid: d2\ntitle: D2\ntiers: free, pro, enterprise\n---\n\n# D2\n\n## Secret\n"
+        f"{marker}\n\nSecret Enterprise info.\n"
+    )
+    with pytest.raises(ChunkerError, match=r"^d2\.md:10: "):
+        chunk_document(doc, "d2.md")
+
+
+def test_text_between_two_comments_on_one_line_is_kept():
+    doc = (
+        "---\nid: d1\ntitle: D1\ntiers: free\n---\n\n# D1\n\n## Sec\n\n"
+        "<!-- a --> CRITICAL POLICY TEXT MUST NOT DISAPPEAR <!-- b -->\n"
+    )
+    chunks = chunk_document(doc, "d1.md")
+    assert [(c.heading_path, c.content) for c in chunks] == [
+        (("Sec",), "CRITICAL POLICY TEXT MUST NOT DISAPPEAR"),
+    ]
+    assert "<!--" not in chunks[0].embed_text
+
+
+def test_a_comment_over_several_lines_vanishes_with_the_heading_inside_it():
+    doc = (
+        "---\nid: d3\ntitle: D3\ntiers: free\n---\n\n# D3\n\n## Real\n\n"
+        "<!--\n## Draft Secret Heading\nInternal author note.\n-->\n\nVisible text.\n"
+    )
+    chunks = chunk_document(doc, "d3.md")
+    assert [(c.heading_path, c.content) for c in chunks] == [(("Real",), "Visible text.")]
+
+    draft = (
+        "<!-- note 1 --> Support can approve refunds up to $500 within 14 days. <!-- note 2 -->\n\n"
+        "<!--\nINTERNAL DRAFT DO NOT PUBLISH: raising Pro price to $29 next quarter\n-->\n\n"
+        "Keep this line."
+    )
+    paid = section(chunk_document(DOC.replace("Paid text.", draft)), "Paid")
+    assert [c.content for c in paid] == [
+        "Support can approve refunds up to $500 within 14 days.\n\nKeep this line.",
+    ]
+
+
+def test_a_comment_over_several_lines_that_mentions_tiers_fails_loudly():
+    note = "<!--\nDraft: move this section to the Enterprise tier next quarter.\n-->"
+    doc = SECRET.replace("Discount formula: 40% off.", f"Discount formula: 40% off.\n\n{note}")
+    with pytest.raises(ChunkerError, match=r"^secret\.md:17: "):
+        chunk_document(doc, "secret.md")
+
+
+def test_a_comment_that_is_never_closed_fails_loudly():
+    doc = SECRET.replace("Discount formula", "<!-- draft\nDiscount formula")
+    with pytest.raises(ChunkerError, match=r"^secret\.md:14: this HTML comment is never closed"):
+        chunk_document(doc, "secret.md")
+
+
+def test_a_long_indented_list_splits_between_items():
+    items = "\n".join(
+        f"  - Indented bullet item {i} with enough text to easily exceed the size limit."
+        for i in range(40)
+    )
+    doc = f"---\nid: d5\ntitle: D5\ntiers: free\n---\n\n# D5\n\n## Bullets\n\n{items}\n"
+    chunks = chunk_document(doc, "d5.md")
+    assert len(items) > MAX_CHARS
+    assert len(chunks) > 1
+    assert all(len(c.content) <= MAX_CHARS for c in chunks)
+    assert all(c.content.startswith("  - Indented bullet item") for c in chunks)
+    assert "\n".join(c.content for c in chunks) == items
+
+
+def test_a_code_block_inside_a_long_list_item_is_not_split():
+    config = "  ```yaml\n- name: not an item\n\n- name: nor this\n  ```"
+    items = [
+        f"  - Item {n} has enough words to make the whole list longer than the limit."
+        for n in range(40)
+    ]
+    items[20] = f"  - Item 20 uses this config:\n\n{config}"
+    bullets = "\n".join(items)
+    doc = f"---\nid: d6\ntitle: D6\ntiers: free\n---\n\n# D6\n\n## Bullets\n\n{bullets}\n"
+    chunks = chunk_document(doc, "d6.md")
+    assert len(bullets) > MAX_CHARS
+    assert len(chunks) > 1
+    assert all(len(c.content) <= MAX_CHARS for c in chunks)
+    assert any(items[20] in c.content for c in chunks)
+    assert all(c.content.count("```") % 2 == 0 for c in chunks)
+    assert "\n".join(c.content for c in chunks) == bullets
+
+
 def test_the_real_knowledge_base_loads():
     chunks = load_kb(get_settings().kb_dir)
     assert len({c.doc_id for c in chunks}) == 16

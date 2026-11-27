@@ -4,8 +4,12 @@ One ordered stream per session carries chat tokens, tool steps, guardrail decisi
 usage. The chat UI, the voice adapter and the observability drawer all read the same stream. The
 session adds `seq`, `ts` and `turn_id` when it publishes an event, after masking any PIN in it.
 
-`session.ready` and `error` answer a client directly. They are not part of the stored stream and
-keep `seq` 0.
+`session.ready`, `session.caught_up`, `error`, `trace.list` and `passage.detail` answer a client
+directly. They are not part of the stored stream and keep `seq` 0.
+
+`llm.trace` is stored and numbered but not streamed: a prompt trace is most of a turn's bytes and
+only the observability drawer reads it, so a client asks for the traces of a turn when it
+shows them.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ EscalationReason = Literal[
     "security",
     "privacy_request",
     "customer_request",
+    "unanswered_question",
     "step_limit",
     "other",
 ]
@@ -97,8 +102,17 @@ class SessionReady(_Event):
     fault_injection: bool = False  # this server acts on `fault.inject`, so a UI may offer it
 
 
+class SessionCaughtUp(_Event):
+    """Everything the client had missed has been sent. What follows happens now."""
+
+    type: Literal["session.caught_up"] = "session.caught_up"
+
+
 class ProtocolError(_Event):
-    """The client sent something the server could not act on."""
+    """The client sent something the server could not act on.
+
+    `client_id` is set when the error answers one `user.message`: that message started no turn.
+    """
 
     type: Literal["error"] = "error"
     code: Literal[
@@ -109,14 +123,21 @@ class ProtocolError(_Event):
         "too_long",
         "rate_limited",
         "not_allowed",
+        "too_many_retries",
+        "budget_exhausted",
+        "failed_to_start",
+        "session_expired",
+        "not_found",
     ]
     message: str
+    client_id: str | None = None
 
 
 class TurnStarted(_Event):
     type: Literal["turn.started"] = "turn.started"
     mode: Literal["text", "voice"]
     text: str  # the customer's message, with any PIN masked
+    client_id: str | None = None  # the ID the client gave this message, so it knows it arrived
 
 
 class LlmStarted(_Event):
@@ -137,12 +158,13 @@ class LlmReset(_Event):
     """Clients drop the text this call has streamed.
 
     Either the attempt failed after some text went out, or the text came with a tool call
-    (`tool_call`) and so is not part of the answer.
+    (`tool_call`) and so is not part of the answer, or the turn was stopped while the text was
+    still unconfirmed (`cancelled`).
     """
 
     type: Literal["llm.reset"] = "llm.reset"
     call_id: str
-    reason: FailureReason | Literal["tool_call"]
+    reason: FailureReason | Literal["tool_call", "cancelled"]
 
 
 class LlmRetry(_Event):
@@ -178,7 +200,12 @@ class LlmFinished(_Event):
 
 
 class LlmTrace(_Event):
-    """The full prompt and response of one model call, for the observability drawer."""
+    """The full prompt and response of one model call, for the observability drawer.
+
+    Stored, not streamed. An answer that has not passed its grounding check is not in here: the
+    trace of the call that wrote it is made after the verdict, and a rejected answer's text is
+    replaced by a note.
+    """
 
     type: Literal["llm.trace"] = "llm.trace"
     call_id: str
@@ -223,6 +250,9 @@ class ToolFinished(_Event):
     outcome: Literal["ok", "refused", "failed"]
     summary: str
     duration_ms: float
+    # What an action did, in fields a UI can lay out without reading the model's prose. Set by
+    # issue_refund when the refund went through.
+    receipt: dict[str, str] | None = None
 
 
 class RetrievalResult(_Event):
@@ -238,6 +268,9 @@ class RetrievalResult(_Event):
     embed_ms: float  # the three timings add up every search pass this call made
     search_ms: float
     rerank_ms: float
+    # What a hosted embedder and reranker charged for this search. None when they did not say
+    # or when both run in this process.
+    cost_usd: float | None = None
 
 
 class GuardrailVerdict(_Event):
@@ -258,6 +291,7 @@ class AnswerRetracted(_Event):
 class AssistantMessage(_Event):
     """The final text of the turn. Clients show it in place of whatever they streamed.
 
+    It is sent only after the grounding check has passed, or for wording the app wrote itself.
     When `held` is true no deltas went out before it.
     """
 
@@ -287,6 +321,11 @@ class TurnFinished(_Event):
     input_tokens: int
     output_tokens: int
     cost_usd: float | None  # None when a model without a configured price took part
+    # What the customer waited for, in milliseconds from their message. Time between a failed
+    # attempt and its retry is not counted.
+    first_step_ms: float | None = None  # the first sign of work: a tool step or streamed text
+    first_text_ms: float | None = None  # the first text of the answer that stood
+    answer_ms: float | None = None  # the complete answer, after its grounding check
 
 
 class TurnFailed(_Event):
@@ -307,10 +346,31 @@ class TurnInterrupted(_Event):
 
     type: Literal["turn.interrupted"] = "turn.interrupted"
     total_ms: float
+    # False when the turn was stopped before anything of it was saved: there is nothing to pick
+    # up, and the message has to be sent again.
+    resumable: bool = True
+
+
+class TraceList(_Event):
+    """The reply to `trace.get`: the prompt traces of one turn, in order. `turn_id` names the turn."""
+
+    type: Literal["trace.list"] = "trace.list"
+    traces: list[LlmTrace]
+
+
+class PassageDetail(_Event):
+    """The reply to `passage.get`: one help center passage this conversation was shown."""
+
+    type: Literal["passage.detail"] = "passage.detail"
+    chunk_id: str
+    source: str  # document title and heading path
+    tiers: list[Tier]
+    content: str
 
 
 AnyEvent = Annotated[
     SessionReady
+    | SessionCaughtUp
     | ProtocolError
     | TurnStarted
     | LlmStarted
@@ -332,7 +392,9 @@ AnyEvent = Annotated[
     | SessionState
     | TurnFinished
     | TurnFailed
-    | TurnInterrupted,
+    | TurnInterrupted
+    | TraceList
+    | PassageDetail,
     Field(discriminator="type"),
 ]
 
@@ -340,3 +402,5 @@ EVENT_ADAPTER: TypeAdapter[AnyEvent] = TypeAdapter(AnyEvent)
 
 # The events that end a turn. Exactly one of them closes every turn.
 TURN_ENDED = frozenset({"turn.finished", "turn.failed", "turn.interrupted"})
+# Stored and numbered, and sent only when a client asks for them.
+NOT_STREAMED = frozenset({"llm.trace"})

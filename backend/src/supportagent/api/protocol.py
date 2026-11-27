@@ -20,9 +20,17 @@ class Hello(BaseModel):
 
 
 class UserMessage(BaseModel):
+    """One customer message.
+
+    The server answers each with exactly one of two things: a `turn.started` that carries the
+    same `client_id`, or an `error` that carries it. A client that sees neither after a
+    reconnect knows the message never arrived.
+    """
+
     type: Literal["user.message"]
     text: str
     mode: Literal["text", "voice"] = "text"
+    client_id: str | None = Field(default=None, max_length=64)
 
 
 class TurnRetry(BaseModel):
@@ -35,6 +43,21 @@ class TurnCancel(BaseModel):
     """Stop the turn that is running. The server answers with `turn.interrupted`."""
 
     type: Literal["turn.cancel"]
+
+
+class TraceGet(BaseModel):
+    """Ask for the prompt traces of one turn. The server answers with `trace.list`."""
+
+    type: Literal["trace.get"]
+    turn_id: str = Field(max_length=64)
+
+
+class PassageGet(BaseModel):
+    """Ask for the text of a help center passage. The server answers with `passage.detail`, and
+    only for a passage that a search of this conversation handed to the model."""
+
+    type: Literal["passage.get"]
+    chunk_id: str = Field(max_length=200)
 
 
 class FaultInject(BaseModel):
@@ -58,7 +81,8 @@ class FaultInject(BaseModel):
 
 
 ClientMessage = Annotated[
-    Hello | UserMessage | TurnRetry | TurnCancel | FaultInject, Field(discriminator="type")
+    Hello | UserMessage | TurnRetry | TurnCancel | FaultInject | TraceGet | PassageGet,
+    Field(discriminator="type"),
 ]
 
 CLIENT_ADAPTER: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)

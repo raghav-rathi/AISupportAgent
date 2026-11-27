@@ -19,3 +19,14 @@ def test_types_are_rendered_the_way_the_wire_carries_them():
     assert "  seq: number;" in text
     assert "  session_id?: string | null;" in text
     assert "  | ToolFinished" in text and "  | UserMessage" in text
+
+
+def test_records_keep_their_value_type_and_nested_unions_are_spelled_out():
+    from supportagent.cli.gen_types import _type
+
+    assert (
+        _type({"type": "object", "additionalProperties": {"type": "string"}})
+        == "Record<string, string>"
+    )
+    assert _type({"type": "object"}) == "Record<string, unknown>"
+    assert _type({"oneOf": [{"type": "string"}, {"type": "null"}]}) == "string | null"

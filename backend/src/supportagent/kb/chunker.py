@@ -4,10 +4,12 @@ Rules:
 
 - A chunk never crosses a heading, because sections can be visible to different plans.
 - A chunk never starts or ends inside a fenced code block. A code block larger than the size limit
-  gets a chunk of its own.
+  gets a chunk of its own. A fence may be indented by up to three spaces, as inside a list item, and
+  is closed by a fence of the same character that is at least as long. Inside a code block nothing
+  is a heading, a comment or a plan marker.
 - A table or a numbered procedure is never split. Items separated by blank lines are still one list.
 - A bulleted list is split only when it alone is larger than the size limit, and then only between
-  its top-level items.
+  its top-level items. An item, and a code block inside it, is never cut.
 - A paragraph is split between sentences, and only when it alone is larger than the size limit.
 - A lead-in line that ends in a colon stays with the list, table or code block it introduces.
 - Each chunk carries its heading path and the plans that may see it.
@@ -16,6 +18,8 @@ Rules:
 - IDs depend on the document and the heading path, not on the text, so an edited section keeps its
   ID and only its hash changes. IDs are unique across the knowledge base, even when a heading
   contains `/`.
+- HTML comments never reach a chunk. A comment may span lines, and no line inside it is a heading.
+  The text around a comment on its line is kept. A comment that is never closed is an error.
 
 Document format: front matter with `id`, `title` and `tiers`, then Markdown under one `# ` title.
 
@@ -26,14 +30,16 @@ Plan markers. A section and everything below it is narrowed to some plans with a
 - The marker is a line on its own: `<!--`, the word `tiers` in lower case, a colon, plan names
   separated by commas, `-->`. Plan names are the lower case names in `TIERS`, at least one.
 - It sits under a heading of level 2 or deeper, before any content of that section. Blank lines and
-  other one-line comments may come between the heading and the marker.
+  other one-line comments may come between the heading and the marker. A comment that spans lines
+  counts as content.
 - It may only narrow the plans of the parent section. A section has at most one marker.
 - The document title takes its plans from the front matter. A marker under it or before it is an
   error.
 
-Markers fail closed. Every HTML comment outside a code block that mentions `tier` or `tiers`, in any
-case, is either a valid marker in a valid place or a `ChunkerError` that names the file and line.
-A misspelled or misplaced marker never leaves its section open to every plan.
+Markers fail closed. Every HTML comment outside a code block whose text contains `tier`, in any case
+and inside any word (`plan_tiers`, `mytiers`), is either a valid marker in a valid place or a
+`ChunkerError` that names the file and line. A misspelled or misplaced marker never leaves its
+section open to every plan.
 """
 
 from __future__ import annotations
@@ -51,9 +57,9 @@ MAX_CHARS = 2_000
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _TIERS_MARK = re.compile(r"<!--\s*tiers:\s*([^<>]*?)\s*-->")
-_MENTIONS_TIERS = re.compile(r"\btiers?\b", re.IGNORECASE)
-_COMMENT = re.compile(r"^<!--.*-->$")
-_FENCE = re.compile(r"^(`{3,}|~{3,})")
+_MENTIONS_TIER = re.compile(r"tier", re.IGNORECASE)
+# A backtick fence has no backtick after its opening run, so "```x```" on a line is not a fence.
+_FENCE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
 _ORDERED = re.compile(r"^\d+[.)]\s+")
 _BULLET = re.compile(r"^[-*+]\s+")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -166,27 +172,47 @@ def _front_matter(text: str, source: str) -> tuple[dict[str, str], list[str], in
 
 
 def _closes(line: str, fence: str) -> bool:
-    """True when `line` closes a code block opened with `fence`."""
+    """True when `line` closes a code block opened with `fence`.
+
+    The closing fence repeats the opening character at least as often, after at most three spaces.
+    """
     mark = line.rstrip()
-    return len(mark) >= len(fence) and mark == fence[0] * len(mark)
+    run = mark.lstrip(" ")
+    return len(mark) - len(run) <= 3 and len(run) >= len(fence) and run == fence[0] * len(run)
 
 
-def _comments(line: str, open_comment: bool) -> tuple[list[str], bool]:
-    """Return the text of every HTML comment on `line`, and whether one is still open after it."""
+def _split_comments(line: str, open_comment: bool) -> tuple[str, list[str], bool]:
+    """Split `line` into the text outside HTML comments and the text of each comment.
+
+    `open_comment` says whether a comment is open at the start of the line. The last value says
+    whether one is still open at its end.
+    """
+    visible: list[str] = []
     texts: list[str] = []
     pos = 0
     while True:
-        if not open_comment:
-            start = line.find("<!--", pos)
-            if start < 0:
-                return texts, False
-            pos = start + 4
-        end = line.find("-->", pos)
+        if open_comment:
+            end = line.find("-->", pos)
+            if end < 0:
+                texts.append(line[pos:])
+                break
+            texts.append(line[pos:end])
+            pos, open_comment = end + 3, False
+            continue
+        start = line.find("<!--", pos)
+        if start < 0:
+            visible.append(line[pos:])
+            break
+        visible.append(line[pos:start])
+        # `<!-->` and `<!--->` are whole comments, so the close may overlap the opener.
+        end = line.find("-->", start + 2)
         if end < 0:
-            texts.append(line[pos:])
-            return texts, True
-        texts.append(line[pos:end])
-        pos, open_comment = end + 3, False
+            texts.append(line[start + 4 :])
+            open_comment = True
+            break
+        texts.append(line[start + 4 : end])
+        pos = end + 3
+    return "".join(visible), texts, open_comment
 
 
 def _line_kind(line: str) -> str:
@@ -203,7 +229,8 @@ def _line_kind(line: str) -> str:
 def _blocks(lines: list[str]) -> list[_Block]:
     """Group the lines of one section into paragraphs, lists, tables and code fences.
 
-    Blank lines between the items of a list keep the list in one block.
+    Blank lines between the items of a list keep the list in one block. An indented code fence
+    inside a list belongs to the list.
     """
     blocks: list[_Block] = []
     buffer: list[str] = []
@@ -223,9 +250,17 @@ def _blocks(lines: list[str]) -> list[_Block]:
             buffer.append(line)
             if _closes(line, fence):
                 fence = None
-                flush()
+                if kind == "code":
+                    flush()
             continue
         opener = _FENCE.match(line)
+        if opener and buffer and kind in _LISTS and line[0] == " ":
+            if gap:
+                buffer.append("")
+                gap = False
+            fence = opener.group(1)
+            buffer.append(line)
+            continue
         if opener:
             flush()
             kind, fence = "code", opener.group(1)
@@ -256,7 +291,7 @@ def _blocks(lines: list[str]) -> list[_Block]:
 def _sections(
     lines: list[str], first_line: int, doc_tiers: tuple[str, ...], source: str
 ) -> list[_Section]:
-    """Split the body at headings and give each section its plans.
+    """Split the body at headings, drop HTML comments and give each section its plans.
 
     `first_line` is the line number of `lines[0]` in the file, for error messages.
     """
@@ -270,6 +305,7 @@ def _sections(
     fence: str | None = None
     fence_at = 0
     in_comment = False  # inside an HTML comment that spans lines
+    comment_at = 0  # line where that comment opened
     preamble = True  # from a heading until the first content line of its section
     marked = False  # the current section has a plan marker
 
@@ -286,23 +322,34 @@ def _sections(
             if _closes(line, fence):
                 fence = None
             continue
-        opener = _FENCE.match(line)
+        opener = None if in_comment else _FENCE.match(line)
         if opener:
             fence, fence_at, preamble = opener.group(1), number, False
             body.append(line)
             continue
 
-        stripped = line.strip()
-        mark = None if in_comment else _TIERS_MARK.fullmatch(stripped)
-        whole_comment = not in_comment and _COMMENT.match(stripped)
-        texts, in_comment = _comments(line, in_comment)
-        if not mark and any(_MENTIONS_TIERS.search(text) for text in texts):
+        was_open = in_comment
+        mark = None if was_open else _TIERS_MARK.fullmatch(line.strip())
+        visible, texts, in_comment = _split_comments(line, was_open)
+        if in_comment and (not was_open or "-->" in line):
+            comment_at = number
+        if not mark and any(_MENTIONS_TIER.search(text) for text in texts):
             raise ChunkerError(
                 f"{where}: this comment mentions tiers but is not a plan marker. Write the marker"
                 " as `<!-- tiers: pro, enterprise -->` on a line of its own, or reword the comment."
             )
+        if texts:
+            # Keep the text around the comments, indented as the line was, so a list stays a list.
+            indent = "" if was_open else line[: len(line) - len(line.lstrip())]
+            visible = f"{indent}{visible.strip()}" if visible.strip() else ""
+            heading_before = not was_open and _HEADING.match(line)
+            if bool(heading_before) != bool(_HEADING.match(visible)) or _FENCE.match(visible):
+                raise ChunkerError(
+                    f"{where}: an HTML comment makes it unclear whether this line is a heading or"
+                    " a code fence. Put the comment on a line of its own."
+                )
 
-        heading = _HEADING.match(line)
+        heading = _HEADING.match(visible)
         if heading:
             flush()
             level, title = len(heading.group(1)), heading.group(2)
@@ -340,14 +387,18 @@ def _sections(
             stack[-1] = (heading_level, title, tiers)
             marked = True
             continue
-        if whole_comment:
-            continue
-        if stripped:
+        if was_open or in_comment:
             preamble = False
-        body.append(line)
+        if texts and not visible:
+            continue
+        if visible.strip():
+            preamble = False
+        body.append(visible)
 
     if fence:
         raise ChunkerError(f"{source}:{fence_at}: this code block is never closed.")
+    if in_comment:
+        raise ChunkerError(f"{source}:{comment_at}: this HTML comment is never closed.")
     flush()
     return sections
 
@@ -433,10 +484,27 @@ def _split_prose(text: str, target: int) -> list[str]:
 def _split_items(text: str, target: int) -> list[str]:
     """Split a bulleted list between its top-level items into parts of about `target` characters.
 
-    Lines before the first item, such as a lead-in, stay with the first item. An item is never cut.
+    The top-level items are the bullets with the least indentation, so an indented list splits too.
+    Lines before the first item, such as a lead-in, stay with the first item. An item is never cut,
+    and a line inside a code block is never taken for an item.
     """
     lines = text.split("\n")
-    items = [i for i, line in enumerate(lines) if _BULLET.match(line)]
+    bullets: list[tuple[int, int]] = []  # (line, indentation) of each bullet outside code blocks
+    fence: str | None = None
+    for i, line in enumerate(lines):
+        if fence:
+            if _closes(line, fence):
+                fence = None
+            continue
+        opener = _FENCE.match(line)
+        if opener:
+            fence = opener.group(1)
+            continue
+        stripped = line.lstrip()
+        if _BULLET.match(stripped):
+            bullets.append((i, len(line) - len(stripped)))
+    top = min((indent for _, indent in bullets), default=0)
+    items = [i for i, indent in bullets if indent == top]
     bounds = [0, *items[1:], len(lines)]
     parts: list[str] = []
     start = 0

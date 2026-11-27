@@ -10,7 +10,7 @@ export interface AnswerRetracted {
   reason: string;
 }
 
-/** The final text of the turn. Clients show it in place of whatever they streamed. When `held` is true no deltas went out before it. */
+/** The final text of the turn. Clients show it in place of whatever they streamed. It is sent only after the grounding check has passed, or for wording the app wrote itself. When `held` is true no deltas went out before it. */
 export interface AssistantMessage {
   seq: number;
   ts: number;
@@ -85,14 +85,14 @@ export interface LlmFinished {
   cost_usd: number | null;
 }
 
-/** Clients drop the text this call has streamed. Either the attempt failed after some text went out, or the text came with a tool call (`tool_call`) and so is not part of the answer. */
+/** Clients drop the text this call has streamed. Either the attempt failed after some text went out, or the text came with a tool call (`tool_call`) and so is not part of the answer, or the turn was stopped while the text was still unconfirmed (`cancelled`). */
 export interface LlmReset {
   seq: number;
   ts: number;
   turn_id: string | null;
   type: "llm.reset";
   call_id: string;
-  reason: "timeout" | "rate_limited" | "server_error" | "connection" | "quota" | "rejected" | "tool_call";
+  reason: "timeout" | "rate_limited" | "server_error" | "connection" | "quota" | "rejected" | "tool_call" | "cancelled";
 }
 
 export interface LlmRetry {
@@ -119,7 +119,7 @@ export interface LlmStarted {
   attempt: number;
 }
 
-/** The full prompt and response of one model call, for the observability drawer. */
+/** The full prompt and response of one model call, for the observability drawer. Stored, not streamed. An answer that has not passed its grounding check is not in here: the trace of the call that wrote it is made after the verdict, and a rejected answer's text is replaced by a note. */
 export interface LlmTrace {
   seq: number;
   ts: number;
@@ -133,14 +133,27 @@ export interface LlmTrace {
   response: TraceMessage;
 }
 
-/** The client sent something the server could not act on. */
+/** The reply to `passage.get`: one help center passage this conversation was shown. */
+export interface PassageDetail {
+  seq: number;
+  ts: number;
+  turn_id: string | null;
+  type: "passage.detail";
+  chunk_id: string;
+  source: string;
+  tiers: ("free" | "pro" | "enterprise")[];
+  content: string;
+}
+
+/** The client sent something the server could not act on. `client_id` is set when the error answers one `user.message`: that message started no turn. */
 export interface ProtocolError {
   seq: number;
   ts: number;
   turn_id: string | null;
   type: "error";
-  code: "bad_message" | "turn_in_progress" | "nothing_to_retry" | "nothing_to_cancel" | "too_long" | "rate_limited" | "not_allowed";
+  code: "bad_message" | "turn_in_progress" | "nothing_to_retry" | "nothing_to_cancel" | "too_long" | "rate_limited" | "not_allowed" | "too_many_retries" | "budget_exhausted" | "failed_to_start" | "session_expired" | "not_found";
   message: string;
+  client_id: string | null;
 }
 
 export interface RetrievalHit {
@@ -167,6 +180,15 @@ export interface RetrievalResult {
   embed_ms: number;
   search_ms: number;
   rerank_ms: number;
+  cost_usd: number | null;
+}
+
+/** Everything the client had missed has been sent. What follows happens now. */
+export interface SessionCaughtUp {
+  seq: number;
+  ts: number;
+  turn_id: string | null;
+  type: "session.caught_up";
 }
 
 /** The reply to a client's hello. Events after `last_seq` follow if the client missed any. */
@@ -195,7 +217,7 @@ export interface SessionState {
 
 export interface Ticket {
   id: string;
-  reason: "low_confidence" | "ungrounded_answer" | "refund_over_limit" | "account_suspended" | "verification_failed" | "billing_dispute" | "security" | "privacy_request" | "customer_request" | "step_limit" | "other";
+  reason: "low_confidence" | "ungrounded_answer" | "refund_over_limit" | "account_suspended" | "verification_failed" | "billing_dispute" | "security" | "privacy_request" | "customer_request" | "unanswered_question" | "step_limit" | "other";
   priority: "low" | "normal" | "high" | "urgent";
   summary: string;
   account_number: string | null;
@@ -224,6 +246,7 @@ export interface ToolFinished {
   outcome: "ok" | "refused" | "failed";
   summary: string;
   duration_ms: number;
+  receipt: Record<string, string> | null;
 }
 
 export interface ToolRetry {
@@ -246,6 +269,15 @@ export interface ToolStarted {
   tool_call_id: string;
   name: string;
   args: Record<string, unknown>;
+}
+
+/** The reply to `trace.get`: the prompt traces of one turn, in order. `turn_id` names the turn. */
+export interface TraceList {
+  seq: number;
+  ts: number;
+  turn_id: string | null;
+  type: "trace.list";
+  traces: LlmTrace[];
 }
 
 /** One message of a prompt or a response, with secrets masked. */
@@ -280,6 +312,9 @@ export interface TurnFinished {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
+  first_step_ms: number | null;
+  first_text_ms: number | null;
+  answer_ms: number | null;
 }
 
 /** The turn was stopped before it finished, by the client or by a server shutdown. */
@@ -289,6 +324,7 @@ export interface TurnInterrupted {
   turn_id: string | null;
   type: "turn.interrupted";
   total_ms: number;
+  resumable: boolean;
 }
 
 export interface TurnStarted {
@@ -298,10 +334,12 @@ export interface TurnStarted {
   type: "turn.started";
   mode: "text" | "voice";
   text: string;
+  client_id: string | null;
 }
 
 export type ServerEvent =
   | SessionReady
+  | SessionCaughtUp
   | ProtocolError
   | TurnStarted
   | LlmStarted
@@ -323,7 +361,9 @@ export type ServerEvent =
   | SessionState
   | TurnFinished
   | TurnFailed
-  | TurnInterrupted;
+  | TurnInterrupted
+  | TraceList
+  | PassageDetail;
 
 /** Queue a failure for the next model or tool calls of this session, to show how it recovers. The server acts on it only when fault injection is switched on in its settings. */
 export interface FaultInject {
@@ -340,6 +380,18 @@ export interface Hello {
   last_seq?: number;
 }
 
+/** Ask for the text of a help center passage. The server answers with `passage.detail`, and only for a passage that a search of this conversation handed to the model. */
+export interface PassageGet {
+  type: "passage.get";
+  chunk_id: string;
+}
+
+/** Ask for the prompt traces of one turn. The server answers with `trace.list`. */
+export interface TraceGet {
+  type: "trace.get";
+  turn_id: string;
+}
+
 /** Stop the turn that is running. The server answers with `turn.interrupted`. */
 export interface TurnCancel {
   type: "turn.cancel";
@@ -350,10 +402,12 @@ export interface TurnRetry {
   type: "turn.retry";
 }
 
+/** One customer message. The server answers each with exactly one of two things: a `turn.started` that carries the same `client_id`, or an `error` that carries it. A client that sees neither after a reconnect knows the message never arrived. */
 export interface UserMessage {
   type: "user.message";
   text: string;
   mode?: "text" | "voice";
+  client_id?: string | null;
 }
 
 export type ClientMessage =
@@ -361,4 +415,6 @@ export type ClientMessage =
   | UserMessage
   | TurnRetry
   | TurnCancel
-  | FaultInject;
+  | FaultInject
+  | TraceGet
+  | PassageGet;

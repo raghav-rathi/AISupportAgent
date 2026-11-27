@@ -18,12 +18,13 @@ LLM__BASE_URL=null. `python -m supportagent.cli.preflight` prints the models as 
 
 from __future__ import annotations
 
+import math
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/src/supportagent/config.py -> repo root. Deployments set KB_DIR instead.
@@ -57,6 +58,9 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     deepgram_api_key: SecretStr | None = None
+    # Keys the hashes of the PINs a conversation has used. See redact.session_key. Without it the
+    # hashes are salted by the session only, which is enough for mock data and not for real PINs.
+    secret_key: SecretStr | None = None
 
     llm: ModelSettings | None = None  # the model that runs the agent
     fallback: ModelSettings | None = None  # takes over when the first one fails
@@ -66,10 +70,11 @@ class Settings(BaseSettings):
 
     # How long a model call may take before it counts as failed. The defaults suit a hosted
     # model. A local model that has to load its weights first needs longer limits.
-    llm_first_token_timeout_s: float = 8.0
-    llm_stall_timeout_s: float = 10.0  # longest silence between two chunks of one stream
-    llm_total_timeout_s: float = 45.0  # one attempt
-    llm_deadline_s: float = 90.0  # one call, with its retries and its fallback
+    llm_first_token_timeout_s: float = Field(default=8.0, gt=0)
+    # Longest silence between two chunks of one stream.
+    llm_stall_timeout_s: float = Field(default=10.0, gt=0)
+    llm_total_timeout_s: float = Field(default=45.0, gt=0)  # one attempt
+    llm_deadline_s: float = Field(default=90.0, gt=0)  # one call, with retries and fallback
 
     # Store the full prompt and response of every model call for the observability drawer.
     capture_prompts: bool = True
@@ -95,21 +100,34 @@ class Settings(BaseSettings):
     # `require_origin` is set.
     allowed_origins: list[str] = []
     require_origin: bool = False
-    max_message_chars: int = 2_000
-    max_sessions: int = 200  # live sessions in this process
+    max_message_chars: int = Field(default=2_000, gt=0)
+    max_sessions: int = Field(default=200, gt=0)  # live sessions in this process
     # What one visitor may use. A new conversation costs a copy of the mock CRM, a message costs
     # model calls. The address is the socket's, or the value of a header the host's proxy sets.
-    max_new_sessions_per_hour: int = 30  # per address
-    max_turns_per_session: int = 60
+    max_new_sessions_per_hour: int = Field(default=30, gt=0)  # per address
+    max_turns_per_session: int = Field(default=60, gt=0)
+    # A turn that failed or was stopped can be picked up this many times. Every pick-up costs
+    # model calls, so without a limit one message could be run for ever.
+    max_retries_per_turn: int = Field(default=3, ge=0)
+    max_connections_per_address: int = Field(default=12, gt=0)  # open sockets at one time
+    # What every visitor together may spend on model calls in 24 hours, in dollars. At the limit
+    # no new turn starts until old spend has aged out. None means no limit of our own.
+    daily_budget_usd: float | None = Field(default=None, gt=0)
     client_address_header: str | None = None  # for example x-real-ip on Railway
     # Conversations and their CRM copies older than this are deleted, hourly. None keeps them.
-    session_ttl_hours: float | None = None
-    hello_timeout_s: float = 10.0  # how long a new connection has to say hello
+    session_ttl_hours: float | None = Field(default=None, gt=0)
+    hello_timeout_s: float = Field(default=10.0, gt=0)  # a new connection has to say hello
+    # A connection that sends nothing for this long, with no turn running, is closed. The page
+    # connects again when the visitor comes back.
+    idle_timeout_s: float = Field(default=1800.0, gt=0)
+    send_timeout_s: float = Field(default=10.0, gt=0)  # one event to one client
     # Lets a client queue simulated failures for its own session, to show how the app recovers.
     fault_injection: bool = False
 
     @model_validator(mode="after")
     def _thresholds_in_order(self) -> Self:
+        if not all(map(math.isfinite, (self.gate_low, self.gate_high, self.gate_gap))):
+            raise ValueError("GATE_LOW, GATE_HIGH and GATE_GAP must be numbers")
         if self.gate_low > self.gate_high:
             raise ValueError("GATE_LOW must not be above GATE_HIGH")
         if self.gate_gap <= 0:
