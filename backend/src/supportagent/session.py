@@ -120,6 +120,10 @@ async def run_turn(
     gets the message as typed. A caller that keeps a session open passes its `log` and `redactor`
     so both carry over from turn to turn. `client_id` is echoed in `turn.started`.
 
+    If the customer spoke over the last reply, the session holds what they had heard of it by
+    then. A new turn takes that and keeps that much of the reply in the conversation, and no
+    more. A turn that was cut off this way is not picked up again.
+
     Exactly one event ends the turn: `turn.finished`, `turn.failed` or `turn.interrupted`. It is
     stored, and the session is free again, before `on_event` sees it, so a client that reacts to
     it at once finds the session ready. A turn that stops early takes back any text it had
@@ -139,13 +143,13 @@ async def run_turn(
     before = await rt.graph.aget_state(config)
     if text is None:
         past = await log.last_turn()
-        if past is None or not before.next:
+        if past is None or not before.next or log.heard is not None:
             raise NothingToResume(session_id)
         turn_id, mode, usage, earlier_ms = past.turn_id, past.mode, past.usage, past.elapsed_ms
     else:
         text = text.replace("\x00", "")
         turn_id, usage, earlier_ms = uuid.uuid4().hex[:12], TurnUsage(), 0.0
-    await log.claim(turn_id, mode)
+    heard = await log.claim(turn_id, mode, resume=text is None)
     lease = asyncio.create_task(_keep_claim(log, turn_id, asyncio.current_task()))
     # Until the customer is verified, any number they type may be the PIN the agent asked for.
     redactor.strict = before.values.get("customer") is None
@@ -187,7 +191,7 @@ async def run_turn(
             publish(TurnStarted(mode=mode, text=text, client_id=client_id))
         try:
             async for part in rt.graph.astream(
-                user_turn(text) if text is not None else None,
+                user_turn(text, heard) if text is not None else None,
                 config,
                 context=ctx,
                 stream_mode="custom",
@@ -203,7 +207,9 @@ async def run_turn(
             )
             return False
         except asyncio.CancelledError:
-            await end(TurnInterrupted(total_ms=elapsed_ms(), resumable=await resumable()))
+            # A turn the customer spoke over is finished with: they have moved on.
+            can_resume = log.heard is None and await resumable()
+            await end(TurnInterrupted(total_ms=elapsed_ms(), resumable=can_resume))
             raise
         except Exception:
             await end(

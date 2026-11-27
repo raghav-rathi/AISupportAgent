@@ -287,6 +287,24 @@ def test_an_answer_that_never_passed_its_check_is_removed_before_the_next_turn()
     assert [type(m) for m in repaired] == [HumanMessage, AIMessage, HumanMessage]
 
 
+def test_a_reply_the_customer_spoke_over_is_kept_only_as_far_as_they_heard_it():
+    history = [
+        HumanMessage("how long?", id="h1"),
+        AIMessage("Refunds take five days. Annual plans differ.", id="a1"),
+        HumanMessage("wait", id="h2"),
+    ]
+    note = "(The customer interrupted me here and heard nothing after this.)"
+    # The reply was complete and confirmed. The same holds when its check never finished: the
+    # unconfirmed text goes, and what the customer heard of it stays.
+    for unchecked in (None, "a1"):
+        repaired = apply(history, repair(history, unchecked, "Refunds take"))
+        assert [type(m) for m in repaired] == [HumanMessage, AIMessage, HumanMessage]
+        assert [m.content for m in repaired] == ["how long?", f"Refunds take {note}", "wait"]
+    unheard = apply(history, repair(history, "a1", ""))
+    assert unheard[1].content == "(The customer interrupted before hearing any of my reply.)"
+    assert not any("Annual" in m.content for m in unheard)
+
+
 def test_a_finished_conversation_needs_no_repair():
     history = [
         HumanMessage("hi", id="h1"),

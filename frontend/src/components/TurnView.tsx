@@ -2,7 +2,7 @@ import { type ReactNode, useState } from "react";
 
 import { BAND_LABELS, FAILURE_LABELS, PLAN_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
 import type { RetrievalHit, Ticket } from "@/lib/protocol";
-import { type Passage, type Step, type ToolStep, type Turn, type TurnStatus, turnUsage } from "@/lib/state";
+import { type Passage, type Step, type ToolStep, type Turn, type TurnStatus, heardOf, totalCost, turnUsage } from "@/lib/state";
 
 import { type Cites, RichText, citedNumbers } from "./RichText";
 import { Button, Caption, Glyph, type GlyphName, Spinner, Tag } from "./ui";
@@ -223,11 +223,20 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
   };
   const cites: Cites = { valid: new Set(cited.map((hit) => hit.n)), open: openSource, onCite: toggleSource };
   const ended = status !== "running" && (turn.calls.length > 0 || turn.steps.length > 0);
+  // A spoken reply the visitor cut off: what they heard of it, which is all the assistant will
+  // assume they know. Null when the reply was not cut off.
+  const heard = heardOf(turn);
+  const cutShort = heard !== null && turn.answer !== null;
 
   return (
     <article className="flex flex-col gap-20">
-      <div className="flex justify-end">
+      <div className="flex flex-col items-end gap-4">
         <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-cards bg-obsidian-button px-20 py-12">{turn.userText}</p>
+        {turn.mode === "voice" ? (
+          <p className="flex items-center gap-4 text-caption font-w480 text-ash-text">
+            <Glyph name="mic" /> Spoken
+          </p>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-16">
@@ -252,8 +261,15 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
           </p>
         ) : null}
 
+        {cutShort ? (
+          <p className="flex items-start gap-12 text-body-sm leading-[1.45] text-ash-text">
+            <Glyph name="stop" className="mt-2" />
+            {heard ? `This reply was cut off. You heard: “${heard}”` : "This reply was cut off before any of it was said."}
+          </p>
+        ) : null}
+
         {/* The answer arrives token by token. Busy until it is whole, so it is read out once. */}
-        <div aria-live="polite" aria-busy={running && !turn.answer}>
+        <div aria-live="polite" aria-busy={running && !turn.answer} className={cutShort ? "opacity-60" : undefined}>
           {text ? <RichText text={text} caret={running && !turn.answer} cites={turn.answer ? cites : undefined} /> : null}
         </div>
 
@@ -301,7 +317,18 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
           />
         ) : null}
         {status === "interrupted" ? (
-          turn.resumable === false ? (
+          turn.mode === "voice" && turn.resumable === false ? (
+            <Stopped
+              title="Reply stopped"
+              body={
+                heard
+                  ? `You heard: “${heard}”. The rest was not said.`
+                  : "It was stopped before anything was said. What you say next carries on from here."
+              }
+              action={null}
+              onAction={onRetry}
+            />
+          ) : turn.resumable === false ? (
             <Stopped
               title="Stopped before it began"
               body="Nothing of this message was saved. Send it again if you still need an answer."
@@ -320,7 +347,7 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
 
         {ended ? (
           <button type="button" onClick={onInspect} className="-my-8 self-start rounded-md py-8 text-caption leading-[1.4] text-ash-text hover:text-ivory-text">
-            {formatMs(turn.totalMs)} · {formatCount(usage.inputTokens + usage.outputTokens)} tokens · {formatCost(usage.costUsd)} · View trace
+            {formatMs(turn.totalMs)} · {formatCount(usage.inputTokens + usage.outputTokens)} tokens · {formatCost(totalCost(usage))} · View trace
           </button>
         ) : null}
       </div>

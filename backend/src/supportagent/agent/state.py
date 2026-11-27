@@ -62,3 +62,6 @@ class AgentState(TypedDict, total=False):
     # The model call that wrote that answer: its call ID and model, for the prompt trace that is
     # written once the answer has a verdict.
     unchecked_call: dict[str, str] | None
+    # What the customer had heard of the last reply when they interrupted it by voice. It comes
+    # in with the next message, and the begin node uses it once and clears it.
+    heard: str | None

@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import type { ClientMessage, FaultInject, ServerEvent } from "./protocol";
 import { planAfterClose } from "./reconnect";
 import { type AppState, initialState, reduce } from "./state";
+import { type Levels, VoiceLink } from "./voice";
 
 const STORAGE_KEY = "fernhill.session";
 
@@ -33,6 +34,13 @@ function remember(sessionId: string | null): void {
   }
 }
 
+/** Send on a socket that is open. False when it is not, and then nothing was sent. */
+function transmit(ws: WebSocket | null, data: string | ArrayBuffer): boolean {
+  if (ws?.readyState !== WebSocket.OPEN) return false;
+  ws.send(data);
+  return true;
+}
+
 /** An ID for one message. The server answers the message under it. */
 function messageId(): string {
   return typeof crypto.randomUUID === "function"
@@ -55,6 +63,15 @@ export interface Session {
   requestTraces(turnId: string): void;
   /** Ask for the text of a passage that a search of this conversation returned. */
   requestPassage(chunkId: string): void;
+  voice: {
+    /** Turn the microphone on. The browser may ask the visitor first. */
+    start(): void;
+    stop(): void;
+    /** Stop the reply that is being spoken, or about to be. */
+    interrupt(): void;
+    mic: Levels; // what the microphone picks up, for drawing
+    out: Levels; // what is being played
+  };
 }
 
 /**
@@ -71,6 +88,9 @@ export function useSession(): Session {
   // How to connect again while no connection is open or due. `auto` says whether the visitor
   // coming back to the tab is reason enough, or whether they have to ask.
   const wake = useRef<{ go: () => void; auto: boolean } | null>(null);
+  // One link between the audio and the server for the life of the page. Each connection is
+  // handed to it as it opens.
+  const [voice] = useState(() => new VoiceLink(dispatch));
 
   const startOver = useCallback(() => {
     remember(null);
@@ -91,6 +111,7 @@ export function useSession(): Session {
       const ws = new WebSocket(socketUrl());
       ws.binaryType = "arraybuffer";
       socket.current = ws;
+      voice.use(ws);
       // A socket that was replaced still delivers what was in flight. None of it may touch the
       // cursor, the stored ID or the state of the conversation that replaced it.
       const current = () => !stopped && socket.current === ws;
@@ -101,7 +122,11 @@ export function useSession(): Session {
         ws.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seq: lastSeq }));
       };
       ws.onmessage = (message) => {
-        if (!current() || typeof message.data !== "string") return; // binary frames are audio
+        if (!current()) return;
+        if (typeof message.data !== "string") {
+          voice.play(message.data as ArrayBuffer); // a binary frame is the reply's audio
+          return;
+        }
         let event: ServerEvent;
         try {
           event = JSON.parse(message.data) as ServerEvent;
@@ -117,12 +142,15 @@ export function useSession(): Session {
         } else if (event.seq > cursor.current.lastSeq) {
           cursor.current.lastSeq = event.seq;
         }
+        voice.handle(event);
         dispatch({ type: "event", event });
         if (event.type === "error" && event.code === "session_expired") startOver();
       };
       ws.onclose = (closed) => {
         if (!current()) return;
         socket.current = null;
+        voice.dropped();
+        voice.use(null);
         const plan = planAfterClose(closed.code, attempt);
         attempt += 1;
         if (plan.kind === "restart") {
@@ -164,17 +192,14 @@ export function useSession(): Session {
       wake.current = null;
       window.clearTimeout(timer);
       for (const sign of signs) window.removeEventListener(sign, onBack);
+      voice.stop();
+      voice.use(null);
       socket.current?.close();
       socket.current = null;
     };
-  }, [generation, startOver]);
+  }, [generation, startOver, voice]);
 
-  const send = useCallback((message: ClientMessage): boolean => {
-    const ws = socket.current;
-    if (ws?.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(message));
-    return true;
-  }, []);
+  const send = useCallback((message: ClientMessage): boolean => transmit(socket.current, JSON.stringify(message)), []);
 
   const say = useCallback(
     (text: string): boolean => {
@@ -222,5 +247,16 @@ export function useSession(): Session {
     [send],
   );
 
-  return { state, say, retry, cancel, inject, startOver, dismiss, reconnect, requestTraces, requestPassage };
+  const speech = useMemo(
+    () => ({
+      start: () => void voice.start(),
+      stop: () => voice.stop(),
+      interrupt: () => voice.interrupt(),
+      mic: voice.mic,
+      out: voice.out,
+    }),
+    [voice],
+  );
+
+  return { state, say, retry, cancel, inject, startOver, dismiss, reconnect, requestTraces, requestPassage, voice: speech };
 }

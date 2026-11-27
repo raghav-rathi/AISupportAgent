@@ -48,6 +48,7 @@ from supportagent.agent.tickets import open_ticket, question_only, recent_custom
 from supportagent.agent.tools import CAPABILITIES, TOOLS, was_forgotten
 from supportagent.crm import policy
 from supportagent.events import (
+    AnswerDrafted,
     AnswerRetracted,
     AssistantMessage,
     EscalationCreated,
@@ -65,6 +66,11 @@ from supportagent.llm.trace import trace_prompt
 from supportagent.redact import scrub_messages
 
 _HAND_OFF = "I've passed your question to a specialist as ticket {ticket}. They will follow up."
+# Spoken, a ticket ID is ten seconds of letters and digits. The customer has it on screen.
+_HAND_OFF_SPOKEN = (
+    "I've passed your question to a specialist, and they will follow up. "
+    "The ticket number is on your screen."
+)
 _ESCALATION_TEXT = {
     "low_confidence": "I can't answer that from the Fernhill help center, and I won't guess. "
     + _HAND_OFF,
@@ -73,15 +79,30 @@ _ESCALATION_TEXT = {
     "step_limit": "This needs more steps than I can take here, so I've passed it to a specialist "
     "as ticket {ticket}. They will follow up.",
 }
+_ESCALATION_SPOKEN = {
+    "low_confidence": "I can't answer that from the Fernhill help center, and I won't guess. "
+    + _HAND_OFF_SPOKEN,
+    "ungrounded_answer": "I need to take that back. I couldn't confirm it against the Fernhill "
+    "help center. " + _HAND_OFF_SPOKEN,
+    "step_limit": "This needs more steps than I can take here. " + _HAND_OFF_SPOKEN,
+}
 # Added to an answer that stands and that says the help center has no answer to something.
 _FOLLOW_UP = "I've passed this to a specialist as ticket {ticket}. They will follow up."
+_FOLLOW_UP_SPOKEN = "I've passed this to a specialist, and they will follow up. The ticket number is on your screen."
 # For an answer taken back in a turn that had already opened a ticket.
 _ALREADY_WITH_A_PERSON = (
     "I need to take that back. I couldn't confirm it against the Fernhill help center. "
     "Your case is already with a specialist as ticket {ticket}. They will follow up."
 )
+_ALREADY_WITH_A_PERSON_SPOKEN = (
+    "I need to take that back. I couldn't confirm it against the Fernhill help center. "
+    "Your case is already with a specialist, and they will follow up."
+)
 # What the model reads in place of a reply the customer never got. The customer does not see it.
 _INTERRUPTED = "(The previous request was interrupted before I could reply.)"
+# The same for a reply the customer cut off by speaking over it. They heard its beginning.
+_CUT_OFF = "(The customer interrupted me here and heard nothing after this.)"
+_UNHEARD = "(The customer interrupted before hearing any of my reply.)"
 # Tools that change something. If a turn runs out of steps, the customer is told which of them ran.
 _ACTIONS = frozenset({"issue_refund", "update_account_field"})
 
@@ -132,13 +153,25 @@ def _turn_start(messages: Sequence[AnyMessage]) -> int:
     return max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=0)
 
 
-def repair(messages: Sequence[AnyMessage], unchecked: str | None) -> list[AnyMessage]:
+def _as_heard(heard: str) -> str:
+    """A reply as far as the customer heard it, for the model to read."""
+    said = heard.strip()
+    return f"{said} {_CUT_OFF}" if said else _UNHEARD
+
+
+def repair(
+    messages: Sequence[AnyMessage], unchecked: str | None, heard: str | None = None
+) -> list[AnyMessage]:
     """Updates that make the stored conversation valid again when a new turn starts.
 
     A turn can stop anywhere: every model down, a crash, a request cancelled by the customer. It
     may leave a tool call without a result, which hosted models reject, a tool result or a
     question with no reply after it, or an answer that never passed its grounding check and that
     the customer never got. `messages` ends with the new customer message.
+
+    `heard` is set when the customer spoke over the last reply: it is what they had heard of it
+    by then. The conversation keeps that much. Whatever came after it was never said, and a
+    model that read the full reply would assume the customer knows things they were not told.
     """
     if not messages or not isinstance(messages[-1], HumanMessage):
         return []
@@ -168,7 +201,11 @@ def repair(messages: Sequence[AnyMessage], unchecked: str | None) -> list[AnyMes
     if last is not None and not (isinstance(last, AIMessage) and not last.tool_calls):
         # The turn before this one ended without a reply. The note goes where the reply would be,
         # which means taking the new message out and putting it back after the note.
-        updates += [RemoveMessage(id=new.id), AIMessage(_INTERRUPTED), HumanMessage(new.content)]
+        note = _INTERRUPTED if heard is None else _as_heard(heard)
+        updates += [RemoveMessage(id=new.id), AIMessage(note), HumanMessage(new.content)]
+    elif last is not None and heard is not None:
+        # The reply was complete and approved, and the customer stopped listening part way.
+        updates.append(last.model_copy(update={"content": _as_heard(heard)}))
     return updates
 
 
@@ -181,8 +218,9 @@ async def begin(state: AgentState) -> dict[str, Any]:
         "tickets_before": len(state.get("tickets") or []),
         "unchecked": None,
         "unchecked_call": None,
+        "heard": None,
     }
-    repairs = repair(state.get("messages") or [], state.get("unchecked"))
+    repairs = repair(state.get("messages") or [], state.get("unchecked"), state.get("heard"))
     if repairs:
         update["messages"] = repairs
     return update
@@ -381,6 +419,13 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
     final = AssistantMessage(text=text, held=held, hits=hits)
     asked = recent_customer_texts(state["messages"], ctx.redactor)
     done = {"unchecked": None, "unchecked_call": None}
+    spoken = ctx.mode == "voice"
+    if text:
+        # From here on the text is known to be the answer and not something said on the way to a
+        # tool call. Voice waits for exactly this before it says a word of it.
+        emit(
+            AnswerDrafted(call_id=(state.get("unchecked_call") or {}).get("call_id", ""), held=held)
+        )
 
     def trace_answer(approved: bool) -> None:
         """The trace of the agent call that wrote this answer, rebuilt from the saved state."""
@@ -489,7 +534,8 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
             summary=f"The help center has no answer to: {question_only(asked[-1]) if asked else ''}",
         )
         emit(EscalationCreated(ticket=ticket))
-        text = f"{text} {_FOLLOW_UP.format(ticket=ticket.id)}"
+        follow_up = _FOLLOW_UP_SPOKEN if spoken else _FOLLOW_UP.format(ticket=ticket.id)
+        text = f"{text} {follow_up}"
         emit(final.model_copy(update={"text": text}))
         stored = answer.model_copy(update={"content": ctx.redactor.text(text)})
         return {
@@ -536,9 +582,14 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
     reason = request["reason"]
     opened = (state.get("tickets") or [])[state.get("tickets_before", 0) :]
     new_tickets: list[dict[str, Any]] = []
+    spoken = runtime.context.mode == "voice"
     if reason == "ungrounded_answer" and opened:
         # A tool already handed this turn to a person. A second ticket would only be noise.
-        text = _ALREADY_WITH_A_PERSON.format(ticket=Ticket(**opened[-1]).id)
+        text = (
+            _ALREADY_WITH_A_PERSON_SPOKEN
+            if spoken
+            else _ALREADY_WITH_A_PERSON.format(ticket=Ticket(**opened[-1]).id)
+        )
     else:
         ticket = await open_ticket(
             runtime.context,
@@ -549,7 +600,11 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
         )
         runtime.stream_writer(EscalationCreated(ticket=ticket))
         new_tickets = [ticket.model_dump()]
-        text = _ESCALATION_TEXT[reason].format(ticket=ticket.id)
+        text = (
+            _ESCALATION_SPOKEN[reason]
+            if spoken
+            else _ESCALATION_TEXT[reason].format(ticket=ticket.id)
+        )
     # Whatever ends the turn here, an action that went through stays done. The customer has to
     # hear of it: a refund that was issued and never mentioned would be asked for again.
     done = _done_this_turn(state)
@@ -582,6 +637,10 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
     return builder.compile(checkpointer=checkpointer)
 
 
-def user_turn(text: str) -> dict[str, Any]:
-    """The graph input for one customer message."""
-    return {"messages": [HumanMessage(text)]}
+def user_turn(text: str, heard: str | None = None) -> dict[str, Any]:
+    """The graph input for one customer message.
+
+    `heard` is what the customer had heard of the last reply when they spoke over it. See
+    `repair`.
+    """
+    return {"messages": [HumanMessage(text)], "heard": heard}

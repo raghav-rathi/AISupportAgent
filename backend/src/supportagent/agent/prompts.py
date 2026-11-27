@@ -50,9 +50,14 @@ search and do not open a ticket for them.
 
 Style: short, plain sentences. No preamble.{voice}"""
 
+# Appended for a spoken reply. The voice reads numbers, amounts and dates by itself. What it
+# cannot do is read a list or an ID well: "RF-62DE7E85" takes it ten seconds.
 _VOICE = (
-    " Your reply is spoken aloud: no lists, no markdown and no bracketed numbers. "
-    "Say amounts and dates in words."
+    " Your reply is spoken aloud, so write it to be heard: plain sentences, no lists, no "
+    "markdown and no bracketed numbers. Two or three sentences, unless the customer asks for "
+    "more. Do not read out invoice numbers, refund IDs or ticket IDs unless the customer asks "
+    "for them: they are on the customer's screen. The customer's words reach you through "
+    "speech recognition, so a number may arrive as words or with spaces between its digits."
 )
 
 _OMITTED = '{"results": "omitted from an earlier turn. Search again if you need them."}'

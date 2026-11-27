@@ -2272,6 +2272,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -2301,6 +2302,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14.4" },
     { name = "pydantic-settings", specifier = ">=2.16.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+    { name = "websockets", specifier = ">=17" },
 ]
 
 [package.metadata.requires-dev]

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { type DemoAccount, credentials } from "@/lib/demo";
 import { useSession } from "@/lib/session";
@@ -9,6 +9,7 @@ import { Composer, type Incoming } from "./Composer";
 import { Conversation } from "./Conversation";
 import { Drawer } from "./Drawer";
 import { TopBar } from "./TopBar";
+import { VoicePanel } from "./VoicePanel";
 import { Button, Glyph } from "./ui";
 
 /** True on a screen too narrow for the drawer to sit beside the conversation. */
@@ -51,6 +52,23 @@ export function App() {
   };
   const pickAccount = (account: DemoAccount) => setPicked((before) => ({ text: credentials(account), n: (before?.n ?? 0) + 1 }));
   const overlay = drawerOpen && narrow; // the drawer covers the conversation
+  const voice = state.voice;
+  const speech = session.voice;
+  const voiceOn = voice.status !== "off";
+  // While voice is on, the space bar stops the reply, wherever the keyboard is not typing or
+  // pressing something else.
+  useEffect(() => {
+    if (!voiceOn) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, textarea, select, button, a, summary, [role='tab'], [contenteditable='true']")) return;
+      event.preventDefault();
+      speech.interrupt();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [voiceOn, speech]);
 
   return (
     <div className="flex h-dvh flex-col bg-onyx-canvas text-ivory-text">
@@ -99,6 +117,14 @@ export function App() {
               </div>
             </div>
           ) : null}
+          <VoicePanel
+            voice={voice}
+            mic={speech.mic}
+            out={speech.out}
+            onInterrupt={speech.interrupt}
+            onEnd={speech.stop}
+            onDismiss={session.dismiss}
+          />
           <Composer
             ready={online && !state.busy && state.pending === null}
             busy={online && state.busy}
@@ -107,6 +133,7 @@ export function App() {
             restored={state.draft}
             picked={picked}
             onAccount={pickAccount}
+            voice={voice.offered ? { on: voiceOn, ready: online, onToggle: voiceOn ? speech.stop : speech.start } : null}
           />
         </main>
         {drawerOpen ? (

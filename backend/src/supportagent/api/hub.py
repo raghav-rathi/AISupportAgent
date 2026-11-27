@@ -15,7 +15,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -28,6 +28,9 @@ from supportagent.llm import faults as presets
 from supportagent.llm.faults import MAX_PENDING, FaultPlan
 from supportagent.runtime import Runtime
 from supportagent.session import NothingToResume, can_resume, ensure_world, run_turn
+
+if TYPE_CHECKING:
+    from supportagent.voice.session import VoiceSession
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +46,18 @@ class TooManyClients(Exception):
 
 
 class Subscription:
-    """One client's view of a hub: a bounded queue of events."""
+    """One client's view of a hub: a bounded queue of events.
+
+    The connection that has the microphone also gets the reply's audio through this queue, as
+    bytes, so that audio and the messages about it reach the client in the order they were
+    made.
+    """
 
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[BaseModel] = asyncio.Queue(maxsize=_MAX_LAG)
+        self.queue: asyncio.Queue[BaseModel | bytes] = asyncio.Queue(maxsize=_MAX_LAG)
         self.lost = False  # the client fell too far behind and missed events
 
-    def offer(self, event: BaseModel) -> None:
+    def offer(self, event: BaseModel | bytes) -> None:
         if self.lost:
             return
         try:
@@ -61,9 +69,12 @@ class Subscription:
             self.drain()
 
     def drain(self) -> list[BaseModel]:
+        """Take out what is queued. Returns the events among it: audio is of no use later."""
         waiting = []
         while not self.queue.empty():
-            waiting.append(self.queue.get_nowait())
+            item = self.queue.get_nowait()
+            if not isinstance(item, bytes):
+                waiting.append(item)
         return waiting
 
 
@@ -83,6 +94,11 @@ class SessionHub:
         self._on_idle = on_idle
         self._turn_events: list[BaseModel] = []  # the turn in flight, deltas included
         self._subscribers: set[Subscription] = set()
+        # Code in this process that follows the session's events as they happen: voice.
+        self._listeners: list[Callable[[BaseModel], None]] = []
+        self.voice: VoiceSession | None = None  # while this session has the microphone on
+        self.speech_down = 0  # simulated failures of the speech service that are still to come
+        self.greeted = False  # the voice has said hello in this conversation
         self._task: asyncio.Task[None] | None = None
         self._working = False  # the task of the last turn has not returned yet
 
@@ -102,9 +118,39 @@ class SessionHub:
             self._turn_events.append(event)
         for subscriber in self._subscribers:
             subscriber.offer(event)
+        for listener in list(self._listeners):
+            listener(event)
+
+    def listen(self, listener: Callable[[BaseModel], None]) -> Callable[[], None]:
+        """Call `listener` with every event from now on. Returns the way to stop that."""
+        self._listeners.append(listener)
+
+        def stop() -> None:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+            self._on_idle(self)
+
+        return stop
+
+    async def record(self, event: BaseModel, turn_id: str | None) -> BaseModel:
+        """Number, store and send an event that no running turn emits: what voice measured.
+
+        The store gets it at once. Events of a running turn that were waiting are written along
+        with it, which changes nothing for them.
+        """
+        stamped = self.log.stamp(self.redactor.event(event), turn_id)
+        for subscriber in self._subscribers:
+            subscriber.offer(stamped)
+        for listener in list(self._listeners):
+            listener(stamped)
+        await self.log.save(self.redactor)
+        return stamped
 
     def start_turn(
-        self, text: str | None, mode: Literal["text", "voice"], client_id: str | None = None
+        self,
+        text: str | None,
+        mode: Literal["text", "voice"],
+        client_id: str | None = None,
     ) -> bool:
         """Start a turn in the background. `text` None resumes one that stopped early.
 
@@ -199,7 +245,9 @@ class SessionHub:
 
     async def resumable(self) -> bool:
         """True when the last turn stopped early and `turn.retry` would pick it up."""
-        return not self.busy and await can_resume(self.rt, self.session_id)
+        return (
+            not self.busy and self.log.heard is None and await can_resume(self.rt, self.session_id)
+        )
 
     async def retries_used(self) -> int:
         """How often the last turn has failed or been stopped so far."""
@@ -221,6 +269,18 @@ class SessionHub:
         if self.busy and not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+    async def interrupt_turn(self, heard: str) -> None:
+        """Stop the reply the customer spoke over, and keep of it what they heard.
+
+        `heard` is the part of the reply that had been played to them, which may be nothing.
+        A turn that is still running is cancelled, and this returns once it is stored and the
+        session is free. The next turn, spoken or typed, puts `heard` into the conversation in
+        place of the full reply, so the model does not assume the customer knows what they
+        were never told. The turn that was cut off is not offered for picking up again.
+        """
+        await self.log.keep_heard(heard)
+        await self.stop()
 
     async def attach(self, last_seq: int) -> tuple[list[BaseModel], Subscription, int]:
         """Subscribe a client. Returns what it missed, its subscription, and the stream's position.
@@ -251,14 +311,21 @@ class SessionHub:
 
     @property
     def idle(self) -> bool:
-        return not self.busy and not self._working and not self._subscribers
+        return not self.busy and not self._working and not self._subscribers and not self._listeners
 
     def inject(self, request: FaultInject) -> bool:
         """Queue simulated failures for this session's next calls. False when the request is bad.
 
         Faults live in this session only, and each queue has a cap.
         """
-        if request.kind == "tool_failure":
+        if request.kind == "speech_down":
+            # Voice that is on drops out now. Otherwise the next attempts to turn it on fail.
+            times = request.times
+            if self.voice is not None:
+                self.voice.fail("simulated failure")
+                times -= 1
+            self.speech_down = min(MAX_PENDING, self.speech_down + times)
+        elif request.kind == "tool_failure":
             name = request.tool or "search_knowledge_base"
             if name not in TOOL_NAMES:
                 return False
@@ -349,4 +416,9 @@ class Hubs:
 
     async def close(self) -> None:
         """Stop every running turn and wait until each has been stored. For shutdown."""
-        await asyncio.gather(*(hub.stop() for hub in list(self._hubs.values())))
+        hubs = list(self._hubs.values())
+        await asyncio.gather(
+            *(hub.voice.stop("error", "the server is restarting") for hub in hubs if hub.voice),
+            return_exceptions=True,
+        )
+        await asyncio.gather(*(hub.stop() for hub in hubs))

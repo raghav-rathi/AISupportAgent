@@ -214,8 +214,7 @@ async def test_bad_messages_are_refused_and_the_connection_survives(serve):
     client = await Client.open(address)
     await client.ws.send("this is not json")
     assert (await client.next())["code"] == "bad_message"
-    await client.ws.send(b"\x00\x01 audio, one day")
-    assert (await client.next())["code"] == "bad_message"
+    await client.ws.send(b"\x00\x01 audio")  # with no voice on, dropped without a word
     await client.say("x" * 500)
     assert (await client.next())["code"] == "too_long"
     await client.send(type="turn.retry")
@@ -665,6 +664,9 @@ async def test_the_budget_adds_up_model_calls_and_hosted_searches(pool, world):
             (3, "llm.finished", "null"),
             (4, "retrieval.result", "null"),
             (5, "tool.finished", "9"),
+            (6, "speech.heard", "0.01"),
+            (7, "speech.spoken", "0.02"),
+            (8, "voice.usage", "0.03"),
         ):
             await conn.execute(
                 "INSERT INTO session_events (session_id, seq, type, payload) VALUES (%s, %s, %s, %s::jsonb)",
@@ -672,8 +674,8 @@ async def test_the_budget_adds_up_model_calls_and_hosted_searches(pool, world):
             )
     budget = Budget(pool, 0.7)
     # A model call without a price still counts for something. A search that named no cost ran
-    # on a local model and counts for nothing.
-    assert await budget.spent() - before == pytest.approx(0.5 + 0.25 + 0.002)
+    # on a local model and counts for nothing. Speech counts with what it reports.
+    assert await budget.spent() - before == pytest.approx(0.5 + 0.25 + 0.002 + 0.06)
     assert await budget.exhausted()
     assert not await Budget(pool, None).exhausted()
 

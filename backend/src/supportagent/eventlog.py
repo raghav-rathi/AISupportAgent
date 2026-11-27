@@ -17,6 +17,7 @@ does not own, and two instances that overlap during a deploy cannot both write o
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -95,6 +96,7 @@ class EventLog:
         *,
         secret_hashes: list[str] | None = None,
         owner: str = INSTANCE,
+        heard: str | None = None,
     ) -> None:
         self._pool = pool
         self.session_id = session_id
@@ -102,7 +104,14 @@ class EventLog:
         self.last_seq = last_seq
         self.secret_hashes = list(secret_hashes or [])  # see redact.Redactor.hashes
         self.owner = owner
+        # What the customer had heard of the last reply when they spoke over it, until a turn
+        # has put it into the conversation. See `keep_heard`.
+        self.heard = heard
         self._unsaved: list[BaseModel] = []
+        # One save at a time. A turn saves at its end, and voice stores events of its own while
+        # a turn may be running: two saves that overlap would each drop the other's events from
+        # the queue.
+        self._saving = asyncio.Lock()
 
     @classmethod
     async def open(
@@ -120,7 +129,7 @@ class EventLog:
             )
             cur = await conn.execute(
                 "UPDATE sessions SET last_active_at = now() WHERE id = %s "
-                "RETURNING world_id, last_seq, secret_hashes",
+                "RETURNING world_id, last_seq, secret_hashes, heard",
                 (session_id,),
             )
             row = await cur.fetchone()
@@ -131,6 +140,7 @@ class EventLog:
             row["last_seq"],
             secret_hashes=row["secret_hashes"],
             owner=owner,
+            heard=row["heard"],
         )
 
     @property
@@ -148,7 +158,7 @@ class EventLog:
             )
             return (await cur.fetchone())["n"]
 
-    def stamp(self, event: BaseModel, turn_id: str) -> BaseModel:
+    def stamp(self, event: BaseModel, turn_id: str | None) -> BaseModel:
         """Give the event its place in the stream. Call `save` before the turn is over."""
         self.last_seq += 1
         stamped = event.model_copy(
@@ -167,6 +177,10 @@ class EventLog:
         with this write, if this process still owns it. Events stay queued until the write has
         committed, so a failed save loses nothing and the next one writes them.
         """
+        async with self._saving:
+            await self._save(redactor, release)
+
+    async def _save(self, redactor: Redactor | None, release: str | None) -> None:
         batch = list(self._unsaved)
         rows = []
         for event in batch:
@@ -235,20 +249,38 @@ class EventLog:
             )
             return await cur.fetchone() is not None
 
-    async def claim(self, turn_id: str, mode: str) -> None:
+    async def keep_heard(self, text: str) -> None:
+        """Note what the customer had heard of the last reply when they spoke over it.
+
+        `text` may be empty: they heard none of it. The next new turn takes the note, see
+        `claim`. Until then the turn that was cut off cannot be picked up again.
+        """
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET heard = %s WHERE id = %s", (text, self.session_id)
+            )
+        self.heard = text
+
+    async def claim(self, turn_id: str, mode: str, *, resume: bool = False) -> str | None:
         """Mark the session as running this turn, owned by this process.
+
+        Returns what `keep_heard` noted, and clears it: the turn that starts now puts it into
+        the conversation. With `resume` the claim is for a turn that is being picked up
+        again, and the note stays where it is.
 
         Raises TurnInProgress when another turn holds a live claim, and SessionGone when the
         session has been deleted.
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE sessions SET turn_id = %s, turn_mode = %s, turn_running = true, "
+                "UPDATE sessions s SET turn_id = %s, turn_mode = %s, turn_running = true, "
                 "turn_started_at = now(), turn_owner = %s, turn_heartbeat_at = now(), "
-                "last_active_at = now() WHERE id = %s AND (NOT turn_running "
-                "OR turn_heartbeat_at IS NULL "
-                "OR turn_heartbeat_at < now() - make_interval(secs => %s)) RETURNING last_seq",
-                (turn_id, mode, self.owner, self.session_id, LEASE_S),
+                "last_active_at = now(), heard = CASE WHEN %s THEN s.heard END "
+                "FROM (SELECT id, heard FROM sessions WHERE id = %s FOR UPDATE) old "
+                "WHERE s.id = old.id AND (NOT s.turn_running OR s.turn_heartbeat_at IS NULL "
+                "OR s.turn_heartbeat_at < now() - make_interval(secs => %s)) "
+                "RETURNING s.last_seq, old.heard",
+                (turn_id, mode, self.owner, resume, self.session_id, LEASE_S),
             )
             row = await cur.fetchone()
             if row is None:
@@ -258,6 +290,10 @@ class EventLog:
                 raise TurnInProgress(self.session_id)
         # Another process may have run turns on this session since this log was opened.
         self.last_seq = max(self.last_seq, row["last_seq"])
+        if resume:
+            return None
+        self.heard = None
+        return row["heard"]
 
     async def renew(self, turn_id: str) -> bool:
         """Renew this process's claim on the turn. False when the claim is no longer ours."""

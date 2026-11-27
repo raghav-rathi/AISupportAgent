@@ -22,6 +22,8 @@ interface Props {
   restored: Incoming | null; // a message the server never took: it goes back into the field
   picked: Incoming | null; // credentials of a demo account, chosen here or elsewhere on the page
   onAccount: (account: DemoAccount) => void;
+  /** The microphone, when the server offers voice: whether it is on, and how to switch it. */
+  voice: { on: boolean; ready: boolean; onToggle: () => void } | null;
 }
 
 function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
@@ -79,7 +81,7 @@ function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
   );
 }
 
-export function Composer({ ready, busy, onSend, onStop, restored, picked, onAccount }: Props) {
+export function Composer({ ready, busy, onSend, onStop, restored, picked, onAccount, voice }: Props) {
   const [text, setText] = useState("");
   const field = useRef<HTMLTextAreaElement>(null);
   const sendable = ready && text.trim().length > 0;
@@ -149,6 +151,19 @@ export function Composer({ ready, busy, onSend, onStop, restored, picked, onAcco
           }}
           className="max-h-168 min-h-40 flex-1 resize-none bg-transparent py-8 text-body placeholder:text-ash-text focus:outline-none"
         />
+        {voice ? (
+          <Button
+            variant={voice.on ? "surface" : "quiet"}
+            aria-pressed={voice.on}
+            aria-label={voice.on ? "Turn voice off" : "Talk instead of typing"}
+            disabled={!voice.ready}
+            onClick={voice.onToggle}
+            className="max-sm:w-40 max-sm:px-0"
+          >
+            <Glyph name="mic" />
+            <span className="max-sm:hidden">{voice.on ? "Voice on" : "Voice"}</span>
+          </Button>
+        ) : null}
         {busy ? (
           <Button variant="surface" onClick={onStop}>
             <Glyph name="stop" /> Stop

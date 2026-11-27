@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ServerEvent } from "./protocol";
-import { type AppState, initialState, reduce, sessionUsage, shownStatus, tracesAreStale, turnUsage } from "./state";
+import { type AppState, heardOf, initialState, reduce, sessionUsage, shownStatus, totalCost, tracesAreStale, turnUsage } from "./state";
 
 /** Feeds events to the reducer, numbering them as the server would. */
 class Stream {
@@ -26,6 +26,7 @@ class Stream {
       busy: false,
       resumable: false,
       fault_injection: false,
+      voice: false,
       ...extra,
     });
   }
@@ -387,5 +388,79 @@ describe("what is fetched on request", () => {
     expect([s.state.passages.b, s.state.notice]).toEqual(["missing", null]);
     s.state = reduce(s.state, { type: "looked", chunkId: "a" });
     expect(s.state.passages.a).toMatchObject({ content: "14 days." }); // not reset to loading
+  });
+});
+
+const spokenTurn = (text = "How long?") => ({ type: "turn.started", mode: "voice", text, client_id: null });
+const heardSpeech = { type: "speech.heard", speech_ms: 900, end_of_turn_ms: 400, confidence: 0.8, trigger: "model", digit_mode: false, listened_s: 6, cost_usd: 0.0006 };
+const spokenReply = (more: Record<string, unknown> = {}) => ({
+  type: "speech.spoken",
+  chars: 40,
+  audio_ms: 3000,
+  synthesis_ms: 150,
+  voice_to_voice_ms: 1200,
+  interrupted: false,
+  played_ms: null,
+  text_spoken: null,
+  cost_usd: 0.0018,
+  ...more,
+});
+const direct = (event: Record<string, unknown>) => ({ seq: 0, ts: 0, turn_id: null, ...event }) as ServerEvent;
+
+describe("voice", () => {
+  it("is on only once the server says so, and a new connection starts without it", () => {
+    const s = new Stream().ready("s1", { voice: true });
+    expect(s.state.voice).toMatchObject({ offered: true, status: "off" });
+    s.state = reduce(s.state, { type: "voice", status: "starting", bargeIn: false });
+    expect(s.state.voice).toMatchObject({ status: "starting", bargeIn: false });
+    s.raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 }));
+    s.raw(direct({ type: "voice.state", state: "hearing" })).raw(direct({ type: "stt.partial", text: "How lo" }));
+    expect(s.state.voice).toMatchObject({ status: "on", activity: "hearing", partial: "How lo" });
+    s.send("t1", spokenTurn());
+    expect(s.state.voice.partial).toBe(""); // the words are the turn's message now
+    s.drop().ready("s1", { voice: true });
+    expect(s.state.voice).toMatchObject({ offered: true, status: "off", activity: null });
+  });
+
+  it("says why it went off when the visitor did not turn it off", () => {
+    const s = new Stream().ready("s1", { voice: true }).raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 }));
+    s.raw(direct({ type: "voice.stopped", reason: "idle", message: "voice turned off after a while of silence" }));
+    expect(s.state.voice).toMatchObject({ status: "off", notice: "voice turned off after a while of silence" });
+    s.raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 })).raw(direct({ type: "voice.stopped", reason: "client", message: "" }));
+    expect(s.state.voice.notice).toBeNull();
+    // Asked for and refused: the reason is voice's own, and no message of the visitor's is in doubt.
+    s.state = reduce(s.state, { type: "voice", status: "starting" });
+    s.refuse("voice_unavailable");
+    expect([s.state.voice.status, s.state.voice.notice, s.state.notice]).toEqual(["off", "no", null]);
+  });
+
+  it("does not take a reply's audio ending for a turn that is running", () => {
+    const s = new Stream().ready().send("t1", spokenTurn()).send("t1", heardSpeech).send("t1", message("Fourteen days.")).send("t1", finished());
+    s.send("t1", spokenReply());
+    expect([s.turn.status, s.state.busy, s.canSend]).toEqual(["answered", false, true]);
+    expect(heardOf(s.turn)).toBeNull(); // heard to the end
+    const usage = turnUsage(s.turn);
+    expect(usage.speechUsd).toBeCloseTo(0.0024);
+    expect(totalCost(usage)).toBeCloseTo(0.0034);
+  });
+
+  it("keeps a reply the visitor spoke over as stopped, with what they heard of it", () => {
+    const s = new Stream().ready().send("t1", spokenTurn()).send("t1", delta("Refunds take five days."));
+    s.send("t1", interrupted(false)).send("t1", spokenReply({ interrupted: true, played_ms: 600, text_spoken: "Refunds take" }));
+    expect([s.turn.status, s.state.busy, s.state.resumable]).toEqual(["interrupted", false, false]);
+    expect(heardOf(s.turn)).toBe("Refunds take");
+    // A reply that was complete on screen and cut off in the ear keeps its text and says so.
+    s.send("t2", spokenTurn("And annual?")).send("t2", message("Thirty days. Anything else?")).send("t2", finished());
+    s.send("t2", spokenReply({ interrupted: true, played_ms: 0, text_spoken: "" }));
+    expect([s.turn.answer?.text, heardOf(s.turn)]).toEqual(["Thirty days. Anything else?", ""]);
+  });
+
+  it("counts speech that belongs to no turn for the session, once", () => {
+    const s = new Stream().ready();
+    const greeting = { seq: 1, ts: 1, ...spokenReply({ cost_usd: 0.003 }), turn_id: null } as ServerEvent;
+    s.raw(greeting).raw(greeting); // the second is a replay of the first
+    s.raw({ seq: 2, ts: 2, turn_id: null, type: "voice.usage", listened_s: 60, cost_usd: 0.0065 } as ServerEvent);
+    expect(sessionUsage(s.state.turns, s.state.speechUsd).speechUsd).toBeCloseTo(0.0095);
+    expect(s.state.busy).toBe(false);
   });
 });

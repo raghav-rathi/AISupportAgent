@@ -2,7 +2,19 @@ import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 
 
 import { BAND_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
 import type { FaultInject, LlmTrace, RetrievalResult, TraceMessage } from "@/lib/protocol";
-import { type AppState, type ModelCall, type Passage, type Turn, type TurnStatus, sessionUsage, shownStatus, tracesAreStale, turnUsage } from "@/lib/state";
+import {
+  type AppState,
+  type ModelCall,
+  type Passage,
+  type Turn,
+  type TurnStatus,
+  heardOf,
+  sessionUsage,
+  shownStatus,
+  totalCost,
+  tracesAreStale,
+  turnUsage,
+} from "@/lib/state";
 
 import { Button, Caption, Glyph, Spinner, Tag } from "./ui";
 
@@ -179,6 +191,48 @@ function Retrieval({ result, passages, onPassage }: { result: RetrievalResult; p
   );
 }
 
+const END_OF_TURN: Record<string, string> = {
+  model: "the recogniser judged the sentence finished",
+  timeout: "ended by silence",
+  manual: "ended by the app",
+};
+
+/** A spoken turn: where the time went between the last word and the first sound, and what speech cost. */
+function VoiceSection({ turn }: { turn: Turn }) {
+  const heard = turn.heard;
+  const first = turn.spoken[0];
+  const firstToken = turn.calls.find((call) => call.purpose === "agent" && call.finished)?.finished?.ttft_ms;
+  const chars = turn.spoken.reduce((sum, piece) => sum + piece.chars, 0);
+  const cut = heardOf(turn);
+  return (
+    <Section title="Voice">
+      <div className="grid grid-cols-2 gap-12">
+        <Metric
+          label="End-of-turn wait"
+          value={formatMs(heard?.end_of_turn_ms)}
+          note={heard ? `${END_OF_TURN[heard.trigger] ?? heard.trigger}${heard.digit_mode ? ", waiting out pauses for digits" : ""}` : undefined}
+        />
+        <Metric label="Model first token" value={formatMs(firstToken)} note="of the first model call" />
+        <Metric label="Speech first audio" value={formatMs(first?.synthesis_ms)} note="from the text going out to the first audio back" />
+        <Metric label="Voice to voice" value={formatMs(first?.voice_to_voice_ms)} note="last word to first audio, at the server" />
+        <Metric
+          label="Voice to voice, here"
+          value={formatMs(turn.heardAfterMs)}
+          note={turn.heardAfterMs == null ? "measured live in this browser only" : "last loud microphone frame to first sample played"}
+        />
+        <Metric
+          label="Speech cost"
+          value={formatCost(turnUsage(turn).speechUsd)}
+          note={`${formatCount(Math.round(heard?.listened_s ?? 0))} s heard, ${formatCount(chars)} characters spoken`}
+        />
+      </div>
+      {cut !== null ? (
+        <Quiet>{cut ? `The reply was cut off. The customer heard: “${cut}”` : "The reply was cut off before any of it was heard."}</Quiet>
+      ) : null}
+    </Section>
+  );
+}
+
 function TurnPanel({ turn, status, passages, onPassage }: { turn: Turn; status: TurnStatus; passages: Record<string, Passage>; onPassage: (chunkId: string) => void }) {
   const usage = turnUsage(turn);
   const searches = turn.steps.flatMap((step) => (step.kind === "tool" && step.retrieval ? [step.retrieval] : []));
@@ -207,6 +261,8 @@ function TurnPanel({ turn, status, passages, onPassage }: { turn: Turn; status: 
         />
       </div>
       <Quiet>All four times count from the customer’s message. Time a stopped turn waited to be picked up is left out.</Quiet>
+
+      {turn.mode === "voice" ? <VoiceSection turn={turn} /> : null}
 
       <Section title="Timeline">
         <Timeline turn={turn} />
@@ -339,7 +395,7 @@ function Pair({ term, children }: { term: string; children: ReactNode }) {
 }
 
 function SessionPanel({ state }: { state: AppState }) {
-  const usage = sessionUsage(state.turns);
+  const usage = sessionUsage(state.turns, state.speechUsd);
   const customer = state.customer;
   return (
     <>
@@ -359,7 +415,9 @@ function SessionPanel({ state }: { state: AppState }) {
           <Pair term="Tokens">
             {formatCount(usage.inputTokens)} in, {formatCount(usage.outputTokens)} out
           </Pair>
-          <Pair term="Estimated cost">{formatCost(usage.costUsd)}</Pair>
+          <Pair term="Estimated model cost">{formatCost(usage.costUsd)}</Pair>
+          {usage.speechUsd > 0 ? <Pair term="Speech cost">{formatCost(usage.speechUsd)}</Pair> : null}
+          {usage.speechUsd > 0 ? <Pair term="Together">{formatCost(totalCost(usage))}</Pair> : null}
         </dl>
       </Section>
       <Section title="Tickets">
@@ -390,6 +448,7 @@ const FAILURES: { kind: FaultInject["kind"]; tool?: string; title: string; effec
   { kind: "llm_down", title: "Every model down", effect: "The next turn fails. Try again picks it up where it stopped." },
   { kind: "judge_down", title: "Grounding check down", effect: "The answer cannot be checked, so it is withheld and the turn fails. Try again reruns the check." },
   { kind: "tool_failure", tool: "search_knowledge_base", title: "Search failure", effect: "The next knowledge base search fails once and is retried." },
+  { kind: "speech_down", title: "Speech service down", effect: "Voice drops out if it is on, or fails to come on next time. The conversation goes on in text." },
 ];
 
 function FailuresPanel({ turnCount, queued, onQueued, onInject }: { turnCount: number; queued: Record<string, number>; onQueued: Props["onQueued"]; onInject: Props["onInject"] }) {

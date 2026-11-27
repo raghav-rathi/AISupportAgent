@@ -14,8 +14,11 @@ import type {
   RetrievalHit,
   RetrievalResult,
   ServerEvent,
+  SpeechHeard,
+  SpeechSpoken,
   Ticket,
   TurnFinished,
+  VoiceState,
 } from "./protocol";
 
 /**
@@ -112,6 +115,21 @@ export interface Turn {
   /** Time the turn spent stopped, waiting to be picked up. It is not part of the turn's clock. */
   idleMs: number;
   stoppedTs: number | null;
+  /** A spoken turn: how the customer's speech was taken, and each piece of the reply as audio. */
+  heard: SpeechHeard | null;
+  spoken: SpeechSpoken[];
+  /** From the visitor's last word to the first sound of the reply, as this browser heard it. */
+  heardAfterMs: number | null;
+}
+
+/** Voice in this page. The server decides what happens, and this is what it has said. */
+export interface Voice {
+  offered: boolean; // the server can listen and speak
+  status: "off" | "starting" | "on";
+  activity: VoiceState["state"] | null;
+  partial: string; // the visitor's words so far, in the turn they are speaking
+  bargeIn: boolean; // speaking over a reply stops it. Not without echo cancellation.
+  notice: string | null; // why voice went off, when the visitor did not turn it off
 }
 
 /** The prompt traces of one turn, which the client asks for when it shows them. */
@@ -145,7 +163,12 @@ export interface AppState {
   notice: string | null; // the server turned something down
   traces: Record<string, TraceSet>;
   passages: Record<string, Passage>;
+  voice: Voice;
+  /** What speech cost that belongs to no turn: a greeting, and listening while nobody spoke. */
+  speechUsd: number;
 }
+
+const noVoice: Voice = { offered: false, status: "off", activity: null, partial: "", bargeIn: true, notice: null };
 
 export const initialState: AppState = {
   connection: "connecting",
@@ -166,6 +189,8 @@ export const initialState: AppState = {
   notice: null,
   traces: {},
   passages: {},
+  voice: noVoice,
+  speechUsd: 0,
 };
 
 export type Action =
@@ -175,7 +200,9 @@ export type Action =
   | { type: "asked"; turnId: string }
   | { type: "looked"; chunkId: string }
   | { type: "reset" }
-  | { type: "dismiss" };
+  | { type: "dismiss" }
+  | { type: "voice"; status: "starting" | "off"; notice?: string | null; bargeIn?: boolean }
+  | { type: "voice-latency"; turnId: string; ms: number };
 
 /** Hand a message that was not accepted back to the composer. */
 function unsend(state: AppState): AppState {
@@ -212,7 +239,21 @@ export function reduce(state: AppState, action: Action): AppState {
     case "reset":
       return { ...initialState, drafts: state.drafts };
     case "dismiss":
-      return { ...state, notice: null };
+      return { ...state, notice: null, voice: { ...state.voice, notice: null } };
+    case "voice":
+      return {
+        ...state,
+        voice: {
+          ...state.voice,
+          status: action.status,
+          activity: null,
+          partial: "",
+          bargeIn: action.bargeIn ?? state.voice.bargeIn,
+          notice: action.notice ?? null,
+        },
+      };
+    case "voice-latency":
+      return { ...state, turns: state.turns.map((turn) => (turn.id === action.turnId ? { ...turn, heardAfterMs: action.ms } : turn)) };
   }
 }
 
@@ -242,6 +283,9 @@ function newTurn(id: string, text: string, mode: "text" | "voice", ts: number, c
     answerMs: null,
     idleMs: 0,
     stoppedTs: null,
+    heard: null,
+    spoken: [],
+    heardAfterMs: null,
   };
 }
 
@@ -266,8 +310,20 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
       busy: e.busy,
       resumable: e.resumable,
       faultInjection: e.fault_injection,
+      // A new connection has no voice: the server's side of it went with the old one.
+      voice: { ...noVoice, offered: e.voice, notice: same ? state.voice.notice : null },
     };
   }
+  if (e.type === "voice.started") {
+    return { ...state, voice: { ...state.voice, status: "on", activity: "listening", notice: null } };
+  }
+  if (e.type === "voice.stopped") {
+    const notice = e.reason === "client" ? null : e.message || "it was stopped";
+    return { ...state, voice: { ...state.voice, status: "off", activity: null, partial: "", notice } };
+  }
+  if (e.type === "voice.state") return { ...state, voice: { ...state.voice, activity: e.state } };
+  if (e.type === "stt.partial") return { ...state, voice: { ...state.voice, partial: e.text } };
+  if (e.type === "voice.playback") return state; // for the audio, not for the page
   if (e.type === "session.caught_up") {
     // Everything this client missed has arrived. A message sent on an earlier connection that
     // shows up in none of it never reached the server. Its text goes back to the visitor, who
@@ -276,7 +332,12 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     return next.pending && next.pending.epoch < next.epoch ? unsend(next) : next;
   }
   if (e.type === "error") {
-    const next = { ...state, notice: e.message };
+    if (e.code === "voice_unavailable") {
+      return { ...state, voice: { ...state.voice, status: "off", activity: null, partial: "", notice: e.message } };
+    }
+    // Voice that was being turned on did not come on: the server said no to something.
+    const voice: Voice = state.voice.status === "starting" ? { ...state.voice, status: "off" } : state.voice;
+    const next = { ...state, notice: e.message, voice };
     if (e.code === "not_found") {
       const passages = Object.fromEntries(
         Object.entries(state.passages).map(([id, passage]) => [id, passage === "loading" ? "missing" : passage]),
@@ -303,11 +364,16 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   if (e.type === "session.state") {
     return { ...state, customer: e.customer, tickets: e.tickets };
   }
+  if (e.type === "voice.usage" || (e.type === "speech.spoken" && !e.turn_id)) {
+    return { ...state, speechUsd: state.speechUsd + e.cost_usd };
+  }
   const live = !state.replaying;
   if (e.type === "turn.started") {
     const turn = newTurn(e.turn_id ?? `turn-${e.seq}`, e.text, e.mode, e.ts, e.client_id);
     const mine = e.client_id !== null && state.pending?.id === e.client_id;
-    const next = { ...state, turns: [...state.turns, turn], pending: mine ? null : state.pending };
+    // What was said is now the turn's message, so the words in flight go.
+    const voice = e.mode === "voice" ? { ...state.voice, partial: "" } : state.voice;
+    const next = { ...state, turns: [...state.turns, turn], pending: mine ? null : state.pending, voice };
     return live ? { ...next, busy: true, resumable: false, notice: null } : next;
   }
   if (!e.turn_id) return state;
@@ -329,6 +395,8 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
       return { ...next, busy: false, resumable: e.retryable };
     case "turn.interrupted":
       return { ...next, busy: false, resumable: e.resumable };
+    case "speech.spoken":
+      return next; // the audio of a reply ends after its turn has: no turn is running
     default:
       return { ...next, busy: true };
   }
@@ -352,6 +420,9 @@ function stopSteps(steps: Step[]): Step[] {
 }
 
 function applyToTurn(before: Turn, e: ServerEvent): Turn {
+  // What speech measured comes in after the turn has ended, and does not start it again.
+  if (e.type === "speech.heard") return { ...before, heard: e };
+  if (e.type === "speech.spoken") return { ...before, spoken: [...before.spoken, e] };
   let t = before;
   if (before.status === "failed" || before.status === "interrupted") {
     // An event after a stop means the turn was picked up again. What the stopped attempt left
@@ -561,6 +632,25 @@ export interface Usage {
   inputTokens: number;
   outputTokens: number;
   costUsd: number | null; // null when a model without a price took part
+  speechUsd: number; // speech to text and text to speech, for a spoken turn
+}
+
+/** Models and speech together, or null when a part of it is unknown. */
+export function totalCost(usage: Usage): number | null {
+  return usage.costUsd == null ? null : usage.costUsd + usage.speechUsd;
+}
+
+function speechCost(turn: Turn): number {
+  return (turn.heard?.cost_usd ?? 0) + turn.spoken.reduce((sum, piece) => sum + piece.cost_usd, 0);
+}
+
+/**
+ * What the visitor heard of a reply that was cut off, or null when the reply was not cut off.
+ * An empty string means none of it was heard.
+ */
+export function heardOf(turn: Turn): string | null {
+  const last = turn.spoken.at(-1);
+  return last?.interrupted && last.text_spoken != null ? last.text_spoken : null;
 }
 
 /** Usage of one turn: the server's totals once it has ended, the calls seen so far before that. */
@@ -573,6 +663,7 @@ export function turnUsage(turn: Turn): Usage {
       inputTokens: f.input_tokens,
       outputTokens: f.output_tokens,
       costUsd: f.cost_usd,
+      speechUsd: speechCost(turn),
     };
   }
   const done = turn.calls.flatMap((call) => (call.finished ? [call.finished] : []));
@@ -585,10 +676,12 @@ export function turnUsage(turn: Turn): Usage {
     costUsd: done.some((call) => call.cost_usd == null)
       ? null
       : done.reduce((sum, call) => sum + (call.cost_usd ?? 0), 0) + searches.reduce((sum, cost) => sum + cost, 0),
+    speechUsd: speechCost(turn),
   };
 }
 
-export function sessionUsage(turns: Turn[]): Usage & { turns: number; medianMs: number | null } {
+/** `otherSpeechUsd` is speech that belongs to no turn. */
+export function sessionUsage(turns: Turn[], otherSpeechUsd = 0): Usage & { turns: number; medianMs: number | null } {
   const each = turns.map(turnUsage);
   // A turn that failed or was stopped has a time too, and it says nothing about how long an
   // answer takes.
@@ -600,6 +693,7 @@ export function sessionUsage(turns: Turn[]): Usage & { turns: number; medianMs: 
     inputTokens: each.reduce((sum, u) => sum + u.inputTokens, 0),
     outputTokens: each.reduce((sum, u) => sum + u.outputTokens, 0),
     costUsd: each.some((u) => u.costUsd == null) ? null : each.reduce((sum, u) => sum + (u.costUsd ?? 0), 0),
+    speechUsd: each.reduce((sum, u) => sum + u.speechUsd, otherSpeechUsd),
     medianMs: times.length ? times[Math.floor((times.length - 1) / 2)] : null,
   };
 }

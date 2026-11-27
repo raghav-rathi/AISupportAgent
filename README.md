@@ -6,19 +6,19 @@ The project follows a brief that asks for streaming chat, live voice, multi-step
 
 ## Status
 
-Phase 2 of 4, deployed, and hardened after two outside reviews. Try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models. There is no voice mode yet.
+Phase 3 of 4, voice, is built and running on a development server. Phase 2 is deployed and hardened after two outside reviews: try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models. The deployed site is still the one of Phase 2 and has no microphone yet: voice goes out with the next deploy, and its measurements on the deployed backend are still to come.
 
 | What the brief asks for | State today |
 |---|---|
 | Streaming chat UI with live step status | Done, in Next.js over a WebSocket. Each tool shows as a step while it runs and with its result once it is done. |
-| Live voice with waveform, transcripts and interruption | Not started. Phase 3. |
+| Live voice with waveform, transcripts and interruption | Built, not deployed yet. The backend hears the customer through Deepgram Flux and speaks through Deepgram Flux TTS. The page has a microphone button, a level meter for each side, the customer's words as they are recognised, and three ways to interrupt a reply: speaking, a Stop button and the space bar. A reply that was cut off is kept only as far as the customer heard it. |
 | Observability drawer | Done. Per turn: end-to-end latency, what the customer waited for (first sign of work, first text, approved answer), tokens, estimated cost with the hosted reranker included, a timeline of every model and tool call, retrieval scores, the grounding verdict, and the full prompts with PINs masked, fetched when their tab is opened. |
 | Vector database with custom chunking | Done. pgvector and full-text search fused in SQL, a chunker that follows the heading tree, a reranker. |
 | Confidence guardrails that route to a person | Done. A gate on the reranker's score, a second model that checks each answer, and a ticket for a Fernhill question the help center does not answer. |
 | A chain of three or more tool calls | Done. Six tools, with the business rules in code. |
 | Tool start and finish streamed to the UI | Done. |
 | Fallback states for timeouts, rate limits and tool failures | Done. The UI shows a retry, a switch to the backup model, a failed turn with Try again, a stopped turn with Resume, and a dropped connection. A panel can inject each failure on demand. |
-| One memory across text and voice | A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. Voice does not exist yet. |
+| One memory across text and voice | A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. A spoken message and a typed one start the same kind of turn on the same session. |
 | Deployed | Yes. The frontend is on Vercel, the backend and Postgres with pgvector on Railway. CI runs the tests, the frontend build and a start of the image on every push. |
 
 ## How a turn runs

@@ -127,9 +127,10 @@ def client_address(direct: str | None, from_proxy: str | None) -> str:
 class Budget:
     """What every visitor together may spend on models in 24 hours.
 
-    The figure is the cost the stored events report: every model call, and every search on a
-    hosted reranker. It is read at most once per `refresh_s`, so a burst can overshoot by what
-    is started within that time. The provider's own cap on the key stays the hard limit.
+    The figure is the cost the stored events report: every model call, every search on a hosted
+    reranker, and what speech to text and text to speech charged. It is read at most once per
+    `refresh_s`, so a burst can overshoot by what is started within that time. The provider's
+    own cap on the key stays the hard limit.
     """
 
     def __init__(
@@ -154,7 +155,8 @@ class Budget:
                     "THEN coalesce((payload->>'cost_usd')::float8, %s) "
                     "ELSE coalesce((payload->>'cost_usd')::float8, 0) END), 0) AS usd "
                     "FROM session_events WHERE created_at > now() - interval '24 hours' "
-                    "AND type IN ('llm.finished', 'retrieval.result')",
+                    "AND type IN ('llm.finished', 'retrieval.result', 'speech.heard', "
+                    "'speech.spoken', 'voice.usage')",
                     (_UNPRICED_CALL_USD,),
                 )
                 self._spent = float((await cur.fetchone())["usd"])

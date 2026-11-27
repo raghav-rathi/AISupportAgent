@@ -27,6 +27,10 @@ from supportagent.api.protocol import (
     TurnCancel,
     TurnRetry,
     UserMessage,
+    VoiceInterrupt,
+    VoicePlayhead,
+    VoiceStart,
+    VoiceStop,
 )
 from supportagent.config import Settings, get_settings
 from supportagent.crm import world as worlds
@@ -41,6 +45,8 @@ from supportagent.events import (
     TraceList,
 )
 from supportagent.runtime import Runtime, open_runtime
+from supportagent.voice.deepgram import SpeechConfig, SpeechError
+from supportagent.voice.session import VoiceLimits, VoiceSession
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,9 @@ async def _pump(
 ) -> None:
     """The only writer on this socket: the backlog first, then live events, each at most once.
 
+    Events go out as text frames. The reply's audio, for the connection with the microphone,
+    goes out as binary frames in between, in the order it was made.
+
     A client that cannot take one event within `send_timeout_s` is closed. Without that limit a
     stalled reader would keep its queue, and the memory in it, for as long as it liked.
     """
@@ -112,6 +121,10 @@ async def _pump(
                 await socket.close(code=FELL_BEHIND, reason="fell behind, reconnect")
                 return
             event = await subscription.queue.get()
+            if isinstance(event, bytes):
+                async with asyncio.timeout(send_timeout_s):
+                    await socket.send_bytes(event)
+                continue
             if 0 < event.seq <= sent:
                 continue  # it was in the backlog already
             await send(event)
@@ -146,12 +159,16 @@ def origin_allowed(
     return same_host and parts.scheme.lower() in (("https",) if over_tls else ("http", "https"))
 
 
-async def _receive_text(socket: WebSocket) -> str | None:
-    """The next text frame, or None for a binary one. Raises WebSocketDisconnect at the end."""
+async def _receive(socket: WebSocket) -> str | bytes:
+    """The next frame: text is a message, bytes are microphone audio.
+
+    Raises WebSocketDisconnect at the end.
+    """
     message = await socket.receive()
     if message["type"] == "websocket.disconnect":
         raise WebSocketDisconnect(message.get("code", 1000))
-    return message.get("text")
+    text = message.get("text")
+    return text if text is not None else message.get("bytes") or b""
 
 
 def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> FastAPI:
@@ -185,6 +202,14 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
     )
     new_sessions = SlidingWindow(settings.max_new_sessions_per_hour, 3600.0)
     connections = Counter(settings.max_connections_per_address)
+    speech = SpeechConfig.from_settings(settings)  # None: this server has no voice
+    voice_limits = VoiceLimits(
+        max_seconds=settings.voice_max_seconds,
+        idle_seconds=settings.voice_idle_seconds,
+        greeting=settings.voice_greeting,
+        max_chars=settings.max_message_chars,
+    )
+    voices: set[VoiceSession] = set()  # the ones that are on, in this process
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[_normal(origin) for origin in settings.allowed_origins],
@@ -244,7 +269,8 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
 
         try:
             async with asyncio.timeout(settings.hello_timeout_s):
-                hello = CLIENT_ADAPTER.validate_json(await _receive_text(socket) or "")
+                first = await _receive(socket)
+                hello = CLIENT_ADAPTER.validate_json(first if isinstance(first, str) else "")
         except (ValidationError, WebSocketDisconnect, TimeoutError):
             hello = None
         if not isinstance(hello, Hello):
@@ -281,6 +307,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             )
             return
         pump: asyncio.Task[None] | None = None
+        voice: VoiceSession | None = None  # this connection's, while its microphone is on
 
         def tell(event: BaseModel) -> None:
             subscription.offer(event)
@@ -297,8 +324,9 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 customer=CustomerSummary(**customer) if customer else None,
                 tickets=[Ticket(**t) for t in state.values.get("tickets", [])],
                 busy=hub.busy,
-                resumable=not hub.busy and bool(state.next),
+                resumable=not hub.busy and bool(state.next) and hub.log.heard is None,
                 fault_injection=settings.fault_injection,
+                voice=speech is not None,
             )
             pump = asyncio.create_task(
                 _pump(
@@ -311,7 +339,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             while True:
                 try:
                     async with asyncio.timeout(settings.idle_timeout_s):
-                        raw = await _receive_text(socket)
+                        raw = await _receive(socket)
                 except TimeoutError:
                     if hub.busy:
                         continue  # a turn is running for this client: that is not idle
@@ -319,8 +347,13 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                     return
                 if pump.done():
                     return  # the writer closed the socket: the client fell behind
+                if isinstance(raw, bytes):
+                    # Microphone audio. Without voice on it is dropped, and nothing breaks.
+                    if voice is not None:
+                        await voice.feed(raw)
+                    continue
                 try:
-                    message = CLIENT_ADAPTER.validate_json(raw or "")
+                    message = CLIENT_ADAPTER.validate_json(raw)
                 except ValidationError:
                     refuse("bad_message", "not a message this server understands")
                     continue
@@ -341,6 +374,20 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                     tell(TraceList(turn_id=message.turn_id, traces=traces))
                 elif isinstance(message, PassageGet):
                     await _on_passage(hub, message, tell, refuse)
+                elif isinstance(message, VoiceStart):
+                    if voice is not None:
+                        await voice.stop("replaced")
+                    voice = await _on_voice_start(hub, budget, subscription, message, refuse)
+                elif isinstance(message, VoiceStop):
+                    if voice is not None:
+                        await voice.stop("client")
+                        voice = None
+                elif isinstance(message, VoicePlayhead):
+                    if voice is not None:
+                        voice.playhead(message.played_ms, message.after)
+                elif isinstance(message, VoiceInterrupt):
+                    if voice is not None:
+                        voice.interrupt(message.played_ms)
                 else:
                     refuse("bad_message", "hello is only valid as the first message")
                 if hub.gone:
@@ -349,6 +396,9 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         except WebSocketDisconnect:
             pass
         finally:
+            if voice is not None:
+                with suppress(Exception):
+                    await voice.stop("client")
             # Stop the writer and collect its result, so a send that failed on a dead socket
             # does not surface later as an unhandled task error.
             if pump is not None:
@@ -366,23 +416,78 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         """Start a turn for one customer message, or say why not. Either way the client hears
         about this message by its `client_id`."""
         text, client_id = message.text.replace("\x00", ""), message.client_id
-        if len(text) > settings.max_message_chars:
-            refuse("too_long", f"at most {settings.max_message_chars} characters", client_id)
-        elif not text.strip():
-            refuse("bad_message", "the message is empty", client_id)
-        elif hub.busy:
-            refuse("turn_in_progress", "wait for the current turn to finish", client_id)
-        elif hub.turns >= settings.max_turns_per_session:
-            limit = settings.max_turns_per_session
-            refuse(
-                "rate_limited",
-                f"this conversation has reached its limit of {limit} messages, start a new one",
-                client_id,
-            )
-        elif await budget.exhausted():
-            refuse("budget_exhausted", "the demo has used its budget for today", client_id)
+        blocked = await _blocked(hub, budget, text)
+        if blocked is not None:
+            refuse(*blocked, client_id)
         elif not hub.start_turn(text, message.mode, client_id):
             refuse("turn_in_progress", "wait for the current turn to finish", client_id)
+
+    async def _blocked(
+        hub: SessionHub, budget: Budget, text: str, *, spoken: bool = False
+    ) -> tuple[str, str] | None:
+        """Why this message may not start a turn, as an error code and its wording.
+
+        A spoken message meets the same limits as a typed one, except that speech may arrive
+        while a turn runs: the customer has then spoken over it, and voice stops that turn.
+        """
+        if len(text) > settings.max_message_chars:
+            return "too_long", f"at most {settings.max_message_chars} characters"
+        if not text.strip():
+            return "bad_message", "the message is empty"
+        if hub.busy and not spoken:
+            return "turn_in_progress", "wait for the current turn to finish"
+        if hub.turns >= settings.max_turns_per_session:
+            limit = settings.max_turns_per_session
+            return (
+                "rate_limited",
+                f"this conversation has reached its limit of {limit} messages, start a new one",
+            )
+        if await budget.exhausted():
+            return "budget_exhausted", "the demo has used its budget for today"
+        return None
+
+    async def _on_voice_start(
+        hub: SessionHub,
+        budget: Budget,
+        subscription: Subscription,
+        message: VoiceStart,
+        refuse: Refuse,
+    ) -> VoiceSession | None:
+        """Turn voice on for this connection, or say why not."""
+        if speech is None:
+            refuse("voice_unavailable", "voice is not set up on this server")
+            return None
+        if await budget.exhausted():
+            refuse("budget_exhausted", "the demo has used its budget for today")
+            return None
+        if hub.voice is not None:
+            await hub.voice.stop("replaced", "voice is now on in another window")
+        if len(voices) >= settings.max_voice_sessions:
+            refuse("voice_unavailable", "all voice lines are busy, go on in text for now")
+            return None
+
+        async def admit(text: str) -> ProtocolError | None:
+            blocked = await _blocked(hub, budget, text, spoken=True)
+            return ProtocolError(code=blocked[0], message=blocked[1]) if blocked else None
+
+        voice = VoiceSession(
+            hub,
+            subscription,
+            speech,
+            voice_limits,
+            admit=admit,
+            barge_in=message.echo_cancellation,
+            on_closed=voices.discard,
+        )
+        voices.add(voice)  # the place is taken before the sockets open
+        try:
+            await voice.start()
+        except SpeechError as exc:
+            voices.discard(voice)
+            logger.warning("voice could not start: %s", exc)
+            refuse("voice_unavailable", "speech is unavailable right now, go on in text")
+            return None
+        return voice
 
     async def _on_retry(hub: SessionHub, budget: Budget, refuse: Refuse) -> None:
         """Pick an unfinished turn up, within the limits a new message would also meet."""

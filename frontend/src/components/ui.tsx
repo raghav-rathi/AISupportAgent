@@ -75,6 +75,12 @@ const GLYPHS = {
       <path d="M8 6.5v3M8 11.3v.2" />
     </>
   ),
+  mic: (
+    <>
+      <rect x="6" y="2" width="4" height="7.5" rx="2" />
+      <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2" />
+    </>
+  ),
 } as const;
 
 export type GlyphName = keyof typeof GLYPHS;

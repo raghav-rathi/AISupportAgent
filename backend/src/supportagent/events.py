@@ -5,7 +5,10 @@ usage. The chat UI, the voice adapter and the observability drawer all read the 
 session adds `seq`, `ts` and `turn_id` when it publishes an event, after masking any PIN in it.
 
 `session.ready`, `session.caught_up`, `error`, `trace.list` and `passage.detail` answer a client
-directly. They are not part of the stored stream and keep `seq` 0.
+directly. They are not part of the stored stream and keep `seq` 0. So do the voice messages that
+only the connection with the microphone needs: `voice.started`, `voice.stopped`, `voice.state`,
+`voice.playback` and `stt.partial`. Audio itself travels as binary frames next to these, in both
+directions.
 
 `llm.trace` is stored and numbered but not streamed: a prompt trace is most of a turn's bytes and
 only the observability drawer reads it, so a client asks for the traces of a turn when it
@@ -100,6 +103,7 @@ class SessionReady(_Event):
     busy: bool  # a turn is running right now
     resumable: bool  # the last turn stopped early and `turn.retry` will pick it up
     fault_injection: bool = False  # this server acts on `fault.inject`, so a UI may offer it
+    voice: bool = False  # this server can listen and speak, so a UI may offer the microphone
 
 
 class SessionCaughtUp(_Event):
@@ -128,6 +132,7 @@ class ProtocolError(_Event):
         "failed_to_start",
         "session_expired",
         "not_found",
+        "voice_unavailable",
     ]
     message: str
     client_id: str | None = None
@@ -281,6 +286,20 @@ class GuardrailVerdict(_Event):
     ms: float
 
 
+class AnswerDrafted(_Event):
+    """The model's step ended without a tool call, so what it wrote is the turn's answer, pending
+    its grounding check. The text itself is not in here.
+
+    `held` says whether the answer waits for the verdict before anyone gets it. Voice starts
+    to speak an answer that is not held at this point, and never earlier: text that turns out
+    to come with a tool call is not an answer and must not be heard.
+    """
+
+    type: Literal["answer.drafted"] = "answer.drafted"
+    call_id: str
+    held: bool
+
+
 class AnswerRetracted(_Event):
     """A streamed answer did not pass its grounding check. Clients remove it."""
 
@@ -351,6 +370,86 @@ class TurnInterrupted(_Event):
     resumable: bool = True
 
 
+VoiceStatus = Literal["listening", "hearing", "thinking", "speaking"]
+
+
+class SpeechHeard(_Event):
+    """How a spoken message was taken. Follows the `turn.started` of a voice turn."""
+
+    type: Literal["speech.heard"] = "speech.heard"
+    speech_ms: float | None  # from the first word to the last
+    # From the end of the last word until the recogniser said the turn was over, on our clock.
+    end_of_turn_ms: float | None
+    confidence: float  # the recogniser's own, between 0 and 1
+    trigger: str  # model, timeout or manual: what ended the turn
+    digit_mode: bool  # the recogniser was waiting out pauses, for an account number or a PIN
+    listened_s: float  # microphone audio sent to the recogniser since the last count
+    cost_usd: float
+
+
+class SpeechSpoken(_Event):
+    """A reply as audio, once all of it has been played or the customer cut it off."""
+
+    type: Literal["speech.spoken"] = "speech.spoken"
+    chars: int  # what the synthesis is billed for
+    audio_ms: float  # audio that was made for this reply
+    synthesis_ms: float | None  # from the text going out to the first audio coming back
+    # From the end of the customer's last word to the first audio on its way to them.
+    voice_to_voice_ms: float | None
+    interrupted: bool
+    played_ms: float | None  # how much of the audio the customer heard, when interrupted
+    # What the customer heard before they interrupted. The rest of the reply was not said.
+    text_spoken: str | None = None
+    cost_usd: float
+
+
+class VoiceUsage(_Event):
+    """Stored when voice stops: the microphone time no turn has accounted for yet."""
+
+    type: Literal["voice.usage"] = "voice.usage"
+    listened_s: float
+    cost_usd: float
+
+
+class VoiceStarted(_Event):
+    """The reply to `voice.start`. Send microphone audio now, as binary frames."""
+
+    type: Literal["voice.started"] = "voice.started"
+    input_rate: int  # what the server expects: mono PCM16 at this rate
+    output_rate: int  # what the server sends: mono PCM16 at this rate
+
+
+class VoiceStopped(_Event):
+    """Voice is off. The conversation goes on in text."""
+
+    type: Literal["voice.stopped"] = "voice.stopped"
+    reason: Literal["client", "idle", "limit", "replaced", "error"]
+    message: str = ""
+
+
+class VoiceState(_Event):
+    type: Literal["voice.state"] = "voice.state"
+    state: VoiceStatus
+
+
+class VoicePlayback(_Event):
+    """What the client has to do with the audio it is playing.
+
+    `pause` when the customer may be starting to speak, `resume` when that was nothing, `flush`
+    when what is buffered must not be heard. The client answers each with a `voice.playhead`.
+    """
+
+    type: Literal["voice.playback"] = "voice.playback"
+    action: Literal["pause", "resume", "flush"]
+
+
+class SttPartial(_Event):
+    """The customer's words so far in the turn they are speaking, with any PIN masked."""
+
+    type: Literal["stt.partial"] = "stt.partial"
+    text: str
+
+
 class TraceList(_Event):
     """The reply to `trace.get`: the prompt traces of one turn, in order. `turn_id` names the turn."""
 
@@ -386,6 +485,7 @@ AnyEvent = Annotated[
     | ToolFinished
     | RetrievalResult
     | GuardrailVerdict
+    | AnswerDrafted
     | AnswerRetracted
     | AssistantMessage
     | EscalationCreated
@@ -394,7 +494,15 @@ AnyEvent = Annotated[
     | TurnFailed
     | TurnInterrupted
     | TraceList
-    | PassageDetail,
+    | PassageDetail
+    | SpeechHeard
+    | SpeechSpoken
+    | VoiceUsage
+    | VoiceStarted
+    | VoiceStopped
+    | VoiceState
+    | VoicePlayback
+    | SttPartial,
     Field(discriminator="type"),
 ]
 

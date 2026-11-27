@@ -138,6 +138,27 @@ class Settings(BaseSettings):
     # Lets a client queue simulated failures for its own session, to show how the app recovers.
     fault_injection: bool = False
 
+    # Voice needs DEEPGRAM_API_KEY. Without it the app runs as before and offers no microphone.
+    deepgram_base_url: str = "wss://api.deepgram.com"
+    stt_model: str = "flux-general-en"
+    tts_model: str = "flux-haley-en"  # the voice
+    # Words the recogniser should expect. With "PIN" in the list it stops hearing "pen".
+    stt_keyterms: list[str] = [
+        "Fernhill",
+        "PIN",
+        "account number",
+        "invoice",
+        "refund",
+        "Enterprise",
+    ]
+    voice_greeting: bool = True  # say hello when voice starts a conversation
+    voice_max_seconds: float = Field(default=600.0, gt=0)  # one voice session
+    voice_idle_seconds: float = Field(default=120.0, gt=0)  # nobody says anything
+    max_voice_sessions: int = Field(default=4, gt=0)  # at one time, in this process
+    # Deepgram's list prices, for the cost the drawer shows and the daily budget counts.
+    stt_usd_per_minute: float = Field(default=0.0065, ge=0)
+    tts_usd_per_1k_chars: float = Field(default=0.045, ge=0)
+
     @model_validator(mode="after")
     def _thresholds_in_order(self) -> Self:
         if not all(map(math.isfinite, (self.gate_low, self.gate_high, self.gate_gap))):
