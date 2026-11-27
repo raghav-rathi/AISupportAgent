@@ -127,7 +127,9 @@ export function App() {
           />
           <Composer
             ready={online && !state.busy && state.pending === null}
-            busy={online && state.busy}
+            // With voice on, the voice panel has the one Stop there is: it stops the reply in the
+            // ear as well as the turn behind it.
+            busy={online && state.busy && !voiceOn}
             onSend={session.say}
             onStop={session.cancel}
             restored={state.draft}
