@@ -315,7 +315,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 ```
 
 - `retrieval` measures ranking and the scope gate on labeled questions. One set of 68 questions was written alongside the documents. Outside reviewers wrote a second set of 42.
-- `judge` runs the grounding judge on 52 replies whose right verdict is known. Half are correct, half carry one seeded error. For the correct ones it also checks the judge's second finding: whether the reply leaves a Fernhill question open.
+- `judge` runs the grounding judge on 54 replies whose right verdict is known. Half are correct, half carry one seeded error. For the correct ones it also checks the judge's second finding: whether the reply leaves a Fernhill question open.
 - `suite` runs 55 scripted conversations against the configured model and checks which tools ran, what the database holds afterwards and what the agent said.
 - `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost. Every candidate runs without a fallback, is graded by another model, and gets the app's default time limits whatever the environment says. The speed that is compared leaves out the grounding check, because another model runs it.
 - `speech` measures Deepgram itself: `wer` reads 20 sentences of this domain to the recogniser with and without the key terms, `digits` reads 20 account numbers and PINs with pauses in digit mode and in the usual mode, `pins` puts every transcript of those clips through the redactor, `heard` transcribes a recording. `make` synthesises the clips. It needs `DEEPGRAM_API_KEY`.
@@ -351,7 +351,7 @@ On the deployed backend, on 2026-11-27, with `supportagent.cli.voice_client` run
 |---|---|---|
 | First sound of the reply after the end of the customer's speech, 18 turns without tools in 4 calls | 1.0 s at the median, 2.0 s at the 95th percentile | Missed. 1.07 s at the median, 2.26 s at the 95th percentile, from 0.45 s to 2.47 s. |
 | Where that time goes | | Flux calls the turn over 0.53 s after the last sound at the median, 1.57 s at the 95th percentile. From there to the first sound is 0.48 s at the median, with the model's first token as the part that varies: usually 0.15 to 0.3 s, sometimes 1.5 to 3.3 s. The voice's first sound comes 0.14 s after its text. |
-| Turns with tools, one call | none set | 1.9 s with a search, 2.5 s with a search and a held answer, 2.7 s with identity check and account read |
+| Turns with tools, 6 turns in 4 calls | none set | 2.2 s at the median from the customer's last sound to the first sound, from 1.6 s to 3.7 s |
 | Playback paused after the customer starts to speak over a reply, 10 interruptions in 5 calls | 0.4 s at the median | Missed. 0.76 s at the median, from 0.29 s to 0.95 s. Flux reports the start of a turn only once it has a word. |
 | What is stored of a reply that was cut off, 11 replies | The same words that were played | Never more than was played. The same words in 5, one word short in 5, two words short in 1. The audio the caller had played was transcribed and compared. |
 | Account number and PIN said with pauses of 0.7 to 2.0 s, 20 clips | None cut into pieces in digit mode | 0 of 20 cut in digit mode, and 19 of 20 with every digit right. With the usual settings 19 of 20 were cut. |
@@ -367,7 +367,7 @@ Read these with care too.
 - "End of the customer's speech" is the last sample above -36 dB in the clip. The server's own figure counts from the end of the last word as Flux timed it, which is earlier, so it reads about 0.15 s higher.
 - The first-sound figures are from after the two workarounds above. An earlier run counted a reply's first audio frame, which was often silence, and is not reported.
 - The same correct answer to "What can you help me with?" was taken back by the grounding judge in 3 of 7 live runs. After the evidence was given two sentences on what the assistant is for, it stood in 6 of 6 live runs and in both gate calls. Replayed outside the app, the same request passed 20 of 20 with the old text as well, so the cause is not established.
-- 51 scripted calls were made in all. At list prices they came to $1.62, most of it speech on Deepgram's free credit. Model calls for the whole phase came to $0.61.
+- 52 scripted calls ran to their end. At list prices they came to $1.64, most of it speech on Deepgram's free credit. Model calls for the whole phase came to $0.63.
 
 ## WebSocket protocol
 
