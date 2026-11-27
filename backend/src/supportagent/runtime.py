@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import psycopg
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -26,7 +26,10 @@ from supportagent.llm.client import LLMPolicy, ResilientLLM
 from supportagent.llm.faults import FaultPlan
 from supportagent.llm.openai_model import OpenAIChatModel
 from supportagent.llm.pricing import Price
-from supportagent.redact import Redactor
+from supportagent.redact import Redactor, session_key
+
+if TYPE_CHECKING:
+    from supportagent.eventlog import EventLog
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,7 @@ class Runtime:
     judge: Judge | None
     gate: Gate
     checkpointer: BaseCheckpointSaver | None = None
+    secret_key: str | None = None  # keys the stored hashes of PINs, see redact.session_key
 
     def context(
         self,
@@ -130,6 +134,11 @@ class Runtime:
             redactor=redactor or Redactor(),
             usage=usage or TurnUsage(),
         )
+
+    def redactor(self, log: EventLog) -> Redactor:
+        """The redactor for one session, knowing the PINs earlier processes hashed for it."""
+        key = session_key(self.secret_key, log.session_id)
+        return Redactor(key=key, known=log.secret_hashes)
 
     async def prune(self, session_id: str) -> None:
         """Keep only the newest saved state of a session's conversation.
@@ -180,6 +189,8 @@ async def open_runtime(settings: Settings) -> AsyncIterator[Runtime]:
             judge=judge,
             gate=Gate(low=settings.gate_low, high=settings.gate_high, gap=settings.gate_gap),
             checkpointer=checkpointer,
+            secret_key=settings.secret_key.get_secret_value() if settings.secret_key else None,
         )
     finally:
         await pool.close()
+        await retriever.aclose()

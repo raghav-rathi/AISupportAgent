@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 
 import pytest
-from agent_harness import MAYA, llm_for, runtime
+from agent_harness import GROUNDED, MAYA, ScriptedJudge, llm_for, runtime, scalar, shows
 from fakes import ScriptedModel, call, http_error, say
 
-from supportagent.eventlog import EventLog, TurnInProgress
+from supportagent.eventlog import EventLog, SessionGone, TurnInProgress
 from supportagent.session import NothingToResume, can_resume, run_turn
 
 
@@ -155,3 +156,158 @@ async def test_a_message_with_a_nul_byte_is_stored_without_it(pool, retriever, w
     done, events = await turn(rt, session_id, world, "Hi\x00 there")
     assert done is True and events[0].text == "Hi there"
     assert (await stored_events(pool, session_id, world))[0].text == "Hi there"
+
+
+class SlowJudge:
+    """A judge that is still thinking when the customer presses Stop."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def check(self, **_):
+        self.started.set()
+        await asyncio.sleep(30)
+
+
+async def test_a_turn_stopped_during_the_check_leaves_no_unchecked_answer_behind(
+    pool, retriever, world
+):
+    model = ScriptedModel("m", say("Yes! Pro includes a 365-day refund window."))
+    judge = SlowJudge()
+    rt, session_id = runtime(pool, retriever, model, judge=judge), uuid.uuid4().hex
+    first: list = []
+    running = asyncio.create_task(
+        run_turn(rt, session_id=session_id, world_id=world, text="Refunds?", on_event=first.append)
+    )
+    await asyncio.wait_for(judge.started.wait(), 5)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    kinds = [e.type for e in first]
+    # The text had streamed. Nothing ever called it the answer, and it is taken back before the
+    # turn ends, so no client keeps it on screen and no reload can bring it back.
+    assert "llm.delta" in kinds and "assistant.message" not in kinds
+    assert kinds[-2:] == ["llm.reset", "turn.interrupted"]
+    assert (first[-2].reason, first[-1].resumable) == ("cancelled", True)
+    stored = await stored_events(pool, session_id, world)
+    assert not shows("365-day", [e.model_dump() for e in stored])
+
+    # Picking the turn up runs the check, and only then is there an answer.
+    rt.judge = ScriptedJudge(GROUNDED)
+    done, resumed = await turn(rt, session_id, world, None)
+    kinds = [e.type for e in resumed]
+    assert done is True and len(model.calls) == 1
+    assert kinds.index("guardrail.verdict") < kinds.index("assistant.message")
+
+
+async def test_a_turn_stopped_before_anything_was_saved_says_it_cannot_be_picked_up(
+    pool, retriever, world, monkeypatch
+):
+    rt, session_id = runtime(pool, retriever, ScriptedModel("m", say("Hello."))), uuid.uuid4().hex
+    events: list = []
+    started = asyncio.Event()
+    original = rt.graph.astream
+
+    def stalled(*args, **kwargs):
+        async def never():
+            started.set()
+            await asyncio.sleep(30)
+            yield  # pragma: no cover
+
+        return never()
+
+    monkeypatch.setattr(rt.graph, "astream", stalled)
+    running = asyncio.create_task(
+        run_turn(rt, session_id=session_id, world_id=world, text="Hi", on_event=events.append)
+    )
+    await asyncio.wait_for(started.wait(), 5)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    monkeypatch.setattr(rt.graph, "astream", original)
+    assert [e.type for e in events] == ["turn.started", "turn.interrupted"]
+    # A client must not offer "Resume" here: the server has nothing to resume.
+    assert events[-1].resumable is False and not await can_resume(rt, session_id)
+
+
+async def test_the_time_of_a_retried_turn_is_not_counted_twice(pool, retriever, world):
+    down = [0.05, http_error(401)]
+    model = ScriptedModel("m", down, down, down, [0.05, *say("Here I am.")])
+    rt, session_id = runtime(pool, retriever, model), uuid.uuid4().hex
+    began = time.perf_counter()
+    totals = []
+    for text in ("Hello?", None, None, None):
+        _, events = await turn(rt, session_id, world, text)
+        totals.append(events[-1].total_ms)
+    wall_ms = (time.perf_counter() - began) * 1000
+    assert events[-1].type == "turn.finished"
+    assert totals == sorted(totals)
+    # Four attempts of about 50 ms each. Adding up the running totals would report over a second.
+    assert 200 <= totals[-1] <= wall_ms
+
+
+async def test_a_finished_turn_says_what_the_customer_waited_for(pool, retriever, world):
+    model = ScriptedModel("m", call("verify_identity", **MAYA), say("You are verified."))
+    rt, session_id = runtime(pool, retriever, model), uuid.uuid4().hex
+    _, events = await turn(rt, session_id, world, "Account 10482917, PIN 4721.")
+    done = events[-1]
+    assert 0 <= done.first_step_ms <= done.first_text_ms <= done.answer_ms <= done.total_ms
+
+
+async def test_a_claim_is_a_lease_that_only_its_owner_can_end(pool, world):
+    session_id = uuid.uuid4().hex
+    old = await EventLog.open(pool, session_id, world, owner="old-instance")
+    await old.claim("turn-a", "text")
+    new = await EventLog.open(pool, session_id, world, owner="new-instance")
+    with pytest.raises(TurnInProgress):
+        await new.claim("turn-b", "text")
+    # A second instance that starts during a deploy can neither clear the claim nor release it.
+    await new.save(release="turn-a")
+    with pytest.raises(TurnInProgress):
+        await new.claim("turn-b", "text")
+    assert await old.renew("turn-a")
+
+    # The owner dies and stops renewing. Once the lease has run out the session is free.
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET turn_heartbeat_at = now() - interval '2 minutes' WHERE id = %s",
+            (session_id,),
+        )
+    await new.claim("turn-b", "text")
+    # If the old owner was only stalled, it learns here that the session is no longer its own.
+    assert not await old.renew("turn-a")
+    await old.save(release="turn-a")
+    assert await scalar(pool, "SELECT turn_running FROM sessions WHERE id = %s", session_id)
+    await new.save(release="turn-b")
+    assert not await scalar(pool, "SELECT turn_running FROM sessions WHERE id = %s", session_id)
+
+
+async def test_a_turn_on_a_deleted_session_says_the_session_is_gone(pool, world):
+    log = await EventLog.open(pool, uuid.uuid4().hex, world)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM sessions WHERE id = %s", (log.session_id,))
+    with pytest.raises(SessionGone):
+        await log.claim("turn-a", "text")
+
+
+async def test_a_pin_stays_masked_after_the_session_is_picked_up_by_a_new_process(
+    pool, retriever, world
+):
+    model = ScriptedModel(
+        "m",
+        call("verify_identity", **MAYA),
+        say("You are verified."),
+        say("Yes, it did."),
+    )
+    rt, session_id = runtime(pool, retriever, model), uuid.uuid4().hex
+    await turn(rt, session_id, world, "Account 10482917, the number is 4721.")
+    hashes = await scalar(pool, "SELECT secret_hashes FROM sessions WHERE id = %s", session_id)
+    assert len(hashes) == 1 and "4721" not in hashes[0]
+
+    # `turn` opens the log and builds the redactor afresh, as a restarted backend or a hub that
+    # was let go and reopened would. The customer is verified, so nothing is masked on a guess.
+    _, events = await turn(rt, session_id, world, "Did 4721 work earlier? I have 1234 cards.")
+    assert events[0].text == "Did **** work earlier? I have 1234 cards."
+    stored = await stored_events(pool, session_id, world)
+    assert not shows("4721", [e.model_dump() for e in [*events, *stored] if e.type != "llm.delta"])

@@ -59,3 +59,6 @@ class AgentState(TypedDict, total=False):
     # ID of an answer that has not passed its grounding check yet. If the turn stops before the
     # check, the next turn removes that answer from the history.
     unchecked: str | None
+    # The model call that wrote that answer: its call ID and model, for the prompt trace that is
+    # written once the answer has a verdict.
+    unchecked_call: dict[str, str] | None

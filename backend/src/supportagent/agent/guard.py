@@ -59,8 +59,27 @@ def _failed(request: ToolCallRequest, payload: dict[str, str]) -> ToolMessage | 
     return Command(update={"messages": [*replaced, message]}) if replaced else message
 
 
-def _artifact(result: ToolMessage | Command) -> dict[str, str]:
-    """The outcome and summary a tool attached to its message."""
+def _what_was_wrong(exc: ToolInvocationError) -> str:
+    """Why the arguments were refused, without the arguments.
+
+    The library's own message quotes every argument the model sent. Those are the model's words,
+    often the customer's: a PIN under the wrong name, or text laid out to pass for a policy. The
+    reply goes into the conversation and from there to the grounding judge, so it names the
+    fields and the rule each one broke and nothing else.
+    """
+    errors = exc.filtered_errors
+    if errors is None:
+        errors = exc.source.errors(include_input=False, include_url=False, include_context=False)
+    problems = [
+        f"{'.'.join(str(part) for part in error.get('loc', ())) or 'arguments'}: "
+        f"{error.get('msg', 'not valid')}"
+        for error in errors
+    ]
+    return "; ".join(problems)[:500] or "the arguments are not valid"
+
+
+def _artifact(result: ToolMessage | Command) -> dict[str, Any]:
+    """The outcome, the summary and any receipt a tool attached to its message."""
     message: Any = result
     if isinstance(result, Command):
         messages = (result.update or {}).get("messages") or [None]
@@ -80,10 +99,14 @@ async def guard(
     ctx.usage.tool_calls += 1
     if name == "verify_identity":
         # From here on the PIN is masked wherever it shows, whether or not the tool gets to run.
-        ctx.redactor.learn(args.get("pin", ""))
+        # Every argument but the account number counts: a model that names the field `code`
+        # has still been handed the PIN.
+        for key, value in args.items():
+            if key != "account_number":
+                ctx.redactor.learn(value)
     emit(ToolStarted(tool_call_id=call_id, name=name, args=ctx.redactor.data(args)))
 
-    def finished(outcome: str, summary: str) -> None:
+    def finished(outcome: str, summary: str, receipt: dict[str, str] | None = None) -> None:
         emit(
             ToolFinished(
                 tool_call_id=call_id,
@@ -91,6 +114,7 @@ async def guard(
                 outcome=outcome,
                 summary=summary,
                 duration_ms=(time.perf_counter() - started) * 1000,
+                receipt=receipt,
             )
         )
 
@@ -106,7 +130,7 @@ async def guard(
         except ToolInvocationError as exc:
             # The model sent arguments the tool cannot accept. It gets the reason and may try again.
             finished("failed", "Invalid arguments")
-            reason = ctx.redactor.text(exc.message)
+            reason = ctx.redactor.text(_what_was_wrong(exc))
             return _failed(request, {"error": "invalid_arguments", "message": reason})
         except _RETRYABLE as exc:
             emit(ToolError(tool_call_id=call_id, name=name, message=str(exc) or type(exc).__name__))
@@ -138,7 +162,9 @@ async def guard(
                 },
             )
         artifact = _artifact(result)
-        finished(artifact.get("outcome", "ok"), artifact.get("summary", ""))
+        finished(
+            artifact.get("outcome", "ok"), artifact.get("summary", ""), artifact.get("receipt")
+        )
         return result
 
     finished("failed", f"{name} is unavailable")

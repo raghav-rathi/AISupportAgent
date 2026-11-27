@@ -35,12 +35,25 @@ from supportagent.events import (
     Ticket,
 )
 from supportagent.kb.retrieval import SearchResult
-from supportagent.redact import digits_of, scrub_messages
+from supportagent.redact import MASK, digits_of, scrub_messages
 
 # The tool decorator builds a pydantic schema from the signature. Naming AgentContext and
 # AgentState here would make pydantic build validators for the pool, the models and the whole
 # message history. `Any` passes them through untouched, and each tool types its own locals.
 Runtime = ToolRuntime[Any, Any]
+
+# Tools whose results hold one customer's data. When that customer stops being the verified
+# one, the results are taken out of the conversation the model and the judge read.
+_ACCOUNT_TOOLS = frozenset(
+    {"verify_identity", "get_account", "issue_refund", "update_account_field"}
+)
+_NO_LONGER_VERIFIED = json.dumps(
+    {
+        "omitted": "This result belongs to an account that is no longer verified in this conversation."
+    }
+)
+# How much a search result is worth to the turn. The search tool keeps the best of its wordings.
+_WORTH: dict[str, int] = {"answer": 3, "check": 2, "verify": 1, "restricted": 1, "escalate": 0}
 
 _REFUND_TICKET_REASON = {
     "over_limit": "refund_over_limit",
@@ -57,15 +70,18 @@ def _reply(
     outcome: str = "ok",
     update: dict[str, Any] | None = None,
     replace: Sequence[AnyMessage] = (),
+    receipt: dict[str, str] | None = None,
 ) -> Command:
     """Build the tool's result: JSON for the model, a summary for the UI, and any state changes.
 
     `replace` holds copies of stored messages. Each takes the place of the original with its ID.
+    `receipt` is what an action did, in fields a UI can show without reading the model's reply.
     """
+    artifact: dict[str, Any] = {"outcome": outcome, "summary": summary}
+    if receipt:
+        artifact["receipt"] = receipt
     message = ToolMessage(
-        json.dumps(payload, default=str),
-        tool_call_id=runtime.tool_call_id,
-        artifact={"outcome": outcome, "summary": summary},
+        json.dumps(payload, default=str), tool_call_id=runtime.tool_call_id, artifact=artifact
     )
     return Command(update={**(update or {}), "messages": [*replace, message]})
 
@@ -111,6 +127,35 @@ def _ticket_payload(ticket: Ticket, team: str | None = None) -> dict[str, Any]:
         "follow_up": "A specialist will follow up with the customer about this ticket.",
     }
     return {**payload, "team": team} if team else payload
+
+
+def _forget_account(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+    """Copies of the account results so far with their content taken out.
+
+    For the moment the verified customer changes or is locked out. Whoever is typing now may be
+    someone else, and the old results would still feed the model's prompt and the judge's
+    evidence. What the assistant already said stays: it was said to a verified customer.
+    """
+    forgotten = []
+    for message in messages:
+        if (
+            not isinstance(message, ToolMessage)
+            or message.name not in _ACCOUNT_TOOLS
+            or message.content == _NO_LONGER_VERIFIED
+        ):
+            continue
+        artifact = dict(message.artifact or {})
+        if message.name in ("verify_identity", "get_account"):
+            artifact["summary"] = "Account reading, no longer available"  # it named the company
+        forgotten.append(
+            message.model_copy(update={"content": _NO_LONGER_VERIFIED, "artifact": artifact})
+        )
+    return forgotten
+
+
+def was_forgotten(message: AnyMessage) -> bool:
+    """True for an account result whose content `_forget_account` took out."""
+    return isinstance(message, ToolMessage) and message.content == _NO_LONGER_VERIFIED
 
 
 def _session_state(state: AgentState, customer: Customer | None, *new: Ticket) -> SessionState:
@@ -177,7 +222,7 @@ async def verify_identity(account_number: str, pin: str, runtime: Runtime) -> Co
             outcome="refused",
             summary=f"Verification locked, ticket {ticket.id}",
             update={"failed_verifications": failed, "customer": None, **_ticket_update(ticket)},
-            replace=scrubbed,
+            replace=[*scrubbed, *_forget_account(state.get("messages", []))],
         )
 
     customer = Customer(
@@ -188,6 +233,10 @@ async def verify_identity(account_number: str, pin: str, runtime: Runtime) -> Co
         status=record.status,
     )
     ctx.redactor.strict = False
+    before = state.get("customer")
+    if before and before["account_number"] != record.account_number:
+        # Another account now. What the tools returned about the first one goes.
+        scrubbed = [*scrubbed, *_forget_account(state.get("messages", []))]
     runtime.stream_writer(_session_state(state, customer))
     return _reply(
         runtime,
@@ -262,8 +311,28 @@ def _band(ctx: AgentContext, result: SearchResult, tier: str | None) -> Band:
 
 
 def _plans(tiers: Sequence[str]) -> str:
+    """ "the Pro plan", "the Pro and Enterprise plans"."""
     names = [tier.capitalize() for tier in policy.TIERS if tier in tiers]
-    return " and ".join(names) or "another"
+    if not names:
+        return "another plan"
+    return f"the {' and '.join(names)} plan{'s' if len(names) > 1 else ''}"
+
+
+def _covering_plans(ctx: AgentContext, result: SearchResult) -> tuple[str, ...]:
+    """Every plan that has a confident match, not only the plan of the single best passage.
+
+    A topic often has one section per plan. Naming only the best-scoring one tells a Free
+    customer "Pro only" about something Enterprise has too.
+    """
+    confident = {
+        tier for score, tiers in result.plan_hits if score >= ctx.gate.high for tier in tiers
+    }
+    return tuple(tier for tier in policy.TIERS if tier in (confident or set(result.plan_tiers)))
+
+
+def _searchable(text: str) -> str:
+    """Text as it may leave for a search: one line, and nothing where a PIN was masked."""
+    return " ".join(text.replace("\x00", " ").replace(MASK, " ").split())
 
 
 @tool
@@ -278,9 +347,14 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
     state: AgentState = runtime.state
     customer = state.get("customer")
     tier = customer["tier"] if customer else None
-    question = " ".join(last_customer_text(state.get("messages", [])).split())
-    query = " ".join(query.replace("\x00", " ").split())
-    # The model's wording first. If it finds nothing, the customer's own words get one try.
+    # Both wordings are masked before they go anywhere. A hosted embedder or reranker is a third
+    # party, and the customer's message may still hold the PIN they typed next to the question.
+    question = _searchable(
+        ctx.redactor.text(last_customer_text(state.get("messages", [])), customer=True)
+    )
+    query = _searchable(ctx.redactor.text(query, customer=True))
+    # The model's wording first. If it does not find an answer, the customer's own words get
+    # one try, and the better of the two results stands.
     wordings = list({text.lower(): text for text in (query, question) if text}.values())
     if not wordings:
         return _reply(
@@ -293,15 +367,19 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
     result: SearchResult | None = None
     band: Band = "escalate"
     embed_ms = search_ms = rerank_ms = 0.0
+    cost_usd: float | None = None
     for wording in wordings:
         found = await ctx.retriever.search(ctx.pool, wording, tier)
         embed_ms += found.embed_ms
         search_ms += found.search_ms
         rerank_ms += found.rerank_ms
+        if found.cost_usd is not None:
+            cost_usd = (cost_usd or 0.0) + found.cost_usd
+            ctx.usage.add_search(found.cost_usd)
         found_band = _band(ctx, found, tier)
-        if result is None or found_band != "escalate":
+        if result is None or _WORTH[found_band] > _WORTH[band]:
             result, band, query = found, found_band, wording
-        if band != "escalate":
+        if _WORTH[band] >= _WORTH["check"]:
             break
 
     usable = band in ("answer", "check")
@@ -317,7 +395,7 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
         )
         for n, hit in enumerate(result.hits, start=offset + 1)
     ]
-    masked_query = ctx.redactor.text(query, customer=True)
+    masked_query = query  # masked above, before it was searched
     runtime.stream_writer(
         RetrievalResult(
             tool_call_id=runtime.tool_call_id,
@@ -331,6 +409,7 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
             embed_ms=embed_ms,
             search_ms=search_ms,
             rerank_ms=rerank_ms,
+            cost_usd=cost_usd,
         )
     )
     # Only passages the model was given count as sources of the answer.
@@ -365,24 +444,25 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
             update={"evidence": [evidence]},
         )
     if band == "restricted":
-        plans = _plans(result.plan_tiers)
+        covering = _covering_plans(ctx, result)
+        plans = _plans(covering)
         return _reply(
             runtime,
             {
                 "results": [],
-                "covered_for_plans": [t for t in policy.TIERS if t in result.plan_tiers],
+                "covered_for_plans": list(covering),
                 "customer_plan": tier,
-                "message": f"The help center covers this for the {plans} plan only. It is not "
+                "message": f"The help center covers this for {plans} only. It is not "
                 f"part of the customer's {tier.capitalize()} plan. Tell them that and nothing "
                 "more about it. Offer to pass the question to a person if they want details.",
             },
             outcome="refused",
-            summary=f"Covered for the {plans} plan only",
+            summary=f"Covered for {plans} only",
             update={"evidence": [evidence]},
         )
     if band == "escalate":
         # Nothing in the help center answers this. The graph hands the turn to a person.
-        asked = ctx.redactor.text(question or query, customer=True)
+        asked = question or query
         return _reply(
             runtime,
             {"results": [], "message": "The help center has nothing relevant to this question."},
@@ -450,6 +530,13 @@ async def issue_refund(
                 "amount": amount,
             },
             summary=f"Refunded {amount} for {invoice} as {outcome.refund_id}",
+            receipt={
+                "kind": "refund",
+                "refund_id": outcome.refund_id,
+                "invoice_id": invoice,
+                "amount": amount,
+                "date": clock.today().isoformat(),
+            },
         )
 
     payload = {
@@ -546,7 +633,14 @@ async def update_account_field(
 
 @tool
 async def create_escalation_ticket(
-    reason: Literal["customer_request", "billing_dispute", "security", "privacy_request", "other"],
+    reason: Literal[
+        "customer_request",
+        "billing_dispute",
+        "security",
+        "privacy_request",
+        "unanswered_question",
+        "other",
+    ],
     summary: str,
     priority: Literal["low", "normal", "high", "urgent"],
     runtime: Runtime,
@@ -554,8 +648,10 @@ async def create_escalation_ticket(
     """Hand the conversation to a human specialist and get a ticket ID.
 
     Use it when the customer asks for a person, reports a security problem, disputes a charge,
-    makes a legal or privacy request, or needs something no other tool can do. Write the summary
-    for the specialist: what the customer wants and what has been tried.
+    makes a legal or privacy request, or needs something no other tool can do. Use the reason
+    unanswered_question when a search of the help center did not answer a question about
+    Fernhill. Write the summary for the specialist: what the customer wants and what has been
+    tried.
     """
     # A security report is always urgent, whatever the model chose.
     ticket = await _hand_off(
@@ -583,12 +679,12 @@ TOOLS = [
 TOOL_NAMES = frozenset(t.name for t in TOOLS)
 
 
-def _first_paragraph(text: str) -> str:
-    return " ".join(text.strip().split("\n\n")[0].split())
+def _on_one_line(text: str) -> str:
+    return " ".join(text.split())
 
 
 # What the grounding judge is told about the assistant itself. Without it a true statement
 # such as "I can change the billing email but not the plan" has nothing to stand on.
 CAPABILITIES = "What the assistant's tools can do. It can do nothing else to an account.\n" + (
-    "\n".join(f"- {t.name}: {_first_paragraph(t.description)}" for t in TOOLS)
+    "\n".join(f"- {t.name}: {_on_one_line(t.description)}" for t in TOOLS)
 )

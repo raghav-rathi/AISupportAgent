@@ -98,6 +98,10 @@ class SearchResult:
     embed_ms: float
     search_ms: float
     rerank_ms: float
+    # Score and plans of every chunk written for other plans that was scored. No text: the
+    # chunks themselves never leave this module.
+    plan_hits: tuple[tuple[float, tuple[str, ...]], ...] = ()
+    cost_usd: float | None = None  # what a hosted reranker charged, when it says
 
     @property
     def top_score(self) -> float | None:
@@ -117,6 +121,20 @@ class Retriever:
         self.reranker = reranker
         self.candidates = candidates
         self.probe = probe
+
+    async def warm(self) -> None:
+        """Load the models that run in this process, so the first search does not wait for them."""
+        for model in (self.embedder, self.reranker):
+            warm = getattr(model, "warm", None)
+            if warm is not None:
+                await warm()
+
+    async def aclose(self) -> None:
+        """Close the HTTP clients of hosted models."""
+        for model in (self.embedder, self.reranker):
+            close = getattr(model, "aclose", None)
+            if close is not None:
+                await close()
 
     async def search(
         self, pool: AsyncConnectionPool, query: str, tier: str | None, *, limit: int = 5
@@ -149,18 +167,22 @@ class Retriever:
             rows = await cur.fetchall()
         searched = time.perf_counter()
 
-        scores = await self.reranker.score(query, [row["embed_text"] for row in rows])
+        documents = [row["embed_text"] for row in rows]
+        priced = getattr(self.reranker, "score_with_cost", None)
+        if priced is not None:
+            scores, cost_usd = await priced(query, documents)
+        else:
+            scores, cost_usd = await self.reranker.score(query, documents), None
         reranked = time.perf_counter()
 
         fused: list[Hit] = []
         scored: list[Hit] = []
-        plan_score: float | None = None
-        plan_tiers: tuple[str, ...] = ()
+        plan_hits: list[tuple[float, tuple[str, ...]]] = []
         for row, score in zip(rows, scores, strict=True):
             usable = score is not None and math.isfinite(score)
             if not row["visible"]:
-                if usable and (plan_score is None or score > plan_score):
-                    plan_score, plan_tiers = score, tuple(row["tiers"])
+                if usable:
+                    plan_hits.append((score, tuple(row["tiers"])))
                 continue
             hit = Hit(
                 chunk_id=row["id"],
@@ -178,12 +200,15 @@ class Retriever:
             if usable:  # a score that is not a number ranks nothing
                 scored.append(replace(hit, score=score))
         scored.sort(key=lambda hit: hit.score, reverse=True)
+        plan_hits.sort(key=lambda hit: hit[0], reverse=True)
         return SearchResult(
             hits=scored[:limit],
             fused=fused,
-            plan_score=plan_score,
-            plan_tiers=plan_tiers,
+            plan_score=plan_hits[0][0] if plan_hits else None,
+            plan_tiers=plan_hits[0][1] if plan_hits else (),
             embed_ms=(embedded - started) * 1000,
             search_ms=(searched - embedded) * 1000,
             rerank_ms=(reranked - searched) * 1000,
+            plan_hits=tuple(plan_hits),
+            cost_usd=cost_usd,
         )

@@ -82,6 +82,7 @@ class HostedEmbedder:
         self._dimensions = dimensions
         self._batch_size = batch_size
         # Measured through OpenRouter: 3 to 4 seconds for a handful of texts, and over 10 for 64.
+        # A search embeds one text, and the tool guard gives a search 8 seconds in all.
         self._client = client or httpx.AsyncClient(timeout=30.0)
 
     async def _embed(self, texts: list[str]) -> list[np.ndarray]:
@@ -90,13 +91,15 @@ class HostedEmbedder:
             request["dimensions"] = self._dimensions
         body = await _post(self._client, self._url, self._key, request)
         try:
-            rows = sorted(body["data"], key=lambda row: row["index"])
-            vectors = [np.asarray(row["embedding"], dtype=np.float32) for row in rows]
+            by_index = {
+                row["index"]: np.asarray(row["embedding"], dtype=np.float32) for row in body["data"]
+            }
         except (KeyError, TypeError, ValueError) as exc:
             raise HostedModelError("the reply held no embeddings") from exc
-        if len(vectors) != len(texts):
-            raise HostedModelError(f"{len(vectors)} embeddings for {len(texts)} texts")
-        return vectors
+        # One vector per text, each index once. A reply that repeats an index has lost a text.
+        if sorted(by_index) != list(range(len(texts))):
+            raise HostedModelError(f"embeddings for {len(by_index)} of {len(texts)} texts")
+        return [by_index[i] for i in range(len(texts))]
 
     async def embed_documents(self, texts: list[str]) -> list[np.ndarray]:
         vectors: list[np.ndarray] = []
@@ -106,6 +109,9 @@ class HostedEmbedder:
 
     async def embed_query(self, text: str) -> np.ndarray:
         return (await self._embed([self._query_prefix + text]))[0]
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 class HostedReranker:
@@ -124,8 +130,17 @@ class HostedReranker:
 
     async def score(self, query: str, documents: list[str]) -> list[float]:
         """One score per document, in the order given, on the logit scale."""
+        return (await self.score_with_cost(query, documents))[0]
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def score_with_cost(
+        self, query: str, documents: list[str]
+    ) -> tuple[list[float], float | None]:
+        """The scores, and what the call cost in dollars when the reply says so."""
         if not documents:
-            return []
+            return [], 0.0
         body = await _post(
             self._client,
             self._url,
@@ -138,4 +153,10 @@ class HostedReranker:
             raise HostedModelError("the reply held no scores") from exc
         if sorted(by_index) != list(range(len(documents))):
             raise HostedModelError(f"scores for {len(by_index)} of {len(documents)} documents")
-        return [_logit(by_index[i]) for i in range(len(documents))]
+        # A score outside 0 to 1 is not a relevance at all. Clipping it would turn a reply gone
+        # wrong into a perfect match.
+        if not all(0.0 <= score <= 1.0 for score in by_index.values()):
+            raise HostedModelError("a relevance score was not between 0 and 1")
+        cost = (body.get("usage") or {}).get("cost")
+        priced = isinstance(cost, int | float) and math.isfinite(cost) and cost >= 0
+        return [_logit(by_index[i]) for i in range(len(documents))], float(cost) if priced else None

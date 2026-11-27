@@ -45,15 +45,15 @@ class Gate:
 
         `visible` is the best score among passages the customer may see, `other` the best among
         passages written for other plans. The other passage matters only when what the customer
-        may see does not clearly answer and the other passage beats it by `gap`.
+        may see does not clearly answer, and then only when it beats that by `gap` or nothing
+        visible is relevant at all.
 
-        When nothing the customer may see is relevant at all, any relevant passage for another
-        plan decides: the visitor is asked to verify, the verified customer is told which plan
-        covers the topic. `low` is set so that no off-topic question reaches it.
-
-        When something visible is relevant but weak, the other passage has to beat it by `gap`.
-        For a verified customer it must also be a confident match, because the reply then says
-        their own plan does not cover a topic it partly covers.
+        A visitor is asked to verify on a weak signal: when nothing public is relevant, any
+        relevant passage for some plan is enough, because asking costs little and `low` is set so
+        that no off-topic question reaches it. A verified customer is told "your plan does not
+        cover this" only on a confident match. That reply states a fact about their plan, and on
+        the hosted reranker a weak match stood behind every false one: a question no plan
+        answers, sent off as "Enterprise only" because an Enterprise passage shared its words.
         """
         band = self.band(visible)
         if band == "answer" or other is None:
@@ -62,8 +62,7 @@ class Gate:
         if not beats:
             return band
         if verified:
-            confident = other >= self.high or (band == "escalate" and other >= self.low)
-            return "restricted" if confident else band
+            return "restricted" if other >= self.high else band
         if other >= self.high or (band == "escalate" and other >= self.low):
             return "verify"
         return band
@@ -104,6 +103,11 @@ class TurnUsage:
             self.unpriced_calls += 1
         else:
             self.priced_usd += event.cost_usd
+
+    def add_search(self, cost_usd: float | None) -> None:
+        """Count what a hosted embedder and reranker charged for one search. None when they did
+        not say, or when the search ran on models in this process, which cost nothing."""
+        self.priced_usd += cost_usd or 0.0
 
     @property
     def cost_usd(self) -> float | None:

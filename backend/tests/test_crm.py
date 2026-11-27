@@ -182,26 +182,52 @@ async def test_update_field_validates_changes_and_audits(pool, world):
     )
 
 
-async def test_purging_removes_old_conversations_and_keeps_recent_ones(pool, today):
-    old, recent = (f"test-{uuid.uuid4().hex[:12]}" for _ in range(2))
+async def test_purging_removes_unused_conversations_and_keeps_the_ones_in_use(pool, today):
+    names = ("unused", "new", "old_but_active", "old_and_mid_turn", "old_with_a_dead_turn")
+    ids = {name: f"test-{uuid.uuid4().hex[:12]}" for name in names}
     async with pool.connection() as conn:
-        for world_id in (old, recent):
+        for world_id in ids.values():
             await worlds.create_world(conn, world_id, today)
             await conn.execute(
                 "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (world_id, world_id)
             )
+        old = [ids[name] for name in names if name != "new"]
         await conn.execute(
-            "UPDATE worlds SET created_at = now() - interval '3 days' WHERE id = %s", (old,)
+            "UPDATE worlds SET created_at = now() - interval '3 days' WHERE id = ANY(%s)", (old,)
+        )
+        await conn.execute(
+            "UPDATE sessions SET last_active_at = now() - interval '3 days' WHERE id = ANY(%s)",
+            (old,),
+        )
+        # Someone came back to this one an hour ago.
+        await conn.execute(
+            "UPDATE sessions SET last_active_at = now() - interval '1 hour' WHERE id = %s",
+            (ids["old_but_active"],),
+        )
+        # A turn is running on this one, and its process renewed the claim a moment ago.
+        await conn.execute(
+            "UPDATE sessions SET turn_running = true, turn_heartbeat_at = now() WHERE id = %s",
+            (ids["old_and_mid_turn"],),
+        )
+        # The process that ran this one died long ago and left its claim behind.
+        await conn.execute(
+            "UPDATE sessions SET turn_running = true, "
+            "turn_heartbeat_at = now() - interval '2 days' WHERE id = %s",
+            (ids["old_with_a_dead_turn"],),
         )
     try:
         async with pool.connection() as conn:
-            assert await worlds.purge_worlds(conn, timedelta(days=2)) == 1
-            cur = await conn.execute("SELECT id FROM sessions WHERE id = ANY(%s)", ([old, recent],))
-            assert [row["id"] for row in await cur.fetchall()] == [recent]
+            assert await worlds.purge_worlds(conn, timedelta(days=2)) == 2
             cur = await conn.execute(
-                "SELECT count(*) AS n FROM customers WHERE world_id = %s", (old,)
+                "SELECT id FROM sessions WHERE id = ANY(%s)", (list(ids.values()),)
+            )
+            left = {row["id"] for row in await cur.fetchall()}
+            assert left == {ids["new"], ids["old_but_active"], ids["old_and_mid_turn"]}
+            cur = await conn.execute(
+                "SELECT count(*) AS n FROM customers WHERE world_id = %s", (ids["unused"],)
             )
             assert (await cur.fetchone())["n"] == 0
     finally:
         async with pool.connection() as conn:
-            await worlds.delete_world(conn, recent)
+            for world_id in ids.values():
+                await worlds.delete_world(conn, world_id)

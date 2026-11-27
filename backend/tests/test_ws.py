@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
 import uvicorn
-from agent_harness import FAST, llm_for, runtime
-from fakes import ScriptedModel, http_error, say, usage
+from agent_harness import ALWAYS_ANSWER, FAST, REFUND_QUESTION, llm_for, runtime
+from fakes import ScriptedModel, call, http_error, say, usage
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from supportagent.api.app import create_app, origin_allowed
-from supportagent.api.limits import SlidingWindow
+from supportagent.api.app import (
+    AT_CAPACITY,
+    IDLE,
+    SESSION_EXPIRED,
+    TOO_MANY_CONNECTIONS,
+    TOO_MANY_CONVERSATIONS,
+    create_app,
+    origin_allowed,
+)
+from supportagent.api.limits import Budget, Counter, SlidingWindow, client_address
 from supportagent.config import get_settings
+from supportagent.crm import world as worlds
 from supportagent.llm.client import ResilientLLM
 
 ORIGIN = "http://ui.test"
@@ -26,8 +36,8 @@ async def serve(pool, retriever):
     """Start the app on a free port with the given model. Returns the runtime and the address."""
     running = []
 
-    async def start(model, **overrides):
-        rt = runtime(pool, retriever, model)
+    async def start(model, capture_prompts=False, **overrides):
+        rt = runtime(pool, retriever, model, capture_prompts=capture_prompts)
         settings = get_settings().model_copy(
             update={
                 "allowed_origins": [ORIGIN],
@@ -37,8 +47,9 @@ async def serve(pool, retriever):
             }
         )
         # As in production: uvicorn does not rewrite the client address from X-Forwarded-For.
+        rt.app = create_app(rt, settings)
         config = uvicorn.Config(
-            create_app(rt, settings),
+            rt.app,
             host="127.0.0.1",
             port=0,
             log_level="error",
@@ -74,13 +85,16 @@ class Client:
     async def send(self, **message):
         await self.ws.send(json.dumps(message))
 
-    async def say(self, text):
-        await self.send(type="user.message", text=text)
+    async def say(self, text, client_id=None):
+        await self.send(type="user.message", text=text, client_id=client_id)
 
     async def next(self):
-        event = json.loads(await asyncio.wait_for(self.ws.recv(), 5))
-        self.events.append(event)
-        return event
+        """The next event. The marker that ends a replay is noted and passed over."""
+        while True:
+            event = json.loads(await asyncio.wait_for(self.ws.recv(), 5))
+            self.events.append(event)
+            if event["type"] != "session.caught_up":
+                return event
 
     async def until(self, kind):
         while True:
@@ -327,6 +341,11 @@ def test_origins_are_compared_without_case_or_trailing_slash_and_same_origin_is_
     assert origin_allowed("https://support.example", host, settings)
     assert origin_allowed("https://support.example/", host, settings)
     assert origin_allowed("http://api.example", host, settings)  # served by the backend itself
+    # Behind a proxy that ends TLS, a page loaded in the clear is not the backend's own page.
+    assert not origin_allowed("http://api.example", host, settings, over_tls=True)
+    assert origin_allowed("https://api.example", host, settings, over_tls=True)
+    assert not origin_allowed("javascript://api.example", host, settings)
+    assert not origin_allowed("ftp://api.example", host, settings)
     assert not origin_allowed("https://evil.example", host, settings)
     assert not origin_allowed("https://support.example.evil.test", host, settings)
     assert not origin_allowed("", host, settings)
@@ -341,7 +360,7 @@ async def test_one_address_cannot_start_conversations_without_end(serve):
     second = await Client.open(address)
     with pytest.raises(ConnectionClosed) as refused:
         await Client.open(address)
-    assert refused.value.rcvd.code == 1013  # try again later
+    assert refused.value.rcvd.code == TOO_MANY_CONVERSATIONS
     # Coming back to a conversation that exists is not a new one.
     again = await Client.open(address, session_id=first.ready["session_id"])
     assert again.ready["session_id"] == first.ready["session_id"]
@@ -404,3 +423,344 @@ def test_the_window_lets_the_limit_through_and_forgets_after_its_time():
     assert not window.allow("a")  # a refused attempt was not counted, and the first two still are
     now[0] = 60.0
     assert window.allow("a")
+
+
+async def frames_until_caught_up(client) -> list[dict]:
+    """Everything the server sends a reconnecting client, up to the marker that ends the replay."""
+    frames = []
+    while not frames or frames[-1]["type"] != "session.caught_up":
+        frames.append(json.loads(await asyncio.wait_for(client.ws.recv(), 5)))
+    return frames
+
+
+async def test_every_message_is_answered_under_its_own_id(serve):
+    _, address = await serve(ScriptedModel("m", ["Hel", 0.25, "lo.", usage(10, 3)]))
+    client = await Client.open(address)
+    await client.say("first", client_id="m-1")
+    assert (await client.until("turn.started"))["client_id"] == "m-1"
+    await client.say("second", client_id="m-2")
+    refused = await client.until("error")
+    assert (refused["code"], refused["client_id"]) == ("turn_in_progress", "m-2")
+    await client.until("turn.finished")
+    await client.say("x" * 500, client_id="m-3")
+    refused = await client.until("error")
+    assert (refused["code"], refused["client_id"]) == ("too_long", "m-3")
+    await client.ws.close()
+
+
+async def test_a_returning_client_is_told_where_the_replay_ends(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello there.")), capture_prompts=True)
+    first = await Client.open(address)
+    await first.say("Hi", client_id="m-1")
+    await first.until("turn.finished")
+    await first.ws.close()
+
+    back = await connect(f"ws://{address}/ws", origin=ORIGIN)
+    await back.send(json.dumps({"type": "hello", "session_id": first.ready["session_id"]}))
+    client = Client(back)
+    kinds = [frame["type"] for frame in await frames_until_caught_up(client)]
+    assert kinds[0] == "session.ready" and kinds[-2] == "turn.finished"
+    # A prompt trace is most of a turn's bytes. It is stored, and sent only when asked for.
+    assert "llm.trace" not in kinds and "llm.delta" not in kinds
+    await back.close()
+
+
+async def test_prompt_traces_are_sent_on_request_and_only_to_their_own_conversation(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello there.")), capture_prompts=True)
+    client = await Client.open(address)
+    await client.say("Hi")
+    done = await client.until("turn.finished")
+    assert not any(e["type"] == "llm.trace" for e in client.events)
+
+    await client.send(type="trace.get", turn_id=done["turn_id"])
+    reply = await client.until("trace.list")
+    assert (reply["turn_id"], reply["seq"]) == (done["turn_id"], 0)
+    assert [t["response"]["content"] for t in reply["traces"]] == ["Hello there."]
+
+    other = await Client.open(address)
+    await other.send(type="trace.get", turn_id=done["turn_id"])
+    assert (await other.until("trace.list"))["traces"] == []
+    await client.ws.close()
+    await other.ws.close()
+
+
+async def test_a_passage_is_read_back_only_by_a_conversation_whose_search_returned_it(serve):
+    model = ScriptedModel(
+        "m", call("search_knowledge_base", query=REFUND_QUESTION), say("14 days [1].")
+    )
+    rt, address = await serve(model)
+    rt.gate = ALWAYS_ANSWER
+    client = await Client.open(address)
+    await client.say(REFUND_QUESTION)
+    await client.until("turn.finished")
+    hit = next(e for e in client.events if e["type"] == "retrieval.result")["hits"][0]
+
+    await client.send(type="passage.get", chunk_id=hit["chunk_id"])
+    passage = await client.until("passage.detail")
+    assert passage["source"] == hit["source"] and len(passage["content"]) > 40
+    await client.send(type="passage.get", chunk_id="no-such-chunk")
+    assert (await client.until("error"))["code"] == "not_found"
+    # Another conversation has not been shown this passage. Its plan might not allow it.
+    other = await Client.open(address)
+    await other.send(type="passage.get", chunk_id=hit["chunk_id"])
+    assert (await other.until("error"))["code"] == "not_found"
+    await client.ws.close()
+    await other.ws.close()
+
+
+async def test_candidates_of_a_search_that_asked_for_verification_cannot_be_read_back(serve):
+    question = "How fast do you respond when we report a P1 outage?"
+    model = ScriptedModel("m", call("search_knowledge_base", query=question), say("Please verify."))
+    _, address = await serve(model)
+    client = await Client.open(address)
+    await client.say(question)
+    await client.until("turn.finished")
+    search = next(e for e in client.events if e["type"] == "retrieval.result")
+    assert search["band"] == "verify"
+    for hit in search["hits"]:
+        await client.send(type="passage.get", chunk_id=hit["chunk_id"])
+        assert (await client.until("error"))["code"] == "not_found"
+    await client.ws.close()
+
+
+async def test_a_turn_can_be_picked_up_only_so_many_times(serve):
+    model = ScriptedModel("down", [http_error(401)])
+    _, address = await serve(model, max_retries_per_turn=1, max_turns_per_session=1)
+    client = await Client.open(address)
+    await client.say("Hello?")
+    await client.until("turn.failed")
+    await client.send(type="turn.retry")
+    await client.until("turn.failed")
+    # Without a limit, failing and retrying would run model calls for ever on one message.
+    await client.send(type="turn.retry")
+    assert (await client.until("error"))["code"] == "too_many_retries"
+    assert len(model.calls) == 2
+    await client.ws.close()
+
+
+async def test_stopping_and_resuming_is_counted_like_any_other_pick_up(serve):
+    model = ScriptedModel("m", ["Hel", 5.0, "lo.", usage(10, 3)])
+    _, address = await serve(model, max_retries_per_turn=1)
+    client = await Client.open(address)
+    await client.say("Hi")
+    for _ in range(2):
+        await client.until("llm.delta")
+        await client.send(type="turn.cancel")
+        assert (await client.until("turn.interrupted"))["resumable"] is True
+        await client.send(type="turn.retry")
+    assert (await client.until("error"))["code"] == "too_many_retries"
+    assert len(model.calls) == 2
+    await client.ws.close()
+
+
+async def test_connections_that_arrive_together_cannot_all_find_room(serve):
+    _, address = await serve(
+        ScriptedModel("m", say("Hello.")), max_sessions=3, max_connections_per_address=50
+    )
+
+    async def attempt():
+        try:
+            return await Client.open(address)
+        except ConnectionClosed as closed:
+            return closed.rcvd.code
+
+    results = await asyncio.gather(*(attempt() for _ in range(10)))
+    opened = [r for r in results if isinstance(r, Client)]
+    assert len(opened) == 3
+    assert {r for r in results if not isinstance(r, Client)} == {AT_CAPACITY}
+    for client in opened:
+        await client.ws.close()
+
+
+async def test_being_turned_away_for_lack_of_room_does_not_use_up_a_visitors_allowance(serve):
+    _, address = await serve(
+        ScriptedModel("m", say("Hello.")), max_sessions=1, max_new_sessions_per_hour=2
+    )
+    first = await Client.open(address)
+    for _ in range(3):
+        with pytest.raises(ConnectionClosed) as refused:
+            await Client.open(address)
+        assert refused.value.rcvd.code == AT_CAPACITY
+    await first.ws.close()
+    await asyncio.sleep(0.1)  # the server lets the first conversation's hub go
+    second = await Client.open(address)  # the second of two allowed, not the fifth attempt
+    assert second.ready["type"] == "session.ready"
+    await second.ws.close()
+
+
+async def test_a_conversation_and_an_address_each_have_a_limit_of_open_connections(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), max_connections_per_address=6)
+    first = await Client.open(address)
+    session_id = first.ready["session_id"]
+    tabs = [first] + [await Client.open(address, session_id) for _ in range(3)]
+    with pytest.raises(ConnectionClosed) as refused:
+        await Client.open(address, session_id)
+    assert refused.value.rcvd.code == TOO_MANY_CONNECTIONS
+    tabs += [await Client.open(address) for _ in range(2)]  # six open from this address now
+    with pytest.raises(ConnectionClosed) as refused:
+        await Client.open(address)
+    assert refused.value.rcvd.code == TOO_MANY_CONNECTIONS
+    for client in tabs:
+        await client.ws.close()
+
+
+async def test_an_idle_connection_is_closed_and_one_with_a_running_turn_is_not(serve):
+    slow = ScriptedModel("m", ["Hel", 0.25, "lo ", 0.25, "there.", usage(10, 3)])
+    _, address = await serve(slow, idle_timeout_s=0.3)
+    client = await Client.open(address)
+    await client.say("Hi")
+    await client.until("turn.finished")  # the turn outlasted the idle limit and was not cut off
+    with pytest.raises(ConnectionClosed) as closed:
+        await asyncio.wait_for(client.ws.recv(), 3)
+    assert closed.value.rcvd.code == IDLE
+
+
+async def test_no_turn_starts_once_the_daily_budget_is_spent(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")))
+    client = await Client.open(address)
+    await client.say("Hi")  # one model call without a price, counted at a fraction of a cent
+    await client.until("turn.finished")
+    await client.ws.close()
+
+    _, capped = await serve(ScriptedModel("m", say("Hello.")), daily_budget_usd=1e-9)
+    client = await Client.open(capped)
+    await client.say("Hi", client_id="m-1")
+    refused = await client.until("error")
+    assert (refused["code"], refused["client_id"]) == ("budget_exhausted", "m-1")
+    await client.ws.close()
+
+
+async def test_the_budget_adds_up_model_calls_and_hosted_searches(pool, world):
+    session_id = f"budget-{world}"
+    before = await Budget(pool, 1.0).spent()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (session_id, world)
+        )
+        for seq, kind, cost in (
+            (1, "llm.finished", "0.5"),
+            (2, "retrieval.result", "0.25"),
+            (3, "llm.finished", "null"),
+            (4, "retrieval.result", "null"),
+            (5, "tool.finished", "9"),
+        ):
+            await conn.execute(
+                "INSERT INTO session_events (session_id, seq, type, payload) VALUES (%s, %s, %s, %s::jsonb)",
+                (session_id, seq, kind, f'{{"cost_usd": {cost}}}'),
+            )
+    budget = Budget(pool, 0.7)
+    # A model call without a price still counts for something. A search that named no cost ran
+    # on a local model and counts for nothing.
+    assert await budget.spent() - before == pytest.approx(0.5 + 0.25 + 0.002)
+    assert await budget.exhausted()
+    assert not await Budget(pool, None).exhausted()
+
+
+async def test_the_http_side_gives_nothing_away(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")))
+    async with httpx.AsyncClient() as http:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert (await http.get(f"http://{address}{path}")).status_code == 404
+        health = await http.get(f"http://{address}/health")
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    assert health.headers["cache-control"] == "no-store"
+
+
+async def test_behind_tls_a_page_loaded_in_the_clear_cannot_open_a_session(serve):
+    _, address = await serve(ScriptedModel("m", say("Hello.")))
+    over_tls = {"X-Forwarded-Proto": "https"}
+    with pytest.raises(InvalidStatus):
+        await Client.open(address, origin=f"http://{address}", headers=over_tls)
+    client = await Client.open(address, origin=f"https://{address}", headers=over_tls)
+    assert client.ready["type"] == "session.ready"
+    await client.ws.close()
+
+
+async def test_a_conversation_deleted_under_an_open_connection_says_so(serve, pool):
+    _, address = await serve(ScriptedModel("m", say("Hello.")))
+    client = await Client.open(address)
+    gone = client.ready["session_id"]
+    async with pool.connection() as conn:
+        await worlds.delete_world(conn, gone)
+    await client.say("Hi", client_id="m-1")
+    refused = await client.until("error")
+    assert (refused["code"], refused["client_id"]) == ("session_expired", "m-1")
+    await client.say("Hi again")
+    with pytest.raises(ConnectionClosed) as closed:
+        await client.until("turn.started")
+    assert closed.value.rcvd.code == SESSION_EXPIRED
+    # Coming back with the dead ID starts a new conversation.
+    fresh = await Client.open(address, gone)
+    assert fresh.ready["session_id"] != gone
+    await fresh.ws.close()
+
+
+async def test_a_message_that_could_not_start_a_turn_is_answered_and_not_counted(
+    serve, monkeypatch
+):
+    rt, address = await serve(ScriptedModel("m", say("Hello.")), max_turns_per_session=1)
+    client = await Client.open(address)
+    original = rt.graph.aget_state
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("the database blinked")
+
+    monkeypatch.setattr(rt.graph, "aget_state", broken)
+    await client.say("Hi", client_id="m-1")
+    refused = await client.until("error")
+    assert (refused["code"], refused["client_id"]) == ("failed_to_start", "m-1")
+    monkeypatch.setattr(rt.graph, "aget_state", original)
+    # The message that never started has not used up the one this conversation is allowed.
+    await client.say("Hi", client_id="m-2")
+    assert (await client.until("turn.started"))["client_id"] == "m-2"
+    await client.until("turn.finished")
+    await client.ws.close()
+
+
+def test_the_window_stays_fast_and_small_however_many_addresses_knock():
+    now = [0.0]
+    window = SlidingWindow(limit=1, window_s=3600.0, clock=lambda: now[0], max_keys=1000)
+    began = time.perf_counter()
+    for n in range(20_000):
+        window.allow(f"visitor-{n}")
+    # The sweep this replaces rebuilt its whole table on every call past 10,000 addresses: about
+    # 0.75 ms a call, 15 seconds for this loop.
+    assert time.perf_counter() - began < 1.0
+    assert len(window) == 1000
+    assert not window.allow("visitor-19999")  # the newest are the ones still remembered
+    now[0] = 4000.0
+    for _ in range(600):
+        window.allow("someone who keeps talking")
+    assert len(window) == 1  # the quiet ones went, a few per call
+
+
+def test_an_event_that_did_not_happen_can_be_taken_back():
+    window = SlidingWindow(limit=1, window_s=60.0, clock=lambda: 0.0)
+    assert window.allow("a")
+    window.undo("a")
+    assert [window.allow("a"), window.allow("a")] == [True, False]
+
+
+def test_one_visitor_is_one_key_however_the_address_is_written():
+    forms = (
+        "2001:db8::1",
+        "2001:0db8:0:0:0:0:0:1",
+        "2001:DB8::1",
+        "2001:db8::2",
+        "2001:db8::ffff:9",
+    )
+    # One subscriber has a whole /64 of IPv6 addresses to pick from.
+    assert {client_address(None, form) for form in forms} == {"2001:db8::/64"}
+    assert client_address(None, "2001:db8:0:1::1") == "2001:db8:0:1::/64"
+    assert client_address(None, "::ffff:203.0.113.9") == client_address("203.0.113.9", None)
+    assert client_address("198.51.100.4", "  ") == "198.51.100.4"
+    assert client_address(None, None) == "unknown"
+    assert client_address("testclient", None) == "testclient"
+
+
+def test_a_counter_caps_what_one_key_holds_at_a_time():
+    counter = Counter(limit=2)
+    assert [counter.take("a"), counter.take("a"), counter.take("a")] == [True, True, False]
+    counter.give_back("a")
+    assert counter.take("a") and counter.take("b")

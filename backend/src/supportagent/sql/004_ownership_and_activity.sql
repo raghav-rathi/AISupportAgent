@@ -18,6 +18,7 @@ UPDATE sessions SET turn_running = false WHERE turn_running;
 -- The events of one turn: its prompt traces on request, and what its earlier attempts used.
 CREATE INDEX session_events_turn_idx ON session_events (session_id, turn_id);
 -- What the deployment spent on model calls lately, for the daily budget.
-CREATE INDEX session_events_spend_idx ON session_events (created_at) WHERE type = 'llm.finished';
+CREATE INDEX session_events_spend_idx ON session_events (created_at)
+    WHERE type IN ('llm.finished', 'retrieval.result');
 CREATE INDEX worlds_created_idx ON worlds (created_at);
 CREATE INDEX sessions_active_idx ON sessions (last_active_at);

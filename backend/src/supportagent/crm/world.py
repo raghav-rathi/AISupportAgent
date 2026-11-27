@@ -114,19 +114,42 @@ async def delete_world(conn: AsyncConnection, world_id: str) -> None:
         await conn.execute("DELETE FROM worlds WHERE id = %s", (world_id,))
 
 
-async def purge_worlds(conn: AsyncConnection, older_than: timedelta) -> int:
-    """Delete worlds created more than `older_than` ago. Returns how many went."""
+# A world is in use while one of its sessions did something lately or is running a turn that some
+# process still renews. Such a world is never purged, however old it is.
+_UNUSED = sql.SQL(
+    "w.created_at < now() - %(age)s AND NOT EXISTS ("
+    "SELECT 1 FROM sessions s WHERE s.world_id = w.id AND (s.last_active_at > now() - %(age)s "
+    "OR (s.turn_running AND s.turn_heartbeat_at > now() - %(lease)s)))"
+)
+
+
+async def purge_worlds(
+    conn: AsyncConnection, older_than: timedelta, lease: timedelta = timedelta(seconds=45)
+) -> int:
+    """Delete worlds that are older than `older_than` and have not been used for as long.
+
+    Age alone would delete a conversation in the middle of a turn: its events would then fail to
+    store, and its saved state would be written back with no session to belong to. Returns how
+    many worlds went.
+    """
+    params = {"age": older_than, "lease": lease}
     async with conn.transaction():
+        cur = await conn.execute(
+            sql.SQL("SELECT w.id FROM worlds w WHERE {} FOR UPDATE OF w SKIP LOCKED").format(
+                _UNUSED
+            ),
+            params,
+        )
+        gone = [row["id"] for row in await cur.fetchall()]
+        if not gone:
+            return 0
         await _forget_threads(
             conn,
-            sql.SQL(
-                "thread_id IN (SELECT s.id FROM sessions s JOIN worlds w ON w.id = s.world_id "
-                "WHERE w.created_at < now() - %s)"
-            ),
-            (older_than,),
+            sql.SQL("thread_id IN (SELECT id FROM sessions WHERE world_id = ANY(%s))"),
+            (gone,),
         )
-        cur = await conn.execute("DELETE FROM worlds WHERE created_at < now() - %s", (older_than,))
-        return cur.rowcount
+        await conn.execute("DELETE FROM worlds WHERE id = ANY(%s)", (gone,))
+        return len(gone)
 
 
 async def forget_orphaned_threads(conn: AsyncConnection) -> int:

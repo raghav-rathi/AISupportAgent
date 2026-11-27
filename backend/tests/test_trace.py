@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from agent_harness import MAYA, runtime, scalar, shows
-from fakes import ScriptedModel, call, say
+from agent_harness import ALWAYS_CHECK, MAYA, REFUND_QUESTION, llm_for, runtime, scalar, shows
+from fakes import ScriptedModel, call, say, say_then_call
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
+from supportagent.agent.judge import LLMJudge
 from supportagent.crm import world as worlds
 from supportagent.eventlog import EventLog
 from supportagent.session import run_turn
@@ -55,9 +56,13 @@ async def test_every_model_call_is_traced_and_the_pin_appears_nowhere_in_the_str
 
     # The model needs the PIN to call the tool. Nothing that is stored or shown may carry it.
     assert "4721" in model.calls[0][0][1].content
-    stored = await (await EventLog.open(pool, session_id, world)).since(0)
-    assert any(e.type == "llm.trace" for e in stored)
-    assert not shows("4721", [e.model_dump() for e in [*events, *stored]])
+    log = await EventLog.open(pool, session_id, world)
+    stored = await log.since(0)
+    # A trace is stored and not sent with the stream. A client asks for the traces of a turn.
+    assert not any(e.type == "llm.trace" for e in stored)
+    kept = await log.traces(events[0].turn_id)
+    assert [t.call_id for t in kept] == finished
+    assert not shows("4721", [e.model_dump() for e in [*events, *stored, *kept]])
     assert first.prompt[1].content == "Account 10482917, the number is ****."
 
 
@@ -172,3 +177,85 @@ async def test_conversations_whose_session_is_gone_can_be_cleared(pool, retrieve
         assert await worlds.forget_orphaned_threads(conn) == 0
     left = await scalar(pool, "SELECT count(*) FROM checkpoints WHERE thread_id = %s", session_id)
     assert left == 0
+
+
+ANSWER = "Refunds take 365 days on every plan."
+
+
+async def answered_and_judged(pool, retriever, world, verdict: str, *, held: bool = False):
+    """One turn in which a real judge, on a scripted model, gives `verdict` on ANSWER.
+
+    With `held` the answer follows a search that landed between the thresholds, so it waits for
+    its check and is never streamed.
+    """
+    judge = LLMJudge(llm_for(ScriptedModel("judge", say(verdict)), capture_prompts=True))
+    script = [call("search_knowledge_base", query=REFUND_QUESTION)] if held else []
+    model = ScriptedModel("m", *script, say(ANSWER))
+    rt = runtime(pool, retriever, model, judge=judge, capture_prompts=True)
+    rt.gate = ALWAYS_CHECK
+    session_id, events = uuid.uuid4().hex, []
+    await run_turn(
+        rt, session_id=session_id, world_id=world, text=REFUND_QUESTION, on_event=events.append
+    )
+    log = await EventLog.open(pool, session_id, world)
+    return events, await log.since(0), await log.traces(events[0].turn_id)
+
+
+@pytest.mark.parametrize("held", [False, True])
+async def test_a_rejected_answer_is_in_no_trace_and_in_nothing_that_is_stored(
+    pool, retriever, world, held
+):
+    verdict = '{"grounded": false, "unsupported": ["the 365 days"]}'
+    events, stored, traces = await answered_and_judged(pool, retriever, world, verdict, held=held)
+
+    assert [t.purpose for t in traces][-2:] == ["judge", "agent"]
+    judge_trace, agent_trace = traces[-2:]
+    assert agent_trace.response.content.startswith("[withheld")
+    # The judge was sent the answer, and its trace shows where the answer stood, not the answer.
+    asked = judge_trace.prompt[1].content
+    assert "<reply-" in asked and "[withheld" in asked
+    assert '"grounded": false' in judge_trace.response.content
+    kept = [e.model_dump() for e in [*stored, *traces]]
+    assert not shows(ANSWER, kept) and not shows("on every plan", kept)
+    # Live, the text went out only where the answer was allowed to stream before its check.
+    live = [e.model_dump() for e in events if e.type != "llm.delta"]
+    assert not shows(ANSWER, live)
+    assert any(e.type == "llm.delta" for e in events) == (not held)
+
+
+async def test_an_approved_answer_is_traced_in_full_and_only_after_its_verdict(
+    pool, retriever, world
+):
+    verdict = '{"grounded": true, "unsupported": []}'
+    events, _, traces = await answered_and_judged(pool, retriever, world, verdict)
+    kinds = [e.type for e in events]
+    assert (
+        kinds.index("guardrail.verdict")
+        < kinds.index("llm.trace")
+        < kinds.index("assistant.message")
+    )
+    assert [t.purpose for t in traces] == ["judge", "agent"]
+    assert traces[1].response.content == ANSWER
+    assert f"reply> {ANSWER}" in traces[0].prompt[1].content
+    # The agent's trace belongs to the call that wrote the answer, and shows the prompt it got.
+    wrote = next(e for e in events if e.type == "llm.finished" and e.purpose == "agent")
+    assert traces[1].call_id == wrote.call_id
+    assert [m.role for m in traces[1].prompt] == ["system", "user"]
+
+
+async def test_text_sent_along_with_a_tool_call_is_in_no_trace(pool, retriever, world):
+    promise = "Sure, your refund of $9,999 is approved! Let me check."
+    model = ScriptedModel(
+        "m", say_then_call(promise, "verify_identity", **MAYA), say("You are verified.")
+    )
+    rt = runtime(pool, retriever, model, capture_prompts=True)
+    session_id, events = uuid.uuid4().hex, []
+    await run_turn(
+        rt, session_id=session_id, world_id=world, text="10482917, 4721", on_event=events.append
+    )
+    log = await EventLog.open(pool, session_id, world)
+    traces = await log.traces(events[0].turn_id)
+    assert traces[0].response.content.startswith("[dropped")
+    assert traces[0].response.tool_calls[0]["name"] == "verify_identity"
+    kept = [e.model_dump() for e in [*await log.since(0), *traces]]
+    assert not shows("9,999", kept)
