@@ -18,7 +18,7 @@ from agent_harness import (
     ScriptedJudge,
     shows,
 )
-from fake_deepgram import MS_PER_CHAR, FakeDeepgram
+from fake_deepgram import MS_PER_CHAR, SILENCE, FakeDeepgram
 from fakes import ScriptedModel, call, http_error, say, say_then_call, usage
 from pydantic import SecretStr
 from test_ws import Client
@@ -123,7 +123,7 @@ async def test_a_spoken_question_is_answered_aloud_and_a_typed_one_is_not(serve,
     assert caller.ready["voice"] is True
     started = await caller.call()
     assert (started["input_rate"], started["output_rate"]) == (16000, 24000)
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     assert speech.keys == ["Token test-key", "Token test-key"]
     assert ear.query["model"] == ["flux-general-en"] and "PIN" in ear.query["keyterm"]
 
@@ -136,7 +136,7 @@ async def test_a_spoken_question_is_answered_aloud_and_a_typed_one_is_not(serve,
     assert heard["end_of_turn_ms"] is not None and heard["speech_ms"] > 0
     await caller.until("turn.finished")
     await caller.hear(ms_of("Refunds take five days."))
-    assert mouth.replies == ["Refunds take five days."]
+    assert speech.replies == ["Refunds take five days."]
     assert ear.audio_bytes == 10 * 2560  # the microphone's audio reached the recogniser
 
     await caller.played(caller.audio_ms, after="drained")
@@ -149,7 +149,7 @@ async def test_a_spoken_question_is_answered_aloud_and_a_typed_one_is_not(serve,
     await caller.say("And for annual plans?")
     answer = await caller.until("assistant.message")
     await caller.until("turn.finished")
-    assert answer["text"] == "Thirty days for annual." and mouth.replies == [
+    assert answer["text"] == "Thirty days for annual." and speech.replies == [
         "Refunds take five days."
     ]
     assert [m.content for m in model.calls[1][0]][-3:-1] == [QUESTION, "Refunds take five days."]
@@ -166,12 +166,12 @@ async def test_text_the_model_writes_on_the_way_to_a_tool_is_never_said(serve, s
     rt.gate = ALWAYS_ANSWER
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
     await caller.until("turn.finished")
     # No citation number and no markup either: a voice cannot read them.
-    assert mouth.replies == ["You have 14 days to ask."]
-    assert mouth.warnings == [] and mouth.interrupts == []
+    assert speech.replies == ["You have 14 days to ask."]
+    assert speech.warnings == [] and speech.interrupts == []
     await caller.ws.close()
 
 
@@ -196,16 +196,16 @@ async def test_an_answer_the_gate_held_is_said_only_after_its_check(serve, speec
     rt.gate, rt.judge = ALWAYS_CHECK, SlowJudge(GROUNDED)
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
     drafted = await caller.until("answer.drafted")
     await rt.judge.asked.wait()
-    assert drafted["held"] is True and mouth.replies == [] and caller.audio_ms == 0
+    assert drafted["held"] is True and speech.replies == [] and caller.audio_ms == 0
 
     rt.judge.let.set()
     await caller.until("turn.finished")
     await caller.hear(ms_of("You have 14 days."))
-    assert mouth.replies == ["You have 14 days."]
+    assert speech.replies == ["You have 14 days."]
     await caller.ws.close()
 
 
@@ -217,20 +217,20 @@ async def test_an_answer_that_fails_its_check_is_cut_off_and_corrected_aloud(ser
     rt.gate, rt.judge = ALWAYS_ANSWER, SlowJudge(UNGROUNDED)
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
     # The gate was confident, so the answer is being said while the judge still reads.
     await rt.judge.asked.wait()
     await caller.hear(ms_of("You have 365 days."))
-    assert mouth.replies == ["You have 365 days."]
+    assert speech.replies == ["You have 365 days."]
 
     rt.judge.let.set()
     assert await caller.playback() == "flush"  # what the client has buffered must not be heard
     await caller.played(300, after="flush")
     message = await caller.until("assistant.message")
     await caller.until("turn.finished")
-    assert len(mouth.interrupts) == 1 and mouth.warnings == []
-    assert mouth.replies[1] == message["text"]
+    assert speech.warnings == []
+    assert speech.replies[1] == message["text"]
     assert message["text"].startswith("I need to take that back.")
     assert "on your screen" in message["text"] and "ESC-" not in message["text"]
     taken_back = caller.of("speech.spoken")[0]
@@ -256,17 +256,17 @@ async def test_a_sentence_the_check_adds_is_said_after_the_answer_and_counts_as_
     rt.gate, rt.judge = ALWAYS_ANSWER, ScriptedJudge(Verdict(grounded=True, unresolved=True))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, "Do you sell hardware?")
     await caller.until("turn.finished")
     # The answer was said before the check was done. The check found a question left open and
     # opened a ticket: the sentence about it waits until the answer has been heard.
-    assert mouth.replies == [answer]
+    assert speech.replies == [answer]
     await caller.hear(ms_of(answer))
     await caller.played(ms_of(answer), after="drained")
     assert (await caller.until("speech.spoken"))["interrupted"] is False
-    await eventually(lambda: len(mouth.replies) == 2)
-    added = mouth.replies[1]
+    await eventually(lambda: len(speech.replies) == 2)
+    added = speech.replies[1]
     assert added.startswith("I've passed this to a specialist") and "ESC-" not in added
 
     await caller.hear(ms_of(answer) + ms_of(added))
@@ -285,7 +285,7 @@ async def test_speaking_over_a_reply_keeps_only_what_was_heard(serve, speech):
     _, address = await serve(model, **voice(speech))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, QUESTION)
     first = await caller.until("turn.finished")
     await caller.hear(ms_of(REPLY))
@@ -299,7 +299,7 @@ async def test_speaking_over_a_reply_keeps_only_what_was_heard(serve, speech):
     cut = await caller.until("speech.spoken")
     assert (cut["interrupted"], cut["played_ms"], cut["text_spoken"]) == (True, 600, "Refunds take")
     assert cut["turn_id"] == first["turn_id"]
-    assert mouth.interrupts[0]["audio_played_ms"] == 600
+    assert speech.interrupts[0]["audio_played_ms"] == 600
     await caller.played(600, after="flush")
 
     await ear.say("EndOfTurn", "Wait, what about annual plans?")
@@ -318,7 +318,7 @@ async def test_speaking_over_a_reply_keeps_only_what_was_heard(serve, speech):
     await caller.played(600 + 500, after="pause")
     again = await caller.until("speech.spoken")
     assert (again["played_ms"], again["text_spoken"]) == (500, "Annual pla")
-    assert mouth.warnings == []
+    assert speech.warnings == []
     await caller.ws.close()
 
 
@@ -327,7 +327,7 @@ async def test_speaking_while_the_agent_thinks_stops_that_turn_for_good(serve, s
     _, address = await serve(model, **voice(speech))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, "Refund my last invoice")
     await caller.until("llm.delta")
 
@@ -345,7 +345,7 @@ async def test_speaking_while_the_agent_thinks_stops_that_turn_for_good(serve, s
         "(The customer interrupted before hearing any of my reply.)",
         "Actually, forget it.",
     ]
-    assert mouth.replies == ["Cancelled."]  # nothing of the stopped turn was said
+    assert speech.replies == ["Cancelled."]  # nothing of the stopped turn was said
     await caller.ws.close()
 
 
@@ -353,7 +353,7 @@ async def test_the_assistants_own_voice_in_the_microphone_is_not_an_interruption
     _, address = await serve(ScriptedModel("m", say(REPLY)), **voice(speech))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, QUESTION)
     await caller.until("turn.finished")
     await caller.hear(ms_of(REPLY))
@@ -364,7 +364,7 @@ async def test_the_assistants_own_voice_in_the_microphone_is_not_an_interruption
     await ear.say("EndOfTurn", "Refunds take five days. Is there anything else")
     await caller.played(ms_of(REPLY), after="drained")
     spoken = await caller.until("speech.spoken")
-    assert spoken["interrupted"] is False and mouth.interrupts == []
+    assert spoken["interrupted"] is False and speech.interrupts == []
     assert len(caller.of("turn.started")) == 1 and len(caller.of("stt.partial")) == 2
     await caller.ws.close()
 
@@ -373,7 +373,7 @@ async def test_without_echo_cancellation_only_the_button_interrupts(serve, speec
     _, address = await serve(ScriptedModel("m", say(REPLY)), **voice(speech))
     caller = await Caller.open(address)
     await caller.call(echo_cancellation=False)
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, QUESTION)
     await caller.until("turn.finished")
     await caller.hear(ms_of(REPLY))
@@ -398,10 +398,10 @@ async def test_an_account_number_gets_time_and_the_pin_stays_masked(serve, speec
     _, address = await serve(model, **voice(speech))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, "I need a refund")
     await caller.until("turn.finished")
-    await caller.hear(ms_of(mouth.text))
+    await caller.hear(ms_of(speech.replies[-1]))
     await caller.played(caller.audio_ms, after="drained")
     await caller.until("speech.spoken")
     # The reply asked for digits: the recogniser now waits out pauses and writes numerals.
@@ -428,6 +428,54 @@ async def test_an_account_number_gets_time_and_the_pin_stays_masked(serve, speec
     assert caller.of("tool.finished")[0]["outcome"] == "ok"
     assert not shows("4721", caller.events)
     await eventually(lambda: ear.configured[-1]["numerals"] is False)  # back to usual
+    await caller.ws.close()
+
+
+async def test_a_long_silence_in_the_voice_is_cut_short_and_what_was_heard_still_comes_out_right(
+    serve, speech
+):
+    # The voice says "Refunds take ", is silent for two seconds, and goes on with " five days."
+    reply = f"Refunds take {SILENCE * 40} five days."
+    _, address = await serve(ScriptedModel("m", say(reply)), **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, QUESTION)
+    await caller.until("turn.finished")
+    # 3.2 s were made. The client gets the words, 240 ms of the pause, and the 80 ms before the
+    # voice goes on.
+    await caller.hear(1600)
+    await asyncio.sleep(0.2)
+    assert caller.audio_ms == 1600
+
+    # Stopped 1.2 s into what the client played: that is 2.8 s into what the voice made.
+    await caller.send(type="voice.interrupt", played_ms=1200)
+    cut = await caller.until("speech.spoken")
+    assert speech.interrupts[0]["audio_played_ms"] == 2800
+    assert cut["played_ms"] == 1200 and cut["text_spoken"].endswith(" fi")
+    await caller.ws.close()
+
+
+async def test_a_voice_connection_that_drops_takes_its_reply_and_not_the_conversation(
+    serve, speech
+):
+    model = ScriptedModel("m", say(REPLY), say("Still here."))
+    _, address = await serve(model, **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, QUESTION)
+    await caller.until("turn.finished")
+    await caller.hear(ms_of(REPLY))
+    await speech.speaking[0].ws.close()
+    assert await caller.playback() == "flush"
+    assert (await caller.until("speech.spoken"))["interrupted"] is True
+    await caller.played(300, after="flush")
+
+    await ask(caller, ear, "Are you still there?")
+    await caller.until("turn.finished")
+    await caller.hear(ms_of(REPLY) + ms_of("Still here."))
+    assert speech.replies == [REPLY, "Still here."] and caller.of("voice.stopped") == []
     await caller.ws.close()
 
 
@@ -465,10 +513,9 @@ async def test_when_speech_is_down_the_conversation_goes_on_in_text(serve, speec
     # A socket that drops once is opened again, and the customer notices nothing.
     speech.down = False
     await caller.call()
-    ear, _ = await speech.connected()
+    ear = await speech.ear()
     await ear.ws.close()
-    ear, _ = await speech.connected(pairs=2)
-    assert await caller.playback() == "flush"
+    ear = await speech.ear(2)
     await ask(caller, ear, "Still there?")
     await caller.until("turn.finished")
     # A second drop soon after means the service is down.
@@ -494,10 +541,10 @@ async def test_a_turn_that_fails_says_so_aloud(serve, speech):
     _, address = await serve(ScriptedModel("down", [http_error(401)]), **voice(speech))
     caller = await Caller.open(address)
     await caller.call()
-    ear, mouth = await speech.connected()
+    ear = await speech.ear()
     await ask(caller, ear, QUESTION)
     await caller.until("turn.failed")
-    await eventually(lambda: mouth.replies == [TURN_FAILED])
+    await eventually(lambda: speech.replies == [TURN_FAILED])
     await caller.ws.close()
 
 
@@ -551,17 +598,17 @@ async def test_voice_says_hello_once_and_the_greeting_is_no_turn(serve, speech):
     )
     caller = await Caller.open(address)
     await caller.call()
-    _, mouth = await speech.connected()
+    await speech.ear()
     await caller.hear(ms_of(GREETING))
     await caller.played(caller.audio_ms, after="drained")
     spoken = await caller.until("speech.spoken")
-    assert mouth.replies == [GREETING] and spoken["turn_id"] is None and spoken["cost_usd"] > 0
+    assert speech.replies == [GREETING] and spoken["turn_id"] is None and spoken["cost_usd"] > 0
     assert caller.of("turn.started") == [] and caller.of("assistant.message") == []
     await caller.send(type="voice.stop")
     await caller.until("voice.stopped")
     await caller.call()
-    _, mouth = await speech.connected(pairs=2)
+    await speech.ear(2)
     await caller.mic(3)
     await asyncio.sleep(0.2)
-    assert mouth.replies == []  # not a second time in the same conversation
+    assert speech.replies == [GREETING]  # not a second time in the same conversation
     await caller.ws.close()

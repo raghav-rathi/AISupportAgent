@@ -11,9 +11,10 @@ Run with a script, a JSON list of steps:
     uv run python -m supportagent.cli.voice_client ws://127.0.0.1:8791/ws script.json
 
     [{"say": "wav/hello.wav"},                       wait until nobody speaks, then say it
+     {"say": "wav/long.wav", "hear_out": false},    say it and do not wait for the reply to end
      {"say": "wav/wait.wav", "over_ms": 1500},       say it 1.5 s into the reply that is playing
      {"type": "What is my refund limit?"},           send a typed message
-     {"stop_at_ms": 1200},                           press Stop 1.2 s into the next reply
+     {"say": "wav/long.wav", "stop_at_ms": 1200},   say it, and press Stop 1.2 s into the reply
      {"wait_s": 2}]
 
 WAV files are mono PCM16 at 16 kHz. Paths are relative to the script. Times are in milliseconds
@@ -228,7 +229,19 @@ class Caller:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self.arrived.wait(), max(left_s, 0.05))
 
-    async def say(self, path: Path, over_ms: float | None) -> dict:
+    async def say(
+        self,
+        path: Path,
+        over_ms: float | None = None,
+        hear_out: bool = True,
+        stop_at_ms: float | None = None,
+    ) -> dict:
+        """Say one clip and report what came of it.
+
+        `over_ms` says it that long into the reply that is playing. `hear_out` false returns as
+        soon as the turn has started, for a next step that speaks over the reply. `stop_at_ms`
+        presses Stop that long into the reply.
+        """
         pcm, onset_s, end_s = read_wav(path)
         mark = len(self.events)
         if over_ms is None:
@@ -236,6 +249,7 @@ class Caller:
             await asyncio.sleep(0.6)
             mark = len(self.events)
             self.first_audio_at = None
+            self.stop_at_ms = stop_at_ms
         else:
             await self.until(lambda: self.first_audio_at is not None)
             await asyncio.sleep(max(0.0, self.first_audio_at + over_ms / 1000 - self.now()))
@@ -248,12 +262,8 @@ class Caller:
             cut = await self.until(lambda: self.since(mark, "speech.spoken"), 20)
             if self.paused_at is not None:
                 result["pause_after_onset_ms"] = round((self.paused_at - onset_at) * 1000)
-            if cut and self.cuts is not None:
-                played = bytes(self.player.heard[self.reply_from_byte :])
-                name = f"cut_{self.session_id[:6]}_{mark}.wav"
-                save_wav(self.cuts / name, played, self.player.rate)
-                result["cut_wav"] = name
             if cut:
+                result |= self.keep_cut(mark)
                 result |= {
                     "cut_played_ms": cut[0]["played_ms"],
                     "cut_text_spoken": cut[0]["text_spoken"],
@@ -266,6 +276,8 @@ class Caller:
         turn_id = started[0]["turn_id"]
         result["heard"] = started[0]["text"]
         result["turn_after_speech_ms"] = round((started[0]["at"] - end_at) * 1000)
+        if not hear_out:
+            return result  # the next step speaks over the reply to this one
 
         def over() -> bool:
             done = [e for e in self.since(mark, "speech.spoken") if e.get("turn_id") == turn_id]
@@ -294,7 +306,19 @@ class Caller:
         if first:
             result["first_audio_after_speech_ms"] = round((first[0]["at"] - end_at) * 1000)
             result["first_audio_after_turn_ms"] = round((first[0]["at"] - started[0]["at"]) * 1000)
+        if spoken.get("interrupted"):
+            result |= self.keep_cut(mark)
         return result
+
+    def keep_cut(self, mark: int) -> dict:
+        """Write what was played of the reply that was just cut off, to compare with the record."""
+        if self.cuts is None:
+            return {}
+        self.player.advance()
+        name = f"cut_{self.session_id[:6]}_{mark}.wav"
+        played = bytes(self.player.heard[self.reply_from_byte :])
+        save_wav(self.cuts / name, played, self.player.rate)
+        return {"cut_wav": name}
 
     async def type(self, text: str) -> dict:
         await self.quiet()
@@ -307,7 +331,7 @@ class Caller:
         return {
             "type": text,
             "reply": message[0]["text"] if message else None,
-            "tools": len(self.since(mark, "tool.started")),
+            "tools": [event["name"] for event in self.since(mark, "tool.started")],
         }
 
 
@@ -331,11 +355,16 @@ async def run(args: argparse.Namespace, steps: list[dict], folder: Path) -> list
         results = []
         for step in steps:
             if "say" in step:
-                results.append(await caller.say(folder / step["say"], step.get("over_ms")))
+                results.append(
+                    await caller.say(
+                        folder / step["say"],
+                        step.get("over_ms"),
+                        step.get("hear_out", True),
+                        step.get("stop_at_ms"),
+                    )
+                )
             elif "type" in step:
                 results.append(await caller.type(step["type"]))
-            elif "stop_at_ms" in step:
-                caller.stop_at_ms = step["stop_at_ms"]
             elif "wait_s" in step:
                 await asyncio.sleep(step["wait_s"])
             if caller.closed:

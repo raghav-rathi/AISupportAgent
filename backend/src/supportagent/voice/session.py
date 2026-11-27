@@ -20,21 +20,26 @@ event of the agent's turn, a report from the client's player, a tick of the cloc
 go through the loop. The microphone's audio goes straight to the recogniser, and the voice's
 audio straight to the client.
 
-Two clocks count audio. The client reports how many milliseconds it has played since voice
-started. The synthesis counts what it believes was heard since its socket opened. They agree
-until a reply is cut: the client then drops what it had buffered, and the synthesis is told
-where playback stood. `_client_at` and `_synth_at` hold the same moment on both clocks, the start
-of the reply in progress, and every position in between is translated through them.
+Each reply is spoken on a connection of its own, opened ahead of time. On a connection that has
+spoken before, the voice begins the next reply with a silence, a second long in most trials and
+over four in the worst: it treats the two replies as one speech and pauses between them. The
+first reply on a connection starts at once.
+
+The voice also pauses for a second or more between sentences, in most sessions. Silence beyond
+a short pause is left out of what the client gets. So the client's playhead and the voice's own
+clock run apart, and each reply keeps the places where audio was left out, to say in the voice's
+terms where the customer stopped listening.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import operator
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
@@ -77,6 +82,11 @@ _DIGITS_SETTLED_S = 0.6  # no new digit for this long: they are all in
 _MIC_SILENT_S = 8.0  # no audio from the client for this long: the microphone is gone
 _AHEAD_S = 5.0  # audio may arrive this much faster than time passes, and no more
 _RECONNECT_ONCE_PER_S = 30.0
+# The voice's silence is a noise floor of 15 to 30 on the 16-bit scale. Its quietest speech
+# measured ten times that.
+_SILENT_RMS = 50
+# How much of a silence the client gets: this, and the last 80 ms before the voice goes on.
+_PAUSE_MS = 240.0
 # How the recogniser takes a turn. In digit mode it never ends a turn by itself: the turn ends
 # when the digits are in, when a sentence without digits is plainly over, or after 3 s of
 # silence. Tried against the live service: at any lower threshold a 1.5 s pause inside an account
@@ -88,6 +98,12 @@ StopReason = Literal["client", "idle", "limit", "replaced", "error"]
 Admit = Callable[[str], Awaitable[ProtocolError | None]]
 
 
+def _silent(audio: bytes) -> bool:
+    """Whether a piece of the voice's audio holds its noise floor and nothing else."""
+    samples = memoryview(audio[: len(audio) & ~1]).cast("h")
+    return sum(map(operator.mul, samples, samples)) < _SILENT_RMS**2 * len(samples)
+
+
 @dataclass(frozen=True)
 class VoiceLimits:
     max_seconds: float = 600.0  # one voice session
@@ -96,21 +112,45 @@ class VoiceLimits:
     max_chars: int = 2_000  # of one spoken message, as for a typed one
 
 
-@dataclass
+@dataclass(eq=False)
+class _Line:
+    """One connection to the synthesis, and the reply it speaks once it has one."""
+
+    speaker: FluxSpeaker | None = None
+    opening: asyncio.Task[None] | None = None
+    reply: _Reply | None = None
+
+
+@dataclass(eq=False)
 class _Reply:
     """One reply on its way to the customer's ear."""
 
     turn_id: str | None  # None for wording of our own that belongs to no turn
-    began: float  # when its first text went to the synthesis
+    began: float  # when its text went to the synthesis
     after: float | None  # when the customer stopped speaking, if this answers them
+    line: _Line
     text: str = ""  # what has gone to the synthesis
     before: str = ""  # an earlier piece of the same answer, heard to its end
     then: str | None = None  # a piece of the same answer to say when this one has played
-    first_audio: float | None = None
+    first_audio: float | None = None  # when its first sound went to the client
     sent_ms: float = 0.0  # audio passed on to the client
+    made_ms: float = 0.0  # audio the synthesis has made, its silences included
+    quiet_ms: float = _PAUSE_MS  # of the silence in progress, what was passed on. None at first.
+    held: bytes | None = None  # the newest piece of silence that was left out
+    # Where audio was left out: the place in what the client got, and in what was made.
+    skips: list[tuple[float, float]] = field(default_factory=list)
     made: Spoken | None = None  # the synthesis has made all of its audio
     due: float | None = None  # by when the client must have played it
     over: bool = False  # played to the end, or cut
+
+    def in_voice_time(self, heard_ms: float) -> float:
+        """Where the voice's own clock stood when the client had played this much of the reply."""
+        sent, made = 0.0, 0.0
+        for skip in self.skips:
+            if skip[0] > heard_ms:
+                break
+            sent, made = skip
+        return made + (heard_ms - sent)
 
 
 @dataclass
@@ -152,14 +192,16 @@ class VoiceSession:
         self._inbox: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self._tasks: list[asyncio.Task[None]] = []
         self._hearing: asyncio.Task[None] | None = None
-        self._sockets = 0  # goes up when the speech sockets are opened again
+        self._closing: set[asyncio.Task[None]] = set()  # connections being closed
+        self._listeners = 0  # goes up when the recogniser's socket is opened again
         self._listener = FluxListener(config)
-        self._speaker = self._new_speaker()
+        self._spare = self._line()  # the connection the next reply will be spoken on
         self._unlisten: Callable[[], None] | None = None
         self._stopped = False
         self._status_now: str | None = None
         self._began = self._active_at = self._mic_at = clock()
         self._reconnected_at: float | None = None
+        self._line_failed_at: float | None = None
         # The microphone.
         self._fed_s = 0.0  # audio received since voice started
         self._unbilled_s = 0.0  # of that, what no stored event has accounted for
@@ -187,29 +229,45 @@ class VoiceSession:
         self._played = 0.0  # the client's last report
         self._pause_pending = False  # the client has been told to pause and has not answered
         self._pause_seen = asyncio.Event()
-        self._client_at: float | None = 0.0  # None between a cut and the client's word on it
-        self._synth_at = 0.0
+        # The client's playhead at the start of the reply in progress. None between a cut and
+        # the client's word on where it stood.
+        self._client_at: float | None = 0.0
 
-    def _new_speaker(self) -> FluxSpeaker:
-        sockets = self._sockets
-        return FluxSpeaker(
+    def _line(self) -> _Line:
+        """A connection to the synthesis that is not open yet."""
+        line = _Line()
+        line.speaker = FluxSpeaker(
             self._config,
-            on_audio=self._audio,
-            on_spoken=lambda spoken: self._post("spoken", spoken),
-            on_failed=lambda error: self._post("failed", (sockets, error)),
+            on_audio=lambda audio: self._audio(line, audio),
+            on_spoken=lambda spoken: self._post("spoken", (line, spoken)),
+            on_failed=lambda error: self._post("line_failed", (line, error)),
         )
+        return line
+
+    def _warm(self) -> None:
+        """Open the connection for the reply after this one, so it is there when needed."""
+        self._spare = self._line()
+        self._spare.opening = asyncio.create_task(self._spare.speaker.open())
+
+    def _hang_up(self, line: _Line) -> None:
+        """Close a connection whose reply is over, without making anyone wait for it."""
+        if line.opening is not None:
+            line.opening.cancel()
+        task = asyncio.create_task(line.speaker.close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
     # Starting and stopping.
 
     async def start(self) -> None:
-        """Open both speech sockets and take the hub's events. Raises SpeechError if that fails."""
+        """Open the speech sockets and take the hub's events. Raises SpeechError if that fails."""
         if self._hub.speech_down > 0:
             self._hub.speech_down -= 1
             raise SpeechError("simulated failure")
         try:
-            await asyncio.gather(self._listener.open(), self._speaker.open())
+            await asyncio.gather(self._listener.open(), self._spare.speaker.open())
         except SpeechError:
-            await asyncio.gather(self._listener.close(), self._speaker.close())
+            await asyncio.gather(self._listener.close(), self._spare.speaker.close())
             raise
         self._began = self._active_at = self._mic_at = self._clock()
         self._hub.voice = self
@@ -218,7 +276,7 @@ class VoiceSession:
             VoiceStarted(input_rate=self._config.input_rate, output_rate=self._config.output_rate)
         )
         self._status("listening")
-        self._hearing = asyncio.create_task(self._hear(self._listener, self._sockets))
+        self._hearing = asyncio.create_task(self._hear(self._listener, self._listeners))
         self._tasks = [asyncio.create_task(self._run()), asyncio.create_task(self._tick())]
         if self._limits.greeting and self._hub.turns == 0 and not self._hub.greeted:
             self._hub.greeted = True
@@ -241,14 +299,20 @@ class VoiceSession:
         if self._hub.voice is self:
             self._hub.voice = None
         me = asyncio.current_task()
-        for task in (*self._tasks, self._hearing):
+        for task in (*self._tasks, self._hearing, self._spare.opening):
             if task is not None and task is not me:
                 task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await task
-        await asyncio.gather(self._listener.close(), self._speaker.close(), return_exceptions=True)
+        reply = self._reply
+        lines = [self._spare] + ([reply.line] if reply is not None and not reply.over else [])
+        await asyncio.gather(
+            self._listener.close(),
+            *(line.speaker.close() for line in lines),
+            *self._closing,
+            return_exceptions=True,
+        )
         try:
-            reply = self._reply
             if reply is not None and not reply.over:
                 # Cut off by the end of voice. The full text is on the screen.
                 await self._account(reply, interrupted=True)
@@ -298,14 +362,36 @@ class VoiceSession:
         """The customer stopped the reply by hand, and their player has dropped the rest."""
         self._post("stop_pressed", played_ms)
 
-    def _audio(self, audio: bytes) -> None:
-        """A piece of the reply's audio from the synthesis: straight on to the client."""
-        reply = self._reply
+    def _audio(self, line: _Line, audio: bytes) -> None:
+        """A piece of a reply's audio from the synthesis: on to the client, without long silences.
+
+        A silence is passed on up to `_PAUSE_MS`. What comes after that is left out, except the
+        last piece before the voice goes on, so that a soft first sound is not clipped. A reply
+        starts as if such a silence had just been passed: one before its first sound goes too.
+        """
+        reply = line.reply
         if reply is None or reply.over or self._stopped:
             return
+        ms = len(audio) / 2 / self._config.output_rate * 1000
+        silent = _silent(audio)
+        if silent and reply.quiet_ms >= _PAUSE_MS:
+            reply.held = audio
+        else:
+            if reply.held is not None and not silent:
+                held_ms = len(reply.held) / 2 / self._config.output_rate * 1000
+                self._pass(reply, reply.held, reply.made_ms - held_ms)
+            self._pass(reply, audio, reply.made_ms)
+            reply.held = None
+            reply.quiet_ms = reply.quiet_ms + ms if silent else 0.0
+        reply.made_ms += ms
+
+    def _pass(self, reply: _Reply, audio: bytes, made_at: float) -> None:
+        """Send one piece of audio to the client. `made_at` is its place in what the voice made."""
         if reply.first_audio is None:
             reply.first_audio = self._clock()
             self._status("speaking")
+        if abs(reply.in_voice_time(reply.sent_ms) - made_at) > 0.5:
+            reply.skips.append((reply.sent_ms, made_at))
         reply.sent_ms += len(audio) / 2 / self._config.output_rate * 1000
         self._sub.offer(audio)
 
@@ -341,14 +427,14 @@ class VoiceSession:
 
     # The loop.
 
-    async def _hear(self, listener: FluxListener, sockets: int) -> None:
+    async def _hear(self, listener: FluxListener, number: int) -> None:
         try:
             async for turn in listener.turns():
                 self._post("turn", turn)
             error = SpeechError("speech to text closed the connection")
         except SpeechError as exc:
             error = exc
-        self._post("failed", (sockets, error))
+        self._post("listener_failed", (number, error))
 
     async def _tick(self) -> None:
         while True:
@@ -361,7 +447,7 @@ class VoiceSession:
             try:
                 await getattr(self, f"_on_{kind}")(payload)
             except SpeechError as exc:
-                await self._on_failed((self._sockets, exc))
+                await self._on_down(exc)
             except Exception:
                 logger.exception("voice failed in session %s", self._hub.session_id)
                 await self._shutdown("error", "voice ran into a problem, go on in text")
@@ -406,40 +492,62 @@ class VoiceSession:
         logger.warning("speech is down in session %s: %s", self._hub.session_id, error)
         await self._shutdown("error", "speech is unavailable right now, go on in text")
 
-    async def _on_failed(self, failure: tuple[int, SpeechError]) -> None:
-        """A speech socket broke. Both are opened again, once. If that fails, voice is over."""
-        sockets, error = failure
-        if sockets != self._sockets:
+    async def _on_listener_failed(self, failure: tuple[int, SpeechError]) -> None:
+        """The recogniser's socket broke. It is opened again, once. If that fails, voice is over."""
+        number, error = failure
+        if number != self._listeners:
             return  # a socket that has been replaced already
         now = self._clock()
-        logger.warning("a speech socket broke in session %s: %s", self._hub.session_id, error)
+        logger.warning("the recogniser dropped in session %s: %s", self._hub.session_id, error)
         again = self._reconnected_at is None or now - self._reconnected_at > _RECONNECT_ONCE_PER_S
         if again and self._hub.speech_down == 0:
             self._reconnected_at = now
-            reply = self._reply
-            if reply is not None and not reply.over:
-                reply.over = True
-                await self._account(reply, interrupted=True)
-            self._flush_client()
-            self._synth_at = 0.0
             self._utterance = self._deaf = self._paused_at = self._echo_of = None
-            old = (self._listener, self._speaker)
-            self._sockets += 1
-            self._listener, self._speaker = FluxListener(self._config), self._new_speaker()
+            old = self._listener
+            self._listeners += 1
+            self._listener = FluxListener(self._config)
             if self._hearing is not None:
                 self._hearing.cancel()
-            await asyncio.gather(*(socket.close() for socket in old), return_exceptions=True)
+            await old.close()
             try:
-                await asyncio.gather(self._listener.open(), self._speaker.open())
+                await self._listener.open()
             except SpeechError as exc:
                 error = exc
             else:
                 if self._digit_mode:
                     await self._listener.configure(**_DIGITS)
-                self._hearing = asyncio.create_task(self._hear(self._listener, self._sockets))
-                self._rest()
+                self._hearing = asyncio.create_task(self._hear(self._listener, self._listeners))
+                if self._audible() is None:
+                    self._rest()
                 return
         await self._on_down(error)
+
+    async def _on_line_failed(self, failure: tuple[_Line, SpeechError]) -> None:
+        """A connection to the synthesis broke.
+
+        A spare one that nobody has spoken on is replaced, and that is all: the service closes
+        connections that sit idle. One that was speaking takes its reply with it. The text of
+        that reply is on the screen, and the next one gets a new connection. Twice in half a
+        minute means the service is down.
+        """
+        line, error = failure
+        if line is self._spare:
+            self._warm()
+            return
+        reply = line.reply
+        if reply is None or reply.over:
+            return
+        now = self._clock()
+        logger.warning("the voice dropped in session %s: %s", self._hub.session_id, error)
+        again = self._line_failed_at is None or now - self._line_failed_at > _RECONNECT_ONCE_PER_S
+        self._line_failed_at = now
+        if not again or self._hub.speech_down > 0:
+            await self._on_down(error)
+            return
+        self._flush_client()
+        self._hang_up(line)
+        await self._account(reply, interrupted=True)
+        self._rest()
 
     # The customer speaks.
 
@@ -681,18 +789,32 @@ class VoiceSession:
             await self._speak(turn_id, rest, before=said)
 
     async def _speak(self, turn_id: str | None, words: str, before: str = "") -> None:
-        """Hand one complete piece of text to the synthesis, as the reply now being spoken."""
+        """Hand one complete piece of text to the synthesis, as the reply now being spoken.
+
+        It takes the connection that was opened for it and has another one opened for the
+        reply after it.
+        """
         current = self._audible()
         if current is not None:
             await self._settle(current)
+        line = self._spare
+        self._warm()
+        try:
+            if line.opening is not None:
+                await line.opening
+        except SpeechError:
+            # It did not open, perhaps long ago. One more try, now that it is needed.
+            line = self._line()
+            await line.speaker.open()
         after = self._speech_end if turn_id is not None and not before else None
-        self._reply = _Reply(
-            turn_id=turn_id, began=self._clock(), after=after, text=words, before=before
+        reply = _Reply(
+            turn_id=turn_id, began=self._clock(), after=after, line=line, text=words, before=before
         )
+        line.reply = self._reply = reply
         if turn_id is not None:
             self._said_text[turn_id] = f"{before} {words}".strip()
-        await self._speaker.speak(words)
-        await self._speaker.flush()
+        await line.speaker.speak(words)
+        await line.speaker.flush()
 
     async def _settle(self, reply: _Reply) -> None:
         """Make room for the next reply: this one has been played, or it is cut."""
@@ -735,30 +857,28 @@ class VoiceSession:
         heard_ms = 0.0
         if self._client_at is not None and reply.first_audio is not None:
             heard_ms = max(0.0, min(position - self._client_at, reply.sent_ms))
-        # The synthesis takes a position only past the last one it was given. Without one it
-        # stops all the same, and counts everything it has made as heard.
-        offset = self._synth_at + heard_ms if keep and heard_ms > 0 else None
-        result = await self._speaker.interrupt(offset)
-        if result is None and offset is not None:
-            result = await self._speaker.interrupt(None)
+        heard: str | None = None
+        result = None
+        if keep and heard_ms > 0:
+            # The voice is told where playback stood, on its own clock, and says which words
+            # that was. Its clock began with this reply: the connection has spoken nothing else.
+            result = await reply.line.speaker.interrupt(reply.in_voice_time(heard_ms))
+            heard = result.text_spoken if result is not None else None
         if flushed:
             self._pause_pending = False
             self._client_at = position
         else:
             self._flush_client()
-        heard: str | None = None
-        if result is not None:
-            self._synth_at = result.played_ms
-            if offset is not None:
-                heard = result.text_spoken
         if keep and heard is None:
-            # The synthesis could not say. Nothing played means nothing heard. Otherwise this is
-            # an estimate from the time played, at the pace the voice speaks, cut at a word.
+            # The voice could not say. Nothing played means nothing heard. Otherwise this is an
+            # estimate from the time played, at the pace the voice speaks, cut at a word.
             total_ms = reply.made.audio_ms if reply.made is not None else 0.0
-            chars = len(reply.text) * heard_ms / total_ms if total_ms else heard_ms * 0.014
+            voice_ms = reply.in_voice_time(heard_ms)
+            chars = len(reply.text) * voice_ms / total_ms if total_ms else heard_ms * 0.014
             heard = reply.text[: int(chars)].rsplit(" ", 1)[0] if heard_ms else ""
         if keep:
             heard = f"{reply.before} {heard}".strip()
+        self._hang_up(reply.line)  # which also stops what the voice was still making
         await self._account(
             reply,
             made=result.spoken if result is not None else None,
@@ -768,9 +888,10 @@ class VoiceSession:
         )
         return heard if keep else None
 
-    async def _on_spoken(self, spoken: Spoken) -> None:
-        reply = self._audible()
-        if reply is None or reply.made is not None:
+    async def _on_spoken(self, done: tuple[_Line, Spoken]) -> None:
+        line, spoken = done
+        reply = line.reply
+        if reply is None or reply.over or reply.made is not None:
             return
         reply.made = spoken
         # Audio arrives faster than it plays. The client says when it has played the last of it,
@@ -793,11 +914,10 @@ class VoiceSession:
 
     async def _played_out(self, reply: _Reply) -> None:
         reply.over = True
-        # Both clocks move on by the audio that was passed on, which is all of it.
         if self._client_at is not None:
             self._client_at += reply.sent_ms
-        self._synth_at += reply.sent_ms
         self._active_at = self._clock()
+        self._hang_up(reply.line)
         await self._account(reply, made=reply.made, interrupted=False)
         if reply.then:
             await self._speak(reply.turn_id, reply.then, f"{reply.before} {reply.text}".strip())
@@ -816,12 +936,11 @@ class VoiceSession:
         """Store what a reply cost and how fast it came, once, when it is over."""
         reply.over = True
         chars = made.chars if made is not None and made.chars else len(reply.text)
-        audio_ms = made.audio_ms if made is not None and made.audio_ms else reply.sent_ms
         first = reply.first_audio
         await self._hub.record(
             SpeechSpoken(
                 chars=chars,
-                audio_ms=round(audio_ms),
+                audio_ms=round(reply.sent_ms),
                 synthesis_ms=round((first - reply.began) * 1000) if first is not None else None,
                 voice_to_voice_ms=(
                     round((first - reply.after) * 1000)

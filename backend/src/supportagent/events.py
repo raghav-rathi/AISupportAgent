@@ -392,7 +392,7 @@ class SpeechSpoken(_Event):
 
     type: Literal["speech.spoken"] = "speech.spoken"
     chars: int  # what the synthesis is billed for
-    audio_ms: float  # audio that was made for this reply
+    audio_ms: float  # audio that went to the customer for this reply, long silences left out
     synthesis_ms: float | None  # from the text going out to the first audio coming back
     # From the end of the customer's last word to the first audio on its way to them.
     voice_to_voice_ms: float | None
