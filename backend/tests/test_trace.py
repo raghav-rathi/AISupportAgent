@@ -259,3 +259,69 @@ async def test_text_sent_along_with_a_tool_call_is_in_no_trace(pool, retriever, 
     assert traces[0].response.tool_calls[0]["name"] == "verify_identity"
     kept = [e.model_dump() for e in [*await log.since(0), *traces]]
     assert not shows("9,999", kept)
+
+
+NOWHERE = {
+    "session_events": 0,
+    "tickets": 0,
+    "checkpoints": 0,
+    "checkpoint_blobs": 0,
+    "checkpoint_writes": 0,
+}
+
+
+async def test_a_pin_the_model_repeats_after_verifying_is_not_saved(pool, retriever, saver, today):
+    world, session_id = f"test-{uuid.uuid4().hex[:12]}", uuid.uuid4().hex
+    async with pool.connection() as conn:
+        await worlds.create_world(conn, world, today)
+    # verify_identity clears the conversation of the PIN. This model then writes it twice more.
+    model = ScriptedModel(
+        "m",
+        call("verify_identity", account_number="10482917", pin="4/7/2/1"),
+        call(
+            "create_escalation_ticket",
+            reason="customer_request",
+            summary="Asked for a person after giving 4/7/2/1",
+            priority="normal",
+        ),
+        say("A specialist will follow up. Your PIN 4 7 2 1 stays private."),
+    )
+    rt = runtime(pool, retriever, model, checkpointer=saver)
+    try:
+        events: list = []
+        await run_turn(
+            rt,
+            session_id=session_id,
+            world_id=world,
+            text="My account is 10482917 and my PIN is 4/7/2/1. Please connect me to a person.",
+            on_event=events.append,
+        )
+        assert events[-1].type == "turn.finished"
+        for needle in ("4/7/2/1", "4 7 2 1"):
+            assert await rows_holding(pool, session_id, world, needle) == NOWHERE, needle
+    finally:
+        async with pool.connection() as conn:
+            await worlds.delete_world(conn, world)
+
+
+async def test_a_pin_that_was_typed_and_never_used_is_gone_a_turn_later(
+    pool, retriever, saver, today
+):
+    world, session_id = f"test-{uuid.uuid4().hex[:12]}", uuid.uuid4().hex
+    async with pool.connection() as conn:
+        await worlds.create_world(conn, world, today)
+    model = ScriptedModel("m", say("What would you like help with?"), say("Pro is $12 per seat."))
+    rt = runtime(pool, retriever, model, checkpointer=saver)
+
+    async def say_to_agent(text: str) -> None:
+        await run_turn(rt, session_id=session_id, world_id=world, text=text, on_event=lambda _: 0)
+
+    try:
+        await say_to_agent("Account 10482917, PIN 4-7-2-1")
+        await say_to_agent("Actually, just tell me what Pro costs.")
+        # In the turn after it was typed the model could still have used it to verify.
+        assert any("4-7-2-1" in str(message.content) for message in model.calls[1][0])
+        assert await rows_holding(pool, session_id, world, "4-7-2-1") == NOWHERE
+    finally:
+        async with pool.connection() as conn:
+            await worlds.delete_world(conn, world)

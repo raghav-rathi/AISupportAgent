@@ -350,11 +350,16 @@ class Redactor:
                 if self._hash(digits) in self._known:
                     self._remember(digits)
 
-    def text(self, text: str, *, customer: bool = False, guess: bool = True) -> str:
+    def text(
+        self, text: str, *, customer: bool = False, guess: bool = True, known_only: bool = False
+    ) -> str:
         """`text` with every PIN masked.
 
         `customer` marks the customer's own words. `guess` false keeps the strict rule out, for
-        text the model still has to read the other numbers of.
+        text the model still has to read the other numbers of. `known_only` keeps every rule
+        out that works by the words around a number, and masks only PINs that were passed to
+        verify_identity: for the message of a turn that has just ended, whose PIN the model may
+        need in the next one.
         """
         if not text:
             return text
@@ -373,7 +378,7 @@ class Redactor:
                 if customer or not _plainly_not_a_pin(text, match.start(), match.end()):
                     spans.append(match.span())
         for start, end, digits in numbers:
-            if not 3 <= len(digits) <= 8:
+            if known_only or not 3 <= len(digits) <= 8:
                 continue
             cue_before, cue_after = _cue_before(text, start), _cue_after(text, end)
             paired = len(digits) != 8 and bool(_AFTER_ACCOUNT.search(text[:start]))
@@ -387,7 +392,8 @@ class Redactor:
         for start, end, digits, words in runs:
             count = len([w for w in _WORD_BREAK.split(words) if w])
             if any(secret in digits for secret in self._secrets) or (
-                len(digits) >= 3
+                not known_only
+                and len(digits) >= 3
                 and count >= 2
                 and (
                     _cue_before(text, start)
@@ -479,36 +485,55 @@ class Redactor:
         return new
 
 
-def _scrubbed_content(content: Any, redactor: Redactor, *, customer: bool) -> Any:
+def _scrubbed_content(content: Any, redactor: Redactor, **how: bool) -> Any:
     """A message's content with PINs masked, whether it is a string or a list of blocks."""
+
+    def clean(text: str) -> str:
+        return redactor.text(text, **how)
+
     if isinstance(content, str):
-        return redactor.text(content, customer=customer, guess=False)
+        return clean(content)
     if isinstance(content, list):
         blocks = []
         for block in content:
             if isinstance(block, str):
-                block = redactor.text(block, customer=customer, guess=False)
+                block = clean(block)
             elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                block = {
-                    **block,
-                    "text": redactor.text(block["text"], customer=customer, guess=False),
-                }
+                block = {**block, "text": clean(block["text"])}
             blocks.append(block)
         return blocks
     return content
 
 
-def scrub_messages(messages: Sequence[AnyMessage], redactor: Redactor) -> list[AnyMessage]:
+def scrub_messages(
+    messages: Sequence[AnyMessage], redactor: Redactor, *, turn_start: int | None = None
+) -> list[AnyMessage]:
     """Copies of the stored messages that still show a PIN, with the PIN masked.
 
-    Returned in a state update, each copy replaces its original by id. verify_identity calls this
-    once it has used the PIN, which is the last moment the model needs it. The strict rule stays
-    out: the model still needs the other numbers the customer wrote.
+    Returned in a state update, each copy replaces its original by id. It is called at two
+    moments, and the customer's messages are treated differently at each. The strict rule stays
+    out of both where the model still has to read the other numbers.
+
+    verify_identity calls it once it has used the PIN, which is the last moment the model needs
+    it. `turn_start` is None: PINs passed to the tool are masked, and so is every number the
+    words around it call a PIN.
+
+    A turn calls it when it ends, with the index of the message that opened it, because a model
+    can repeat a PIN into a later tool call or into its answer. In that message only PINs that
+    were passed to the tool are masked: one the customer typed and the model has not used yet may
+    be what the next turn verifies with. In the customer's earlier messages every rule applies,
+    so a PIN that was never used is gone from the saved conversation one turn later.
     """
     replaced: list[AnyMessage] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         if isinstance(message, HumanMessage):
-            content = _scrubbed_content(message.content, redactor, customer=True)
+            if turn_start is None:
+                how = {"customer": True, "guess": False}
+            elif index < turn_start:
+                how = {"customer": True, "guess": True}
+            else:
+                how = {"customer": True, "known_only": True}
+            content = _scrubbed_content(message.content, redactor, **how)
             if content != message.content:
                 replaced.append(message.model_copy(update={"content": content}))
         elif isinstance(message, AIMessage):

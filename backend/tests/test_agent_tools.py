@@ -55,7 +55,8 @@ async def test_the_refund_chain_runs_four_tools_and_pays_once(pool, retriever, w
     assert (session.ctx.usage.tool_calls, session.ctx.usage.llm_calls) == (4, 5)
     # The model is told who it is talking to only after the tool has verified them.
     assert "has not been verified" in system_text(model, 0)
-    assert "Maya Okafor at Larkspur Design Co, Pro plan" in system_text(model, 1)
+    assert "Maya Okafor" not in system_text(model, 0)
+    assert "Pro plan" in system_text(model, 1) and "Maya Okafor" in system_text(model, 1)
 
 
 async def test_account_tools_refuse_until_identity_is_verified(pool, retriever, world):

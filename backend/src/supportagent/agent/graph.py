@@ -95,6 +95,19 @@ _DROPPED = "[dropped: text the model sent along with a tool call]"
 _REPLY_IN_JUDGE_REQUEST = re.compile(r"(<reply-[0-9a-f]+>\n).*?(\n</reply-[0-9a-f]+>)", re.DOTALL)
 
 
+def _settled(state: AgentState, ctx: AgentContext, *, drop: str | None = None) -> list[AnyMessage]:
+    """The conversation's last clean-up of the turn: copies of the messages that still show a PIN.
+
+    The model may have put a PIN it was given into a later tool call or into its answer, after
+    verify_identity cleared the conversation. And a PIN the customer typed in an earlier turn
+    that was never used for verification has no reason to stay. `drop` names a message that is
+    being removed in the same update and so needs no copy.
+    """
+    messages = state["messages"]
+    scrubbed = scrub_messages(messages, ctx.redactor, turn_start=_turn_start(messages))
+    return [message for message in scrubbed if message.id != drop]
+
+
 def _emitter(runtime: Runtime[AgentContext]) -> Emit:
     """Send events to the stream and keep the turn's usage totals."""
     usage = runtime.context.usage
@@ -387,7 +400,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
             emit(AnswerRetracted(reason=why))
         return {
             **done,
-            "messages": [RemoveMessage(id=answer.id)],
+            "messages": [*_settled(state, ctx, drop=answer.id), RemoveMessage(id=answer.id)],
             "pending_escalation": Escalation(
                 reason="ungrounded_answer",
                 priority="normal",
@@ -405,7 +418,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
         emit(GuardrailVerdict(verdict="skipped", held=held, unsupported=[], ms=0.0))
         trace_answer(approved=True)
         emit(final)
-        return done
+        return {**done, "messages": _settled(state, ctx)}
 
     judge_traces: list[LlmTrace] = []
 
@@ -456,7 +469,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
     if not verdict.grounded:
         return take_back("; ".join(verdict.unsupported) or "unsupported statements")
     emit(final)
-    return done
+    return {**done, "messages": _settled(state, ctx)}
 
 
 def after_check(state: AgentState) -> Literal["escalate", "__end__"]:
@@ -501,7 +514,7 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
         text += " Done so far: " + "; ".join(done) + "."
     runtime.stream_writer(AssistantMessage(text=text, held=True, hits=[]))
     return {
-        "messages": [AIMessage(text)],
+        "messages": [*_settled(state, runtime.context), AIMessage(text)],
         "tickets": new_tickets,
         "pending_escalation": None,
         "outcome": "escalated",

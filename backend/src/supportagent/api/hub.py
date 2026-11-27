@@ -23,7 +23,7 @@ from supportagent.agent.context import ToolFaults
 from supportagent.agent.tools import TOOL_NAMES
 from supportagent.api.protocol import FaultInject
 from supportagent.eventlog import EventLog, SessionGone, TurnInProgress
-from supportagent.events import NOT_STREAMED, TURN_ENDED, ProtocolError
+from supportagent.events import NOT_STREAMED, TURN_ENDED, ProtocolError, TurnFailed
 from supportagent.llm import faults as presets
 from supportagent.llm.faults import MAX_PENDING, FaultPlan
 from supportagent.runtime import Runtime
@@ -121,11 +121,13 @@ class SessionHub:
         client_id: str | None,
         previous: asyncio.Task[None] | None,
     ) -> None:
-        started = False  # an event of this turn went out, so the turn exists for the clients
+        started: str | None = None  # the ID of this turn, once an event of it has gone out
+        ended = False  # the event that ends the turn has gone out
 
         def publish(event: BaseModel) -> None:
-            nonlocal started
-            started = True
+            nonlocal started, ended
+            started = started or getattr(event, "turn_id", None) or ""
+            ended = ended or event.type in TURN_ENDED
             self._publish(event)
 
         def never_started(code: str, message: str) -> None:
@@ -163,14 +165,26 @@ class SessionHub:
         except asyncio.CancelledError:
             # Cancelled on request or at shutdown. If the turn had begun, run_turn has told the
             # clients. If not, the message that asked for it is answered here.
-            if not started:
+            if started is None:
                 never_started("failed_to_start", "the turn was stopped before it began")
         except Exception:
             # The traceback is for us. If the turn had begun, run_turn has told the clients.
             logger.exception("turn failed in session %s", self.session_id)
-            if not started:
+            if started is None:
                 never_started("failed_to_start", "the turn could not start, try again")
         finally:
+            if started is not None and not ended:
+                # The turn began and the event that ends it never went out: storing it failed,
+                # for example because the session was deleted under it. Clients are told all
+                # the same, or they would wait on a turn that is over.
+                self._publish(
+                    TurnFailed(
+                        code="internal",
+                        message="the turn could not be saved",
+                        retryable=False,
+                        turn_id=started or None,
+                    )
+                )
             if self._task is asyncio.current_task():
                 self.busy = self._working = False
                 # Stored events come from Postgres from here on. A save that failed keeps its

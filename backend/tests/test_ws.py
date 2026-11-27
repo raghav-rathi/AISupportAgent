@@ -696,6 +696,20 @@ async def test_a_conversation_deleted_under_an_open_connection_says_so(serve, po
     await fresh.ws.close()
 
 
+async def test_a_turn_that_cannot_be_stored_still_ends_for_its_client(serve, pool):
+    _, address = await serve(ScriptedModel("m", ["Hel", 0.4, "lo.", usage(10, 3)]))
+    client = await Client.open(address)
+    await client.say("Hi")
+    started = await client.until("llm.started")
+    async with pool.connection() as conn:
+        await worlds.delete_world(conn, client.ready["session_id"])
+    # The turn runs on, and storing its end fails. The client must not be left waiting.
+    failed = await client.until("turn.failed")
+    assert (failed["code"], failed["retryable"]) == ("internal", False)
+    assert failed["turn_id"] == started["turn_id"]
+    await client.ws.close()
+
+
 async def test_a_message_that_could_not_start_a_turn_is_answered_and_not_counted(
     serve, monkeypatch
 ):
