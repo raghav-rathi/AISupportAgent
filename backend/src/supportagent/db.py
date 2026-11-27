@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib import resources
 
 import psycopg
@@ -10,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 _MIGRATION_LOCK = 724_001  # advisory lock id, so two processes never migrate at once
+_INGEST_LOCK = 724_002  # and never load the knowledge base at once
 
 
 def migration_files() -> list[tuple[str, str]]:
@@ -41,6 +44,20 @@ async def migrate(dsn: str) -> list[str]:
         finally:
             await conn.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK,))
     return applied
+
+
+@asynccontextmanager
+async def ingest_lock(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
+    """Hold the knowledge base for one loader at a time.
+
+    Two containers that start together would otherwise both find every chunk missing and both
+    embed all of them. The second now waits, and then finds nothing left to do.
+    """
+    await conn.execute("SELECT pg_advisory_lock(%s)", (_INGEST_LOCK,))
+    try:
+        yield
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(%s)", (_INGEST_LOCK,))
 
 
 async def _configure(conn: psycopg.AsyncConnection) -> None:

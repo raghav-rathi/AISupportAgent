@@ -91,7 +91,7 @@ VERDICT_SCHEMA = {
 }
 _ATTEMPTS = 2  # a reply that is not a verdict gets one more try
 # Text shaped like one of our evidence labels, in a part that is not evidence.
-_FORGED_LABEL = re.compile(r"(?i)\[\s*evidence\b[^\]\n]{0,40}\]")
+_FORGED_LABEL = re.compile(r"(?i)\[\s*evidence\b[^\]\n]{0,400}\]")
 
 
 class Verdict(BaseModel):

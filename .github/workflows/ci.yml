@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# No job here calls a paid model. The backend tests run the real graph, tools, database and
+# retriever against a scripted model, and the image is started with a key that opens nothing.
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: support
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U support"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgresql://support:ci-only@127.0.0.1:5432/support
+      FASTEMBED_CACHE_PATH: /home/runner/.cache/fastembed
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - uses: actions/cache@v6
+        with:
+          path: /home/runner/.cache/fastembed
+          key: fastembed-bge-small-minilm-l12
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+      - name: The generated TypeScript matches the models
+        run: uv run python -m supportagent.cli.gen_types --check
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_WS_URL: wss://backend.invalid/ws
+
+  image:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: support
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U support"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t backend .
+      - name: The image starts within 1 GB, as a user without root, and answers /health
+        run: |
+          docker run -d --name backend --network host --memory 1g \
+            -e PORT=8787 \
+            -e DATABASE_URL=postgresql://support:ci-only@127.0.0.1:5432/support \
+            -e OPENROUTER_API_KEY=ci-key-that-opens-nothing \
+            -e LLM__MODEL=ci/agent -e JUDGE__MODEL=ci/judge \
+            -e RERANK_MODEL=openrouter:cohere/rerank-5-pro \
+            -e GATE_LOW=-0.2 -e GATE_HIGH=0.5 -e GATE_GAP=1.5 \
+            -e 'ALLOWED_ORIGINS=["https://example.invalid"]' -e REQUIRE_ORIGIN=true \
+            backend
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8787/health; then break; fi
+            sleep 2
+          done
+          docker logs backend
+          curl -fsS http://127.0.0.1:8787/health
+          test "$(docker inspect -f '{{.State.OOMKilled}}' backend)" = false
+          test "$(docker exec backend id -u)" != 0
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/docs)" = 404

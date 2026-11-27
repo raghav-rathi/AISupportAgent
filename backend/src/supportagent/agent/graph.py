@@ -125,9 +125,9 @@ def repair(messages: Sequence[AnyMessage], unchecked: str | None) -> list[AnyMes
     question with no reply after it, or an answer that never passed its grounding check and that
     the customer never got. `messages` ends with the new customer message.
     """
-    *earlier, new = messages
-    if not isinstance(new, HumanMessage):
+    if not messages or not isinstance(messages[-1], HumanMessage):
         return []
+    *earlier, new = messages
     updates: list[AnyMessage] = []
     answered = {m.tool_call_id for m in earlier if isinstance(m, ToolMessage)}
     last: AnyMessage | None = None  # the message before the new one, once the updates apply
@@ -138,8 +138,15 @@ def repair(messages: Sequence[AnyMessage], unchecked: str | None) -> list[AnyMes
         if isinstance(message, AIMessage) and message.tool_calls:
             calls = [call for call in message.tool_calls if call["id"] in answered]
             if len(calls) != len(message.tool_calls):
+                # What the provider attached to the calls goes with them: its own raw copy,
+                # a signature that vouches for calls no longer there, calls it could not parse.
                 message = message.model_copy(
-                    update={"tool_calls": calls, "content": "" if calls else _INTERRUPTED}
+                    update={
+                        "tool_calls": calls,
+                        "content": "" if calls else _INTERRUPTED,
+                        "invalid_tool_calls": [],
+                        "additional_kwargs": {},
+                    }
                 )
                 updates.append(message)
         last = message

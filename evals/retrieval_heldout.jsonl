@@ -9,8 +9,8 @@
 {"q":"Does deleting files immediately free up storage?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"storage-and-file-limits","path":["When storage is full"]}],"source":"audit-neon"}
 {"q":"Can you restore a single accidentally deleted card from yesterday's backup?","tier":null,"kind":"in","group":"negation_edge","expect":[{"doc":"data-export-and-retention","path":["Backups"]}],"source":"audit-neon"}
 {"q":"How long do I have to ask for a refund?","tier":"free","kind":"in","group":"tier_trap","expect":[{"doc":"refund-policy","path":["Free plan"]}],"source":"audit-neon"}
-{"q":"Do you have a SOC 2 Type II report?","tier":"pro","kind":"in","group":"tier_trap","expect":[{"doc":"privacy-and-security-overview","path":["Compliance documents"]}],"source":"audit-neon"}
-{"q":"What payment methods do you accept if we upgrade from Free to Pro?","tier":"free","kind":"in","group":"tier_trap","expect":[{"doc":"billing-and-invoices","path":["Payment methods","Pro"]}],"source":"audit-neon"}
+{"q":"Do you have a SOC 2 Type II report?","tier":"pro","kind":"plan","group":"tier_trap","expect":[{"doc":"privacy-and-security-overview","path":["Compliance documents"]}],"source":"audit-neon"}
+{"q":"What payment methods do you accept if we upgrade from Free to Pro?","tier":"free","kind":"plan","group":"tier_trap","expect":[{"doc":"billing-and-invoices","path":["Payment methods","Pro"]}],"source":"audit-neon"}
 {"q":"Can we switch from monthly to annual billing?","tier":"pro","kind":"in","group":"tier_trap","expect":[{"doc":"plans-and-pricing","path":["Switching between monthly and annual billing"]}],"source":"audit-neon"}
 {"q":"Do you support SCIM provisioning with JumpCloud or custom OIDC?","tier":"enterprise","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}
 {"q":"Can we pay for Enterprise in Euros or British Pounds?","tier":"enterprise","kind":"near","group":"near_miss","expect":[],"source":"audit-neon"}

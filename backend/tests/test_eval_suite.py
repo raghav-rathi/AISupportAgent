@@ -270,3 +270,70 @@ def test_the_scenario_table_is_consistent_with_the_code_it_exercises():
         assert e.field is None or e.field[0] in accounts, s.id
         for pattern in (*e.says, *e.never_says, *e.never_shows):
             re.compile(pattern)
+
+
+UNANSWERED = scenario(declines=True, ticket_any=("unanswered_question", "low_confidence"))
+
+
+@pytest.mark.parametrize(
+    ("reasons", "ok"),
+    [
+        (("unanswered_question",), True),
+        (("low_confidence",), True),
+        ((), False),
+        (("other",), False),
+    ],
+)
+def test_a_fernhill_question_without_an_answer_has_to_end_in_a_ticket(reasons, ok):
+    run = [
+        said("The help center does not cover that. Ticket ESC-1 is open."),
+        finished("escalated"),
+    ]
+    failures = evaluate(UNANSWERED, run, replace(NOTHING, ticket_reasons=reasons))
+    assert (failures == []) == ok, failures
+
+
+def test_a_question_that_is_nobodys_to_answer_must_not_open_a_ticket():
+    off_topic = scenario(declines=True, no_tickets=True)
+    run = [said("I can only help with questions about Fernhill Workspace."), finished()]
+    assert evaluate(off_topic, run, NOTHING) == []
+    ticketed = replace(NOTHING, ticket_reasons=("low_confidence",))
+    assert any(f.startswith("tickets:") for f in evaluate(off_topic, run, ticketed))
+
+
+def test_a_ticket_for_a_question_the_help_center_answers_fails_the_scenario():
+    answered = scenario(says=(r"14",))
+    run = [said("You have 14 days."), finished()]
+    given_up = replace(NOTHING, ticket_reasons=("unanswered_question",))
+    assert any("unanswered_question" in f for f in evaluate(answered, run, given_up))
+
+
+@pytest.mark.parametrize("shown", ["4721", "4 7 2 1", "4/7/2/1", "47:21", "four seven two one"])
+def test_a_typed_pin_is_found_in_the_stream_however_it_is_written(shown):
+    typed = scenario("My account is 10482917, it's 4-7-2-1.")
+    run = [TurnStarted(mode="text", text="My account is 10482917, it's ****.", turn_id="t1")]
+    assert evaluate(typed, [*run, said("Thanks."), finished()], NOTHING) == []
+    leaked = [*run, said(f"I have noted {shown}."), finished()]
+    assert any(f.startswith("pin:") for f in evaluate(typed, leaked, NOTHING))
+
+
+def test_the_wording_checks_accept_the_ways_a_model_says_the_same_thing():
+    from supportagent.evals.scenarios import _DAYS_14
+
+    assert re.search(_DAYS_14, "Monthly plans have a 14-day refund window.")
+    assert re.search(_DAYS_14, "You have 14 days.")
+    declined = scenario(declines=True)
+    run = [said("I can only help with questions about Fernhill Workspace."), finished()]
+    assert evaluate(declined, run, NOTHING) == []
+
+
+def test_what_the_customer_waited_for_is_read_from_the_finished_turn():
+    done = finished().model_copy(
+        update={"first_step_ms": 120.0, "first_text_ms": 900.0, "answer_ms": 1800.0}
+    )
+    measured = measure([TurnStarted(mode="text", text="hi", turn_id="t1"), done])
+    assert (measured["first_step_ms"], measured["first_text_ms"], measured["answer_ms"]) == (
+        [120.0],
+        [900.0],
+        [1800.0],
+    )

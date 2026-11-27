@@ -169,7 +169,7 @@ def report(
     far_scores = [_score(result) for _, result in far]
     near_scores = [_score(result) for _, result in near]
     for label, scores in (("off topic", far_scores), ("near miss", near_scores)):
-        if scores:
+        if scores and in_scores:
             print(
                 f"top score in scope: min {min(in_scores):.2f} median "
                 f"{statistics.median(in_scores):.2f} | {label}: median "

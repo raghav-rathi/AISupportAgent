@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import email.utils
+import math
 import time
 from dataclasses import dataclass
+from datetime import UTC
 
 import httpx
 import openai
@@ -85,24 +87,35 @@ def _retry_after(exc: openai.APIStatusError) -> float | None:
     """Seconds the server asked us to wait: `retry-after-ms`, or `retry-after` as seconds or a date."""
     headers = exc.response.headers
     try:
-        return max(0.0, float(headers["retry-after-ms"]) / 1000)
+        return _wait(float(headers["retry-after-ms"]) / 1000)
     except (KeyError, ValueError):
         pass
     value = headers.get("retry-after")
     if value is None:
         return None
     try:
-        return max(0.0, float(value))
+        return _wait(float(value))
     except ValueError:
         pass
     try:
-        return max(0.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+        when = email.utils.parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)  # an HTTP date is in GMT, whether or not it says so
+    return _wait(when.timestamp() - time.time())
+
+
+def _wait(seconds: float) -> float | None:
+    """A wait in seconds, or None for a value that is no wait at all: NaN or infinity."""
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
 def _is_billing(exc: openai.APIError) -> bool:
-    if (exc.code or "").lower() in _BILLING_CODES or (exc.type or "").lower() in _BILLING_CODES:
+    if (
+        str(exc.code or "").lower() in _BILLING_CODES
+        or str(exc.type or "").lower() in _BILLING_CODES
+    ):
         return True
     message = (exc.message or "").lower()
     return any(word in message for word in _BILLING_WORDS) and not any(
@@ -130,9 +143,11 @@ def _from_stream(exc: openai.APIError) -> Failure:
     """An error that arrived inside a stream, after HTTP 200. It carries no status code."""
     label = f"{exc.code or ''} {exc.type or ''}".strip().lower()
     detail = f"stream error {label}".strip()
-    if _is_billing(exc):
+    # OpenRouter puts the provider's HTTP status into the error's code.
+    status = label.split()[0] if label else ""
+    if _is_billing(exc) or status == "402":
         return Failure("quota", retryable=False, detail=detail)
-    if "rate_limit" in label:
+    if "rate_limit" in label or status == "429":
         return Failure("rate_limited", retryable=True, detail=detail)
     return Failure("server_error", retryable=True, detail=detail)
 

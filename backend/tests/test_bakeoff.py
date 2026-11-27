@@ -56,8 +56,9 @@ def test_a_standing_counts_passes_and_takes_speed_from_the_runs_that_passed():
     summary = standing("m", runs)
     assert (summary.passed, summary.total) == (2, 3)
     assert summary.chain_ms == 4000.0
-    # Cost is per turn of every run, and it is the candidate's own calls, not the judge's.
-    assert summary.cost_per_turn == pytest.approx(0.008 / 5)
+    # Cost is per turn of the runs that passed, and it is the candidate's own calls, not the
+    # judge's.
+    assert summary.cost_per_turn == pytest.approx(0.004 / 3)
 
 
 def test_a_standing_has_no_cost_when_any_run_had_none():
@@ -125,3 +126,11 @@ def test_a_candidate_runs_under_the_default_time_limits_whatever_the_environment
     assert _limits(slow["qwen"]) == (120.0, *defaults[1:])
     with pytest.raises(ValueError, match="unknown limits"):
         candidate_settings(patient, {**spec, "limits": {"first_token_s": 8}})
+
+
+def test_runs_that_failed_do_not_make_a_candidate_look_dearer_per_turn():
+    # Nine runs gave up before finishing a turn. Their spend divided by the one turn that did
+    # finish would read as ten times the real cost of a turn.
+    runs = [result((), (2000.0,), (2000.0,), 0.001)]
+    runs += [result(("a turn failed",), (), (), 0.001) for _ in range(9)]
+    assert standing("m", runs).cost_per_turn == pytest.approx(0.001)

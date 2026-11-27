@@ -374,3 +374,76 @@ async def test_a_bug_in_our_own_code_is_not_swallowed_as_an_outage():
         await h.complete()
     # The half answer is taken off the screen even so.
     assert h.types() == ["llm.started", "llm.delta", "llm.reset"]
+
+
+async def test_the_last_model_waits_out_a_long_retry_after_when_the_deadline_allows():
+    # With a fallback, a wait longer than max_wait_s is a reason to switch. With none, giving up
+    # at once would fail a call that six seconds of patience completes.
+    h = Harness(ScriptedModel("only", [http_error(429, retry_after="6")], OK))
+    result = await h.complete()
+    assert result.attempts == 2 and h.sleeps == [6.0]
+
+    primary = ScriptedModel("primary", [http_error(429, retry_after="6")], OK)
+    h = Harness(primary, ScriptedModel("fallback", OK))
+    assert (await h.complete()).used_fallback and h.sleeps == []
+
+
+async def test_two_entries_of_one_model_do_not_share_a_retry_budget():
+    budgets = []
+
+    def budget():
+        budgets.append(RetryBudget(ratio=0.0, burst=1.0, per_second=0.0))
+        return budgets[-1]
+
+    down = [http_error(500)]
+    h = Harness(ScriptedModel("same", down), ScriptedModel("same", down, OK), budget_factory=budget)
+    result = await h.complete()
+    # The first entry spent its one retry. The second still had its own.
+    assert result.used_fallback and len(budgets) == 2
+
+
+async def test_a_simulated_failure_earns_the_retry_budget_nothing():
+    spent = RetryBudget(ratio=1.0, burst=1.0, per_second=0.0)
+    assert spent.try_spend() and not spent.try_spend()  # empty
+    h = Harness(ScriptedModel("primary", OK), budget_factory=lambda: spent)
+    plan = faults.FaultPlan()
+    plan.add(faults.server_error(), 3)
+    with pytest.raises(LLMUnavailable):
+        await h.complete(faults=plan)
+    assert not spent.try_spend()
+
+
+@pytest.mark.parametrize(
+    "silent",
+    [
+        AIMessageChunk(content=[{"type": "text", "text": ""}]),
+        AIMessageChunk(content="", additional_kwargs={"refusal": None}),
+    ],
+)
+async def test_a_chunk_that_says_nothing_does_not_stop_the_first_token_clock(silent):
+    h = Harness(ScriptedModel("primary", [silent, 0.2, "Hello"], OK))
+    await h.complete()
+    assert h.of("llm.retry")[0].reason == "timeout"
+
+
+async def test_a_status_inside_a_stream_is_read_like_the_status_of_a_response():
+    limited = ["Hel", stream_error("Rate limit exceeded", code="429")]
+    h = Harness(ScriptedModel("primary", limited, OK), ScriptedModel("fallback", OK))
+    assert not (await h.complete()).used_fallback
+    assert h.of("llm.retry")[0].reason == "rate_limited"
+
+    unpaid = [stream_error("Provider returned error", code="402")]
+    h = Harness(ScriptedModel("primary", unpaid, OK), ScriptedModel("fallback", OK))
+    assert (await h.complete()).used_fallback  # waiting does not pay a bill
+    assert h.of("llm.fallback")[0].reason == "quota" and h.of("llm.retry") == []
+
+
+async def test_a_retry_after_that_is_no_wait_is_ignored_and_a_bare_date_is_read_as_gmt():
+    for junk in ("NaN", "inf"):
+        h = Harness(ScriptedModel("only", [http_error(429, retry_after=junk)], OK))
+        await h.complete()
+        assert h.sleeps == [pytest.approx(0.25)]  # the ordinary backoff, not the header
+    soon = email.utils.formatdate(time.time() + 3, usegmt=True).removesuffix(" GMT")
+    h = Harness(ScriptedModel("only", [http_error(429, retry_after=soon)], OK))
+    await h.complete()
+    assert 1.0 < h.sleeps[0] <= 3.0

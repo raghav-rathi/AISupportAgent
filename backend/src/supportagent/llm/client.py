@@ -159,7 +159,7 @@ class ResilientLLM:
         self.policy = policy or LLMPolicy()
         self.capture_prompts = capture_prompts
         self._budget_factory = budget_factory
-        self._budgets: dict[str, RetryBudget] = {}
+        self._budgets: dict[tuple[int, str], RetryBudget] = {}
         self._sleep = sleep
         self._jitter = jitter
 
@@ -189,8 +189,11 @@ class ResilientLLM:
         for index, model in enumerate(self.models):
             if failures and time.perf_counter() >= deadline:
                 break
-            budget = self._budgets.setdefault(model.name, self._budget_factory())
-            budget.record_request()
+            # One budget per place in the list. Two entries may be the same model on two
+            # providers, and the first must not use up the retries of the second.
+            budget = self._budgets.setdefault((index, model.name), self._budget_factory())
+            credited = False  # this call has earned the budget its share
+            last_model = index == len(self.models) - 1
             if index > 0:
                 emit(
                     LlmFallback(
@@ -215,13 +218,22 @@ class ResilientLLM:
                 except _AttemptFailed as failed:
                     failure = failed.failure
                     failures.append(failure)
+                    if not credited and not failed.injected:
+                        # A simulated failure is no request to the upstream, so it earns nothing.
+                        budget.record_request()
+                        credited = True
                     if failed.text_went_out:
                         emit(LlmReset(call_id=call_id, reason=failure.reason))
                     wait = self._wait(attempt, failure)
                     if (
                         not failure.retryable
                         or attempt == self.policy.max_attempts
-                        or (failure.retry_after_s or 0.0) > self.policy.max_wait_s
+                        # A long wait is a reason to try the next model. With no next model,
+                        # waiting is all there is, as long as the deadline allows it.
+                        or (
+                            (failure.retry_after_s or 0.0) > self.policy.max_wait_s
+                            and not last_model
+                        )
                         or time.perf_counter() + wait >= deadline
                         or not (failed.injected or budget.try_spend())
                     ):
@@ -239,6 +251,8 @@ class ResilientLLM:
                     await self._sleep(wait)
                     continue
 
+                if not credited:
+                    budget.record_request()
                 usage = message.usage_metadata or {}
                 input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
                 price = getattr(model, "price", None)
@@ -337,11 +351,17 @@ class ResilientLLM:
                         chunk = await asyncio.wait_for(anext(stream), patience)
                     except StopAsyncIteration:
                         break
-                    if chunk.content or chunk.tool_call_chunks:
+                    # Output means text or a piece of a tool call. A chunk can carry a content
+                    # block with empty text, or a key whose value is None, and say nothing:
+                    # counting those would stop the first-token clock on a model that is stuck.
+                    if str(chunk.text) or any(
+                        piece.get("name") or piece.get("args") or piece.get("id")
+                        for piece in chunk.tool_call_chunks
+                    ):
                         alive = True
                         if ttft_ms is None:
                             ttft_ms = (time.perf_counter() - call_started) * 1000
-                    elif chunk.additional_kwargs:
+                    elif any(chunk.additional_kwargs.values()):
                         alive = True  # reasoning tokens: no visible output yet, but not stuck
                     merged = chunk if merged is None else merged + chunk
                     text = str(chunk.text)

@@ -455,3 +455,19 @@ async def test_whitespace_before_a_tool_call_is_taken_back_like_any_other_text(
     events = await Session(pool, retriever, world, model).turn("10482917 and 4721")
     kinds = [e.type for e in events]
     assert kinds.index("llm.delta") < kinds.index("llm.reset") < kinds.index("tool.started")
+
+
+def test_repair_needs_no_messages_and_leaves_nothing_of_a_dropped_call_behind():
+    assert repair([], None) == []
+    call = AIMessage(
+        "",
+        id="a1",
+        tool_calls=[{"name": "get_account", "args": {}, "id": "c1", "type": "tool_call"}],
+        invalid_tool_calls=[
+            {"name": "bad", "args": "{", "id": "c2", "error": "parse", "type": "invalid_tool_call"}
+        ],
+        additional_kwargs={"thought_signature": "signed-for-c1"},
+    )
+    fixed = repair([HumanMessage("first", id="h1"), call, HumanMessage("second", id="h2")], None)
+    closed = next(m for m in fixed if isinstance(m, AIMessage) and m.id == "a1")
+    assert (closed.tool_calls, closed.invalid_tool_calls, closed.additional_kwargs) == ([], [], {})

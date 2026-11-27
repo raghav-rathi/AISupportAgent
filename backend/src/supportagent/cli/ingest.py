@@ -28,7 +28,7 @@ async def run(embedder_name: str | None) -> None:
     pool = db.make_pool(settings.database_url, max_size=2)
     await pool.open()
     try:
-        async with pool.connection() as conn:
+        async with pool.connection() as conn, db.ingest_lock(conn):
             report = await ingest(conn, chunks, embedder)
     finally:
         await pool.close()

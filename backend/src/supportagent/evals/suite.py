@@ -27,9 +27,11 @@ from pydantic import BaseModel
 from supportagent.agent.context import ToolFaults
 from supportagent.config import Settings, get_settings
 from supportagent.crm import world as worlds
+from supportagent.crm.fixtures import CUSTOMERS
 from supportagent.evals.scenarios import SCENARIOS, Scenario
 from supportagent.llm import faults as fault_presets
 from supportagent.llm.faults import FaultPlan
+from supportagent.redact import digits_of
 from supportagent.runtime import Runtime, open_runtime
 from supportagent.session import ensure_world, run_turn
 
@@ -40,14 +42,16 @@ _DECLINES = re.compile(
     r"(?i)\b(can['’]t|cannot|unable to|don['’]t have|do not have|couldn['’]t|could not"
     r"|(doesn['’]t|does not|don['’]t|do not) (say|list|mention|cover|offer|include|contain)"
     r"|(not|isn['’]t|aren['’]t) (listed|mentioned|covered|available|something|part of)"
-    r"|no (information|mention)|only help with fernhill"
+    r"|no (information|mention)|only help with (questions about )?fernhill"
     r"|(did not|didn['’]t|has not|hasn['’]t) (go|gone) through)"
 )
 # Tickets the graph opens when a guardrail fires. In a scenario that expects a plain answer, one
 # of these means a correct answer was taken back or a question was wrongly given up on.
-_GUARDRAIL_TICKETS = frozenset({"ungrounded_answer", "low_confidence", "step_limit"})
-# A PIN the customer gave, as it appears in a scenario's messages.
-_PIN_IN_TURN = re.compile(r"(?i)\bPIN\b\D{0,12}(\d[\d -]{2,10}\d)")
+_GUARDRAIL_TICKETS = frozenset(
+    {"ungrounded_answer", "low_confidence", "step_limit", "unanswered_question"}
+)
+# The PINs of the mock customers. One that a scenario's customer types must show nowhere.
+_PINS = frozenset(customer.pin for customer in CUSTOMERS)
 
 # A turn with this many tool calls counts as a tool chain when latency is compared.
 CHAIN_TOOLS = 3
@@ -73,9 +77,12 @@ class Result:
     chain_ms: tuple[float, ...]  # turns with CHAIN_TOOLS or more tool calls
     own_chain_ms: tuple[float, ...]  # the same turns without the time of the grounding check
     first_tool_ms: tuple[float, ...]  # per turn that called a tool
-    first_text_ms: tuple[float, ...]  # per turn that produced text
+    first_text_ms: tuple[float, ...]  # per turn: the first text of the answer that stood
     cost_usd: float | None  # every model call of the run. None when one had no price.
     agent_cost_usd: float | None  # the same without the judge's calls
+    # What the customer waited for, as each finished turn reported it.
+    first_step_ms: tuple[float, ...] = ()  # the first sign of work
+    answer_ms: tuple[float, ...] = ()  # the complete answer, after its check
 
     @property
     def passed(self) -> bool:
@@ -120,14 +127,26 @@ def _strings(value: object, key: str = "") -> list[str]:
 
 
 def leaked_pins(scenario: Scenario, events: list[BaseModel]) -> list[str]:
-    """PINs from the customer's messages that show up anywhere in the event stream."""
-    pins = {
-        re.sub(r"\D", "", match) for turn in scenario.turns for match in _PIN_IN_TURN.findall(turn)
-    }
+    """PINs the scenario's customer typed that show up anywhere in the event stream.
+
+    A PIN counts however it is written: in a row, with anything short between its digits, or
+    spelled out. The customer's own message is checked like everything else, as it left masked.
+    """
+    typed = {pin for pin in _PINS for turn in scenario.turns if pin in digits_of(turn)}
     texts = [text for event in events for text in _strings(event.model_dump())]
-    # The digits in a row or with spaces and hyphens between them, as a customer may type them.
-    shapes = {pin: re.compile(r"(?<!\d)" + r"[\s-]*".join(pin) + r"(?!\d)") for pin in pins}
-    return sorted(pin for pin, shape in shapes.items() if any(map(shape.search, texts)))
+    shapes = {
+        pin: re.compile(r"(?<!\d)" + r"[^0-9A-Za-z]{0,3}".join(pin) + r"(?!\d)") for pin in typed
+    }
+    return sorted(
+        pin
+        for pin, shape in shapes.items()
+        if any(shape.search(text) or pin in _spoken(text) for text in texts)
+    )
+
+
+def _spoken(text: str) -> str:
+    """The digits of the number words in a text, or nothing when it has numerals."""
+    return "" if re.search(r"\d", text) else digits_of(text)
 
 
 def evaluate(scenario: Scenario, events: list[BaseModel], facts: Facts) -> list[str]:
@@ -156,6 +175,12 @@ def evaluate(scenario: Scenario, events: list[BaseModel], facts: Facts) -> list[
     for reason in expect.tickets:
         if reason not in facts.ticket_reasons:
             failures.append(f"tickets: none with reason {reason}, got {list(facts.ticket_reasons)}")
+    if expect.ticket_any and not set(expect.ticket_any) & set(facts.ticket_reasons):
+        failures.append(
+            f"tickets: none of {list(expect.ticket_any)}, got {list(facts.ticket_reasons)}"
+        )
+    if expect.no_tickets and facts.ticket_reasons:
+        failures.append(f"tickets: expected none, got {list(facts.ticket_reasons)}")
     if not expect.declines:
         # A scenario that may end in a hand-off allows these. Any other must not see them.
         for reason in sorted(_GUARDRAIL_TICKETS & set(facts.ticket_reasons) - set(expect.tickets)):
@@ -235,11 +260,16 @@ def measure(events: list[BaseModel]) -> dict:
         "own_chain_ms": [],
         "first_tool_ms": [],
         "first_text_ms": [],
+        "first_step_ms": [],
+        "answer_ms": [],
     }
     for turn in _by_turn(events):
         start = turn[0].ts
         for done in (e for e in turn if e.type == "turn.finished"):
             measured["turn_ms"].append(done.total_ms)
+            for wait in ("first_step_ms", "first_text_ms", "answer_ms"):
+                if getattr(done, wait) is not None:
+                    measured[wait].append(getattr(done, wait))
             if done.tool_calls >= CHAIN_TOOLS:
                 measured["chain_ms"].append(done.total_ms)
                 # Another model runs the grounding check, and not the same one for every
@@ -247,11 +277,8 @@ def measure(events: list[BaseModel]) -> dict:
                 checks = sum(e.ms for e in turn if e.type == "guardrail.verdict")
                 measured["own_chain_ms"].append(max(0.0, done.total_ms - checks))
         tools = [e.ts for e in turn if e.type == "tool.started"]
-        texts = [e.ts for e in turn if e.type in ("llm.delta", "assistant.message")]
         if tools:
             measured["first_tool_ms"].append((tools[0] - start) * 1000)
-        if texts:
-            measured["first_text_ms"].append((texts[0] - start) * 1000)
     calls = [e for e in events if e.type == "llm.finished"]
     measured["cost_usd"] = _total([e.cost_usd for e in calls])
     measured["agent_cost_usd"] = _total([e.cost_usd for e in calls if e.purpose == "agent"])
@@ -342,7 +369,10 @@ def report(results: list[Result]) -> None:
     print(_stats("turn", [ms for r in results for ms in r.turn_ms]))
     print(_stats(f"turn with {CHAIN_TOOLS}+ tools", [ms for r in results for ms in r.chain_ms]))
     print(_stats("first tool step", [ms for r in results for ms in r.first_tool_ms]))
-    print(_stats("first text", [ms for r in results for ms in r.first_text_ms]))
+    print("what the customer waited for, from their message:")
+    print(_stats("  first sign of work", [ms for r in results for ms in r.first_step_ms]))
+    print(_stats("  first text of the answer", [ms for r in results for ms in r.first_text_ms]))
+    print(_stats("  approved answer", [ms for r in results for ms in r.answer_ms]))
 
 
 async def run(

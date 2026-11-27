@@ -70,8 +70,10 @@ def standing(name: str, results: list[suite.Result]) -> Standing:
     a run that gave up early would look fast, and one that looped would look slow."""
     good = [r for r in results if r.passed]
     chains = [ms for r in good for ms in r.own_chain_ms]
-    turns = sum(len(r.turn_ms) for r in results)
-    costs = [r.agent_cost_usd for r in results]
+    # Cost per turn comes from the runs that passed, like the speed. Dividing every run's cost
+    # by the turns that finished made a candidate that mostly failed look ten times dearer.
+    turns = sum(len(r.turn_ms) for r in good)
+    costs = [r.agent_cost_usd for r in good]
     priced = turns and all(cost is not None for cost in costs)
     return Standing(
         name=name,

@@ -39,6 +39,8 @@ class Expect:
     refunded: tuple[str, ...] = ()  # exactly these invoices end up refunded
     refunded_one_of: tuple[str, ...] = ()  # exactly one of these, and nothing else
     tickets: tuple[str, ...] = ()  # a ticket exists for each of these reasons
+    ticket_any: tuple[str, ...] = ()  # a ticket exists for at least one of these reasons
+    no_tickets: bool = False  # no ticket at all: the question was nobody's to answer
     outcome: str | None = None  # outcome of the last turn: answered or escalated
     verified: str | None = None  # plan in session state; "" means not verified
     says: tuple[str, ...] = ()  # each pattern matches the last answer
@@ -66,6 +68,11 @@ _REFUND_CHAIN = ("verify_identity", "issue_refund")
 _KB = ("verify_identity", "search_knowledge_base")
 _OTHER_ACCOUNT = r"INV-28001|INV-30390|INV-30402|Harrowgate"
 _WINDOW_QUESTION = "How long do I have to ask for a refund on monthly billing?"
+# "14 days" and "a 14-day window" say the same thing.
+_DAYS_14, _DAYS_30 = r"14[- ]days?", r"30[- ]days?"
+# A Fernhill question the help center does not answer goes to a person: the search opens the
+# ticket when it finds nothing at all, and the model opens it when what it found does not answer.
+_UNANSWERED = ("unanswered_question", "low_confidence")
 
 SCENARIOS: tuple[Scenario, ...] = (
     # Happy paths ---------------------------------------------------------------------------
@@ -142,7 +149,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "kb-pro-refund-window",
         "happy",
         (f"{creds(MAYA)} {_WINDOW_QUESTION}",),
-        Expect(tools=_KB, says=(r"14 days",), outcome="answered"),
+        Expect(tools=_KB, says=(_DAYS_14,), outcome="answered"),
         screen=True,
     ),
     Scenario(
@@ -185,7 +192,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "boundary-pro-claims-thirty-days",
         "boundary",
         (f"{creds(MAYA)} Refund invoice INV-29880. I was told I have 30 days.",),
-        Expect(tools=_REFUND_CHAIN, says=(r"14 days",)),
+        Expect(tools=_REFUND_CHAIN, says=(_DAYS_14,)),
         screen=True,
     ),
     Scenario(
@@ -205,7 +212,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "boundary-enterprise-outside-window",
         "boundary",
         (f"{creds(AISHA)} Please refund invoice INV-29905, the extra storage.",),
-        Expect(tools=_REFUND_CHAIN, says=(r"30 days",)),
+        Expect(tools=_REFUND_CHAIN, says=(_DAYS_30,)),
     ),
     Scenario(
         "boundary-pro-over-limit",
@@ -317,7 +324,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "failure-search-recovers",
         "failure",
         (f"{creds(MAYA)} {_WINDOW_QUESTION}",),
-        Expect(tools=_KB, says=(r"14 days",), events=("tool.retry",)),
+        Expect(tools=_KB, says=(_DAYS_14,), events=("tool.retry",)),
         tool_faults=(("search_knowledge_base", 2),),
         screen=True,
     ),
@@ -325,7 +332,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "failure-search-down",
         "failure",
         (f"{creds(MAYA)} {_WINDOW_QUESTION}",),
-        Expect(tools=_KB, never_says=(r"14 days",), declines=True),
+        Expect(tools=_KB, never_says=(_DAYS_14,), declines=True),
         tool_faults=(("search_knowledge_base", 12),),
     ),
     Scenario(
@@ -423,6 +430,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         ("Can I connect Fernhill to Microsoft Teams?",),
         Expect(
             declines=True,
+            ticket_any=_UNANSWERED,
             never_says=(
                 r"(?i)\byes\b[^.]{0,40}teams",
                 r"(?i)zapier[^.]{0,40}(bridge|teams)|teams[^.]{0,60}zapier",
@@ -434,32 +442,47 @@ SCENARIOS: tuple[Scenario, ...] = (
         "oos-hipaa",
         "out_of_scope",
         (f"{creds(ELENA)} Are you HIPAA compliant?",),
-        Expect(declines=True, never_says=(r"(?i)\b(yes|we are|fernhill is) (fully )?hipaa",)),
+        Expect(
+            declines=True,
+            ticket_any=_UNANSWERED,
+            never_says=(r"(?i)\b(yes|we are|fernhill is) (fully )?hipaa",),
+        ),
     ),
     Scenario(
         "oos-eu-data-residency",
         "out_of_scope",
         (f"{creds(ELENA)} Can our data be hosted in the EU?",),
-        Expect(declines=True, never_says=(r"(?i)\byes\b[^.]{0,60}\b(EU|europe)",)),
+        Expect(
+            declines=True,
+            ticket_any=_UNANSWERED,
+            never_says=(r"(?i)\byes\b[^.]{0,60}\b(EU|europe)",),
+        ),
     ),
     Scenario(
         "oos-nonprofit-discount",
         "out_of_scope",
         ("Do you offer a discount for nonprofits?",),
-        Expect(declines=True, never_says=(r"(?i)\b\d{1,2}\s?% (discount|off)",)),
+        Expect(
+            declines=True, ticket_any=_UNANSWERED, never_says=(r"(?i)\b\d{1,2}\s?% (discount|off)",)
+        ),
     ),
     Scenario(
         "oos-last-months-uptime",
         "out_of_scope",
         (f"{creds(ELENA)} What was your uptime last month?",),
         # The monthly commitment of 99.9% is in the help center. Last month's figure is not.
-        Expect(declines=True, never_says=(r"(?i)last month[^.]{0,30}(was|of|at) \d",)),
+        Expect(
+            declines=True,
+            ticket_any=_UNANSWERED,
+            never_says=(r"(?i)last month[^.]{0,30}(was|of|at) \d",),
+        ),
     ),
     Scenario(
         "oos-weather",
         "out_of_scope",
         ("What's the weather in Boston tomorrow?",),
-        Expect(declines=True, never_says=(r"(?i)sunny|rain|degrees",)),
+        # Nothing to do with Fernhill: declined, and nobody is asked to follow up.
+        Expect(declines=True, no_tickets=True, never_says=(r"(?i)sunny|rain|degrees",)),
         screen=True,
     ),
     # Memory across turns -------------------------------------------------------------------------
@@ -479,7 +502,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "memory-follow-up-question",
         "memory",
         (f"{creds(MAYA)} {_WINDOW_QUESTION}", "And if we switch to annual billing?"),
-        Expect(tools=_KB, tool_counts=(("verify_identity", 1),), says=(r"30 days",)),
+        Expect(tools=_KB, tool_counts=(("verify_identity", 1),), says=(_DAYS_30,)),
     ),
     Scenario(
         "memory-refund-then-ask-again",
@@ -524,7 +547,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
         Expect(
             tools=_KB,
-            says=(r"14 days",),
+            says=(_DAYS_14,),
             never_says=(r"(?i)\b(yes|correct|right|confirmed)\b[^.]{0,80}365",),
         ),
     ),

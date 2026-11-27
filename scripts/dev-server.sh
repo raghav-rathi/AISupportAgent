@@ -33,7 +33,7 @@ case "${1:-}" in
     # A client message is a short line of JSON, so frames are capped far below the 16 MiB default.
     # shellcheck disable=SC2016
     setsid nohup bash -c \
-      'echo $$ >"$1"; exec uv run uvicorn --factory supportagent.api.app:create_app --host 127.0.0.1 --port "$2" --ws-max-size 65536 --no-proxy-headers' \
+      'echo $$ >"$1"; exec uv run uvicorn --factory supportagent.api.app:create_app --host 127.0.0.1 --port "$2" --ws-max-size 65536 --no-proxy-headers --timeout-graceful-shutdown 15' \
       server "$PID_FILE" "$PORT" >"$RUN_DIR/server.log" 2>&1 </dev/null &
     for _ in $(seq 1 90); do
       if healthy; then
