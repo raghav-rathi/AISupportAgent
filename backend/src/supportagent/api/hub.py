@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
+from psycopg.errors import ForeignKeyViolation
 from pydantic import BaseModel
 
 from supportagent.agent.context import ToolFaults
@@ -47,23 +48,58 @@ class TooManyClients(Exception):
     """This conversation already has as many connections as it may have."""
 
 
+class _First:
+    """Wraps what goes to the front of a client's queue."""
+
+    __slots__ = ("item",)
+
+    def __init__(self, item: BaseModel) -> None:
+        self.item = item
+
+
+class _Lane(asyncio.Queue):
+    """A queue in which some things do not wait their turn.
+
+    They go in front of everything that waits, and behind those of their own kind that got
+    there first: a pause and the resume that follows it must not change places.
+    """
+
+    def _init(self, maxsize: int) -> None:
+        super()._init(maxsize)
+        self._ahead = 0  # how many at the front went in ahead of their turn
+
+    def _put(self, item: object) -> None:
+        if isinstance(item, _First):
+            self._queue.insert(self._ahead, item.item)
+            self._ahead += 1
+        else:
+            self._queue.append(item)
+
+    def _get(self) -> object:
+        self._ahead = max(0, self._ahead - 1)
+        return self._queue.popleft()
+
+
 class Subscription:
     """One client's view of a hub: a bounded queue of events.
 
     The connection that has the microphone also gets the reply's audio through this queue, as
     bytes, so that audio and the messages about it reach the client in the order they were
-    made.
+    made. The exception is what is offered with `first`: telling the player to pause or to
+    go on. Behind a second of audio that is still queued for a slow connection, a pause
+    would come a second late, and where in the audio it arrives does not change what it
+    means.
     """
 
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[BaseModel | bytes] = asyncio.Queue(maxsize=_MAX_LAG)
+        self.queue: asyncio.Queue[BaseModel | bytes] = _Lane(maxsize=_MAX_LAG)
         self.lost = False  # the client fell too far behind and missed events
 
-    def offer(self, event: BaseModel | bytes) -> None:
+    def offer(self, event: BaseModel | bytes, *, first: bool = False) -> None:
         if self.lost:
             return
         try:
-            self.queue.put_nowait(event)
+            self.queue.put_nowait(_First(event) if first else event)
         except asyncio.QueueFull:
             self.lost = True
             # What is queued will not be sent: the client is told to reconnect and gets
@@ -89,6 +125,7 @@ class SessionHub:
         self.turns = turns  # customer messages so far, for the limit per conversation
         self.session_id = log.session_id
         self.busy = False  # a turn is running
+        self.current: str | None = None  # that turn's ID, once its first event has gone out
         self.gone = False  # the session was deleted while this hub was open
         self.redactor = rt.redactor(log)
         self.faults = FaultPlan()
@@ -115,6 +152,7 @@ class SessionHub:
             # tidies up for a few milliseconds, and a client that arrived in between was sent
             # the finished turn's token deltas, which the store does not hold.
             self.busy = False
+            self.current = None
             self._turn_events = []
         elif event.seq:
             self._turn_events.append(event)
@@ -139,17 +177,23 @@ class SessionHub:
 
         The store gets it at once, and it alone. Events of a running turn stay queued for the
         turn's end, where they get their last masking pass, see `EventLog.write_apart`.
+
+        All of it goes through even if whoever asked for it is stopped meanwhile. Voice being
+        turned off in that moment is common: a reply ends, the customer hangs up. What voice
+        measured is also what it cost, and an event the clients saw has to be in the store.
         """
-        stamped = self.log.stamp_apart(self.redactor.event(event), turn_id)
-        for subscriber in self._subscribers:
-            subscriber.offer(stamped)
-        for listener in list(self._listeners):
-            listener(stamped)
-        # The write goes through even if whoever asked for it is stopped while it runs. Voice
-        # being turned off in that moment is common: a reply ends, the customer hangs up.
-        # The event has gone out to the clients by now, and a store without it would differ
-        # from what they saw.
-        await asyncio.shield(self.log.write_apart(stamped, self.redactor))
+        return await asyncio.shield(self._record(event, turn_id))
+
+    async def _record(self, event: BaseModel, turn_id: str | None) -> BaseModel:
+        # A turn that is ending has numbered its last event and is storing it. This event
+        # waits for that one to go out, so that clients get the two in order.
+        async with self.log.closing:
+            stamped = self.log.stamp_apart(self.redactor.event(event), turn_id)
+            for subscriber in self._subscribers:
+                subscriber.offer(stamped)
+            for listener in list(self._listeners):
+                listener(stamped)
+        await self.log.write_apart(stamped, self.redactor)
         return stamped
 
     async def start_early(self, text: str) -> EarlyCall | None:
@@ -210,6 +254,7 @@ class SessionHub:
             nonlocal started, ended
             started = started or getattr(event, "turn_id", None) or ""
             ended = ended or event.type in TURN_ENDED
+            self.current = started or None
             self._publish(event)
 
         def never_started(code: str, message: str) -> None:
@@ -272,6 +317,7 @@ class SessionHub:
                 self.let_go(early)  # which does nothing if the turn took it
             if self._task is asyncio.current_task():
                 self.busy = self._working = False
+                self.current = None
                 # Stored events come from Postgres from here on. A save that failed keeps its
                 # events in the log, where attach finds them.
                 self._turn_events = []
@@ -304,16 +350,17 @@ class SessionHub:
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def interrupt_turn(self, heard: str) -> None:
+    async def interrupt_turn(self, heard: str, turn_id: str | None = None) -> None:
         """Stop the reply the customer spoke over, and keep of it what they heard.
 
         `heard` is the part of the reply that had been played to them, which may be nothing.
+        `turn_id` names the turn the reply belongs to, see `EventLog.keep_heard`.
         A turn that is still running is cancelled, and this returns once it is stored and the
         session is free. The next turn, spoken or typed, puts `heard` into the conversation in
         place of the full reply, so the model does not assume the customer knows what they
         were never told. The turn that was cut off is not offered for picking up again.
         """
-        await self.log.keep_heard(heard)
+        await self.log.keep_heard(heard, turn_id)
         await self.stop()
 
     async def attach(self, last_seq: int) -> tuple[list[BaseModel], Subscription, int]:
@@ -403,6 +450,10 @@ class Hubs:
     def full(self) -> bool:
         return len(self._hubs) + self._opening >= self.max_sessions
 
+    def live(self) -> list[str]:
+        """The sessions that are open in this process."""
+        return list(self._hubs)
+
     async def known(self, session_id: str | None) -> bool:
         """Whether a session with this ID exists. Opening an unknown ID starts a new session."""
         if not session_id:
@@ -436,7 +487,17 @@ class Hubs:
                 # The ID is the only key to the session, so it has to be unguessable.
                 session_id = world_id = uuid.uuid4().hex
                 await ensure_world(self.rt, world_id)
-            log = await EventLog.open(self.rt.pool, session_id, world_id)
+            try:
+                log = await EventLog.open(self.rt.pool, session_id, world_id)
+            except ForeignKeyViolation:
+                if not resumed:
+                    raise
+                # The conversation was purged between the look above and this. The visitor
+                # gets a new one, as for any ID the server no longer knows.
+                resumed = False
+                session_id = world_id = uuid.uuid4().hex
+                await ensure_world(self.rt, world_id)
+                log = await EventLog.open(self.rt.pool, session_id, world_id)
             turns = await log.turn_count() if resumed else 0
             hub = self._hubs.setdefault(session_id, SessionHub(self.rt, log, self._release, turns))
             return hub, resumed

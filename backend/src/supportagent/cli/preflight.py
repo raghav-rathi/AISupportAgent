@@ -114,6 +114,8 @@ async def main() -> int:
     }
     for name, value in keys.items():
         print(("ok   " if value else "warn ") + f"{name} {'set' if value else 'not set'}")
+    if settings.secret_key is None:
+        print("warn SECRET_KEY not set: PIN hashes are salted by the session only")
     failed = not all(ok for ok, _ in results) or any(level == "FAIL" for level, _ in models)
     return 1 if failed else 0
 

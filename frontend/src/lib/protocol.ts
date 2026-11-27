@@ -159,7 +159,7 @@ export interface PassageDetail {
   content: string;
 }
 
-/** The client sent something the server could not act on. `client_id` is set when the error answers one `user.message`: that message started no turn. */
+/** The client sent something the server could not act on. `client_id` is set when the error answers one `user.message`: that message started no turn. `chunk_id` is set when it answers a `passage.get`: that passage, and no other the client may be waiting for. */
 export interface ProtocolError {
   seq: number;
   ts: number;
@@ -168,6 +168,7 @@ export interface ProtocolError {
   code: "bad_message" | "turn_in_progress" | "nothing_to_retry" | "nothing_to_cancel" | "too_long" | "rate_limited" | "not_allowed" | "too_many_retries" | "budget_exhausted" | "failed_to_start" | "session_expired" | "not_found" | "voice_unavailable";
   message: string;
   client_id: string | null;
+  chunk_id: string | null;
 }
 
 export interface RetrievalHit {
@@ -258,6 +259,7 @@ export interface SpeechSpoken {
   interrupted: boolean;
   played_ms: number | null;
   text_spoken: string | null;
+  filler: boolean;
   cost_usd: number;
 }
 
@@ -392,13 +394,14 @@ export interface TurnStarted {
   client_id: string | null;
 }
 
-/** What the client has to do with the audio it is playing. `pause` when the customer may be starting to speak, `resume` when that was nothing, `flush` when what is buffered must not be heard. The client answers each with a `voice.playhead`. */
+/** What the client has to do with the audio it is playing. `pause` when the customer may be starting to speak, `resume` when that was nothing, `flush` when what is buffered must not be heard. The client answers each with a `voice.playhead`. Flushes are numbered from 1, and `id` is the number of this flush, or of the last one so far for a pause or a resume. The client names the last flush it has acted on in what it sends, so that a report or a Stop that was on its way when a flush went out is not taken for one made after it. A flush reaches the client in order with the audio: every piece of audio after flush n belongs to a reply made after it. A pause or a resume may arrive ahead of audio that was queued before it. */
 export interface VoicePlayback {
   seq: number;
   ts: number;
   turn_id: string | null;
   type: "voice.playback";
   action: "pause" | "resume" | "flush";
+  id: number;
 }
 
 /** The reply to `voice.start`. Send microphone audio now, as binary frames. */
@@ -523,10 +526,11 @@ export interface UserMessage {
   client_id?: string | null;
 }
 
-/** The customer stopped the reply by hand. The client has dropped what it had buffered. The server always answers with a `voice.playback` flush, also when nothing was playing. Until that arrives the client plays no audio it receives: those are pieces of the reply that was stopped, sent before the server knew. */
+/** The customer stopped the reply by hand. The client has dropped what it had buffered. `epoch` is the number of the last flush the client had acted on when Stop was pressed. Until a flush with a higher number arrives the client plays no audio it receives: those are pieces of the reply that was stopped, sent before the server knew. The server sends that flush in answer to this message, also when nothing was playing, unless one has gone out since the epoch named here: then the reply that was stopped is cut already. */
 export interface VoiceInterrupt {
   type: "voice.interrupt";
   played_ms: number;
+  epoch?: number | null;
 }
 
 /** How much of the audio the server sent has been played, counted from `voice.started`. Sent a few times a second while audio plays, and at once after a pause, a flush or the end of the audio. The server needs it to know what the customer heard before an interruption. */
@@ -535,6 +539,7 @@ export interface VoicePlayhead {
   played_ms: number;
   buffered_ms?: number;
   after?: "tick" | "pause" | "flush" | "drained";
+  epoch?: number | null;
 }
 
 /** Turn voice on for this connection. The server answers with `voice.started` or an `error`. Both answers name the `attempt` they belong to, the error as its `client_id`, and so does the `voice.stopped` that ends it. A client that stops and starts again quickly can tell the old voice's last words from the new one's. After that the client sends mono PCM16 at 16 kHz as binary frames, 80 ms each, and gets the reply's audio back the same way. A session has one voice connection: starting voice on another one stops the first. */

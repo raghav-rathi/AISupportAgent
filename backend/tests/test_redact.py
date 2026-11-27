@@ -251,6 +251,24 @@ def test_the_word_pin_masks_the_number_in_these_forms_too(text):
     assert not re.search(r"\d", masked) and "four" not in masked.lower(), masked
 
 
+def test_a_pin_said_partly_in_numerals_and_partly_in_words_is_masked():
+    fresh = Redactor(strict=False)
+    assert fresh.text("My PIN is 47 twenty-one", customer=True) == f"My PIN is {MASK}"
+    assert fresh.text("PIN: 4 seven 2 one", customer=True) == f"PIN: {MASK}"
+    assert fresh.text("47 twenty-one is my PIN", customer=True) == f"{MASK} is my PIN"
+    learned = Redactor(strict=False)
+    learned.learn("4721")
+    assert learned.text("it was 4 seven 2 one", customer=True) == f"it was {MASK}"
+    assert learned.text("Your code is 47 twenty-one.") == f"Your code is {MASK}."
+    # Numerals next to number words in an ordinary sentence are not a PIN, in the customer's
+    # words or in the app's.
+    for text in ("We were charged 100 one time.", "I have 3 two-year plans and 1 one-year plan."):
+        assert learned.text(text, customer=True) == text
+        assert Redactor().text(text, customer=True) == text
+    written = "Refunds of $47, twenty-one in all."
+    assert learned.text(written) == written
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -299,6 +317,17 @@ def test_a_learned_pin_does_not_garble_amounts_ids_and_dates_the_app_wrote():
     assert redactor.text("Your code 4721 is on file.") == f"Your code {MASK} is on file."
 
 
+def test_half_of_a_learned_pin_in_words_is_masked_as_a_message_of_its_own():
+    redactor = Redactor(strict=False)  # verified by now
+    redactor.learn("2458")
+    assert redactor.text("five eight.", customer=True) == f"{MASK}."
+    assert redactor.text("Twenty-four", customer=True) == MASK
+    # One word is an answer more often than half a PIN, and words in a sentence are not a half.
+    for text in ("Two.", "Fifty-eight seats"):
+        assert redactor.text(text, customer=True) == text
+    assert redactor.text("five eight.") == "five eight."  # the app's own text is not a message
+
+
 def test_a_pin_under_another_argument_name_or_as_a_number_is_masked():
     redactor = Redactor(strict=False)
     as_number = redactor.event(
@@ -310,6 +339,36 @@ def test_a_pin_under_another_argument_name_or_as_a_number_is_masked():
     )
     assert as_number.args["pin"] == MASK
     assert redactor.text("it was 4721") == f"it was {MASK}"  # and it was learned as 4721
+
+
+def test_a_pin_given_to_verify_identity_under_another_name_is_masked_in_its_trace():
+    redactor = Redactor(strict=False)
+    trace = LlmTrace(
+        call_id="c1",
+        purpose="agent",
+        model="m",
+        prompt=[TraceMessage(role="user", content="Switch to 53920164 and 2458")],
+        tools=["verify_identity"],
+        response=TraceMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "t1",
+                    "name": "verify_identity",
+                    "args": {"account_number": "53920164", "code": "2458"},
+                }
+            ],
+        ),
+    )
+    cleaned = redactor.event(trace)
+    assert cleaned.prompt[0].content == f"Switch to 53920164 and {MASK}"
+    assert cleaned.response.tool_calls[0]["args"] == {"account_number": "53920164", "code": MASK}
+    # Another tool's arguments teach it nothing, and the account number is never the PIN.
+    search = ToolStarted(tool_call_id="t2", name="search_knowledge_base", args={"query": "3390"})
+    assert redactor.event(search) == search
+    assert redactor.text("it was 3390") == "it was 3390"
+    assert redactor.text("account 53920164") == "account 53920164"
 
 
 def test_a_new_process_recognises_the_pins_an_earlier_one_hashed():
@@ -328,6 +387,24 @@ def test_a_new_process_recognises_the_pins_an_earlier_one_hashed():
     # Another session's key, or another server's secret, does not recognise them.
     for other in (session_key("server secret", "session-2"), session_key("another", "session-1")):
         assert Redactor(strict=False, key=other, known=stored).text("4721") == "4721"
+
+
+def test_a_new_process_masks_a_pin_wherever_the_first_one_would_have():
+    key = session_key("server secret", "session-1")
+    first = Redactor(strict=False, key=key)
+    first.learn("4721")
+    for text in (
+        "Use 4|7|2|1 please",
+        "Use 47--21 please",
+        "Use 4(7)2(1) please",
+        "Step 1: 47-21",
+        "It was one zero four eight two nine one seven four seven two one",
+    ):
+        later = Redactor(strict=False, key=key, known=first.hashes)  # it has only the hash
+        assert not shows_pin(later.text(text, customer=True)), text
+    later = Redactor(strict=False, key=key, known=first.hashes)
+    for text in ("Step 1: open Settings, step 2: pick 47-22.", "one zero four eight two nine one"):
+        assert later.text(text, customer=True) == text
 
 
 def texts(events):
@@ -350,6 +427,25 @@ def test_a_pin_split_over_two_streamed_chunks_is_masked():
     out += redactor.outgoing(done())
     assert texts(out) == f"Confirmed, code {MASK} worked. Your PIN is {MASK}."
     assert out[-1].type == "llm.finished"
+
+
+def test_a_spoken_pin_split_over_streamed_chunks_is_masked():
+    redactor = Redactor(strict=False)
+    redactor.learn("4721")
+    out = []
+    for piece in ("Your code is ", "four ", "seven ", "two ", "one."):
+        out += redactor.outgoing(LlmDelta(call_id="c1", text=piece))
+    out += redactor.outgoing(done())
+    assert texts(out) == f"Your code is {MASK}."
+    out = []
+    for piece in ("It is four se", "ven two o", "ne. Thanks"):
+        out += redactor.outgoing(LlmDelta(call_id="c2", text=piece))
+    assert texts(out) == f"It is {MASK}. Thanks"
+    # Number words in an ordinary answer wait only for the chunk that shows where they end.
+    out = []
+    for piece in ("I have one", " question. Two", " plans fit."):
+        out += redactor.outgoing(LlmDelta(call_id="c3", text=piece))
+    assert texts(out) == "I have one question. Two plans fit."
 
 
 def test_streamed_text_arrives_whole_and_in_order_when_nothing_is_secret():

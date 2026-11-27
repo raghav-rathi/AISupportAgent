@@ -148,15 +148,23 @@ class HostedReranker:
             {"model": self.name, "query": query, "documents": documents, "top_n": len(documents)},
         )
         try:
-            by_index = {row["index"]: float(row["relevance_score"]) for row in body["results"]}
+            rows = [(row["index"], float(row["relevance_score"])) for row in body["results"]]
+            by_index = dict(rows)
         except (KeyError, TypeError, ValueError) as exc:
             raise HostedModelError("the reply held no scores") from exc
-        if sorted(by_index) != list(range(len(documents))):
+        # One score per document, each index once. A reply that repeats an index has lost a score.
+        if len(rows) != len(by_index) or sorted(by_index) != list(range(len(documents))):
             raise HostedModelError(f"scores for {len(by_index)} of {len(documents)} documents")
         # A score outside 0 to 1 is not a relevance at all. Clipping it would turn a reply gone
         # wrong into a perfect match.
         if not all(0.0 <= score <= 1.0 for score in by_index.values()):
             raise HostedModelError("a relevance score was not between 0 and 1")
         cost = (body.get("usage") or {}).get("cost")
-        priced = isinstance(cost, int | float) and math.isfinite(cost) and cost >= 0
+        # A bool is an int to Python, and `true` is no price.
+        priced = (
+            isinstance(cost, int | float)
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        )
         return [_logit(by_index[i]) for i in range(len(documents))], float(cost) if priced else None

@@ -25,11 +25,17 @@ export const CLOSE = {
 const QUICK_STEPS_MS = [500, 1_000, 2_000, 4_000, 8_000];
 const PATIENT_STEPS_MS = [15_000, 30_000, 60_000];
 
-/** `attempt` counts the closes in a row since the last connection that worked, from 0. */
+/**
+ * `attempt` counts the closes in a row since the last connection that worked, from 0. A connection
+ * works once it has caught up with what it missed.
+ */
 export function planAfterClose(code: number, attempt: number, random: () => number = Math.random): Plan {
   switch (code) {
     case CLOSE.fellBehind:
-      return { kind: "retry", delayMs: 0 }; // the server asks for it: everything missed is stored
+      // The server asks for it, and everything missed is stored. Falling behind again before
+      // catching up means the replay itself is too much at this pace: then it backs off.
+      if (attempt === 0) return { kind: "retry", delayMs: 0 };
+      return { kind: "retry", delayMs: jittered(QUICK_STEPS_MS[Math.min(attempt - 1, QUICK_STEPS_MS.length - 1)], random) };
     case CLOSE.idle:
       return { kind: "pause" };
     case CLOSE.sessionExpired:

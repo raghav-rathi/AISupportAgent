@@ -54,8 +54,9 @@ function inline(text: string, keyPrefix: string, cites?: Cites): ReactNode[] {
       const numbers = numbersIn(part);
       return (
         <sup key={key} className="ml-2 text-caption text-ash-text">
+          {/* A mark can name a number twice, as in [1, 1], so its place in the mark is the key. */}
           {numbers.map((n, at) => (
-            <span key={n}>
+            <span key={at}>
               {at > 0 ? ", " : ""}
               {cites?.valid.has(n) ? (
                 <button

@@ -18,14 +18,23 @@ const press = (key: string, more: Partial<StopKeyPress> = {}): StopKeyPress => (
 describe("the Stop keys", () => {
   it("take the space bar from a button the pointer left focused, so it does not end voice", () => {
     expect(stopKey(press(" ", { focus: "pointer-button" }), true)).toBe("stop");
-    // With nothing to stop the button still must not toggle, and the page must not scroll.
-    expect(stopKey(press(" ", { focus: "pointer-button" }), false)).toBe("block");
     expect(stopKey(press(" "), true)).toBe("stop");
+  });
+
+  it("leave the space bar to the page when there is nothing to stop", () => {
+    // It scrolls, or presses the focused button, as on any page.
+    expect(stopKey(press(" "), false)).toBe("pass");
+    expect(stopKey(press(" ", { focus: "pointer-button" }), false)).toBe("pass");
   });
 
   it("leave the space bar to a control the keyboard focused, and to text fields", () => {
     expect(stopKey(press(" ", { focus: "control" }), true)).toBe("pass");
     expect(stopKey(press(" ", { focus: "field" }), true)).toBe("pass");
+  });
+
+  it("leave both keys to the drawer's panels, dialogs and menus", () => {
+    expect(stopKey(press(" ", { focus: "region" }), true)).toBe("pass");
+    expect(stopKey(press("Escape", { focus: "region" }), true)).toBe("pass");
   });
 
   it("stop on Escape from anywhere, a text field too", () => {
@@ -80,8 +89,9 @@ const activity = (state: AppState, value: string) =>
 const turn = (mode: "text" | "voice", seq: number) => at({ type: "turn.started", turn_id: "t1", mode, text: "Hi", client_id: null }, seq);
 
 describe("what Stop stops", () => {
-  it("cancels a typed turn as a turn, also while voice is on", () => {
+  it("cancels a typed turn as a turn, also while voice is on or starting", () => {
     expect(stopTarget(voiceOn(stateWith(turn("text", 1))))).toBe("turn");
+    expect(stopTarget(reduce(stateWith(turn("text", 1)), { type: "voice", status: "starting" }))).toBe("turn");
   });
 
   it("interrupts a spoken turn, a reply being spoken, and a voice turn being thought about", () => {

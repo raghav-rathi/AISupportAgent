@@ -5,9 +5,11 @@ customer through Deepgram's recogniser, starts a turn of the agent for each thin
 speaks the agent's answer. Four rules decide what it does.
 
 1. Nothing unconfirmed is spoken. Text the model writes while it may still call a tool is never
-   said. An answer is said from the moment its step is known to be the answer. An answer the
-   gate held is said only once its grounding check has passed. An answer that fails the check
-   after it began is cut off, and the correction is said in its place.
+   said. An answer that rests on what a tool returned, or that the gate held, is said only once
+   its grounding check has passed: while its tools run the customer hears "one moment", words
+   of our own that claim nothing. A reply that used no tool is said from the moment its step
+   is known to be the answer, while its check runs. If it fails the check it is cut off, and
+   the correction is said in its place.
 2. The customer can always interrupt. When they start to speak, playback pauses: first on the
    level of the microphone alone, a quarter of a second in, and for good once the recogniser has
    a word. If what the recogniser hears is the assistant's own voice coming back through the
@@ -83,6 +85,22 @@ logger = logging.getLogger(__name__)
 
 GREETING = "Hi, this is Fernhill support. I'm an AI assistant. How can I help?"
 TURN_FAILED = "Sorry, something went wrong on my side. Please say that again."
+# For a turn that failed after the customer had heard some of a reply nobody could check.
+TOOK_BACK_FAILED = (
+    "I could not confirm what I just said, so please disregard it. "
+    "Something went wrong on my side. Please ask me again."
+)
+# Said when a spoken turn starts its first tool. The answer is a second or more away, and it
+# will not be said before its check has passed. These words say what is being done and
+# nothing else, so there is nothing in them to check.
+ONE_MOMENT = {
+    "verify_identity": "One moment while I check your details.",
+    "get_account": "Let me pull up your account.",
+    "search_knowledge_base": "Let me check that for you.",
+    "issue_refund": "One moment while I process that.",
+    "update_account_field": "One moment while I update that.",
+    "create_escalation_ticket": "One moment.",
+}
 
 _TICK_S = 0.1
 # One or two words that the reply also contains do not say who is speaking. Playback stays
@@ -114,6 +132,12 @@ _SILENT_RMS = 50.0
 _PAUSE_MS = 240.0
 _LEAD_MS = 40.0
 _NO_AUDIO_S = 5.0  # a reply whose audio does not come, or stops coming, has lost its connection
+# What the microphone can have heard of a reply: its words up to where the player stands, and
+# a second more, because the player's last report is a little old. Until all of a reply's audio
+# is made its pace is not known, and a pace faster than the voice ever spoke stands in for it.
+_ECHO_MARGIN_MS = 1_000.0
+_FASTEST_CHARS_PER_MS = 0.022
+_ECHO_LINGERS_S = 2.0  # the recogniser may still report words of a reply that has just ended
 # An answer the customer spoke over gets this long to finish its grounding check. The check took
 # 0.8 s at the median on the hosted judge.
 _LEAVE_S = 4.0
@@ -155,6 +179,16 @@ def _quiet_head(audio: bytes, rate: int) -> int:
     return len(audio)
 
 
+def _whole_words(text: str, chars: int) -> str:
+    """The words of `text` that end within its first `chars` characters."""
+    if chars >= len(text):
+        return text
+    head = text[:chars]
+    if not text[chars].isspace():
+        head = head.rpartition(" ")[0]  # the word that was cut does not count
+    return head.rstrip()
+
+
 def _same(one: str, other: str) -> bool:
     return " ".join(one.split()) == " ".join(other.split())
 
@@ -182,6 +216,7 @@ class _Line:
     """One connection to the synthesis, and the reply it speaks once it has one."""
 
     born: float
+    asked: float | None = None  # when it was told to open
     speaker: FluxSpeaker | None = None
     opening: asyncio.Task[None] | None = None
     reply: _Reply | None = None
@@ -198,6 +233,7 @@ class _Reply:
     text: str = ""  # what has gone to the synthesis
     before: str = ""  # an earlier piece of the same answer, heard to its end
     must: bool = False  # a correction: what comes next waits for it instead of replacing it
+    filler: bool = False  # "one moment" while a tool runs: no part of any answer
     first_audio: float | None = None  # when its first sound went to the client
     last_audio: float = 0.0  # when the synthesis last sent a piece of it, silent or not
     sent_ms: float = 0.0  # audio passed on to the client
@@ -210,6 +246,7 @@ class _Reply:
     made: Spoken | None = None  # the synthesis has made all of its audio
     due: float | None = None  # by when the client must have played it
     over: bool = False  # played to the end, or cut
+    reached: str = ""  # the words that can have been heard, as last worked out
 
     def in_voice_time(self, heard_ms: float) -> float:
         """Where the voice's own clock stood when the client had played this much of the reply."""
@@ -234,6 +271,7 @@ class _Queued:
     words: str
     before: str
     must: bool
+    after: float | None = None
 
 
 @dataclass
@@ -304,12 +342,15 @@ class VoiceSession:
         self._spare_failed_at: float | None = None
         self._unlisten: Callable[[], None] | None = None
         self._stopped = False
+        self._over = asyncio.Event()  # the shutdown has run to its end
         self._status_now: str | None = None
         self._began = self._active_at = self._mic_at = self._accounted_at = clock()
         self._reconnected_at: float | None = None
         self._line_failed_at: float | None = None
         # The microphone.
         self._fed_s = 0.0  # audio received since voice started
+        self._fed_at = clock()
+        self._allowed_s = _AHEAD_S  # audio the client may send right now
         self._unbilled_s = 0.0  # of that, what no stored event has accounted for
         self._heard_s = 0.0  # audio sent to the recogniser's socket of the moment
         self._mic_clock = float("inf")  # our clock when that socket's audio began
@@ -326,8 +367,9 @@ class VoiceSession:
         self._deaf: int | None = None  # a turn that is not taken, see `barge_in`
         self._worded = False  # the turn has a word
         self._paused_at: float | None = None  # playback is paused until we know who speaks
-        self._echo_of: str | None = None  # the turn so far is the reply itself, with this text
+        self._echo_of: _Reply | None = None  # the turn so far is this reply, heard back
         self._over_echo: str | None = None  # the customer spoke over an echo of this text
+        self._ended: tuple[float, str] | None = None  # the reply that ended last, and when
         self._digit_mode = False
         self._waits_out = False  # in digit mode: the recogniser is told never to end the turn
         self._owed_digits = 0  # replies to go that keep digit mode on without asking again
@@ -348,6 +390,13 @@ class VoiceSession:
         self._heard_text: dict[str, str] = {}  # of that, what was played to its end
         self._leaving: _Leaving | None = None
         self._owed: str | None = None  # a correction the customer has not heard yet
+        self._acked: set[str] = set()  # turns that have had their "one moment"
+        # Turns whose answer was stopped after the customer had heard some of it, unchecked,
+        # with what they had heard.
+        self._took_back: dict[str, str] = {}
+        # What they heard of an answer whose turn then failed. The next spoken turn puts it
+        # into the conversation as words nobody verified.
+        self._unverified: tuple[str, str] | None = None  # the turn, and what was heard
         # The reply.
         self._reply: _Reply | None = None
         self._next: list[_Queued] = []  # what is said after it
@@ -359,6 +408,7 @@ class VoiceSession:
         # The client's playhead at the start of the reply in progress. None between a cut and
         # the client's word on where it stood.
         self._client_at: float | None = 0.0
+        self._flushes = 0  # how often the client has been told to drop its audio
 
     @property
     def stopped(self) -> bool:
@@ -377,20 +427,23 @@ class VoiceSession:
 
     def _open(self, line: _Line) -> asyncio.Task[None]:
         if line.opening is None:
+            line.asked = self._clock()
             line.opening = asyncio.create_task(line.speaker.open())
             line.opening.add_done_callback(_retrieve)
         return line.opening
 
     def _warm(self) -> None:
-        """Have the connection for the reply after this one ready when it is needed.
+        """Open the connection the next reply will be spoken on, if it is not open or opening.
 
-        Unless the service has just closed a spare one as soon as it was open: then the next is
-        opened when a reply needs it, and no sooner, so that a service that turns connections
-        away is not asked for one after another.
+        Called when a reply is on its way: the customer has begun to speak, or a turn has
+        started. Not sooner. A connection opened right after a reply sat idle through all of
+        the customer's next sentence, the service closed it for that, and it was opened again,
+        over and over in a quiet session. And not when the service has just closed one as
+        soon as it was open: then the reply opens its own when it needs it, so that a service
+        which turns connections away is not asked for one after another.
         """
-        self._spare = self._line()
         failed = self._spare_failed_at
-        if failed is None or self._spare.born - failed >= _RECONNECT_ONCE_PER_S:
+        if failed is None or self._clock() - failed >= _RECONNECT_ONCE_PER_S:
             self._open(self._spare)
 
     def _hang_up(self, line: _Line) -> None:
@@ -462,8 +515,17 @@ class VoiceSession:
 
     async def _shutdown(self, reason: StopReason, message: str) -> None:
         if self._stopped:
+            # Someone else is shutting it down. Whoever asks again gets it back when that is
+            # done, not before: its places and its sockets are still held until then.
+            await self._over.wait()
             return
         self._stopped = True
+        try:
+            await self._shut(reason, message)
+        finally:
+            self._over.set()
+
+    async def _shut(self, reason: StopReason, message: str) -> None:
         if self._unlisten is not None:
             self._unlisten()
         if self._hub.voice is self:
@@ -536,8 +598,15 @@ class VoiceSession:
             return
         now = self._clock()
         seconds = size / 2 / self._config.input_rate
-        if self._fed_s + seconds > now - self._began + _AHEAD_S:
+        # A microphone makes a second of audio a second. A connection that stalled sends what
+        # it held back in one go, so some running ahead is allowed, and it is earned back in
+        # real time. Counted from the start of voice instead, a client that had been quiet
+        # for five minutes could send five minutes of audio at once.
+        self._allowed_s = min(_AHEAD_S, self._allowed_s + now - self._fed_at)
+        self._fed_at = now
+        if seconds > self._allowed_s:
             return  # faster than a microphone can produce it: not a microphone
+        self._allowed_s -= seconds
         self._fed_s += seconds
         self._unbilled_s += seconds
         self._heard_s += seconds
@@ -584,8 +653,15 @@ class VoiceSession:
         self._room = max(level, self._room * 0.98)
         self._room_heard += 1
 
-    def playhead(self, played_ms: float, after: str) -> None:
-        """The client's report of how much audio it has played since voice started."""
+    def playhead(self, played_ms: float, after: str, epoch: int | None = None) -> None:
+        """The client's report of how much audio it has played since voice started.
+
+        `epoch` is the number of the last flush it had acted on. A report from before the
+        latest flush says where the player stood in audio that has been dropped since, and
+        is not the answer to that flush.
+        """
+        if epoch is not None and epoch != self._flushes:
+            return
         # Taken at once and not in turn: the loop may be waiting for exactly this number. And
         # one wake-up serves any number of reports, so a client cannot queue them without end.
         self._played = max(self._played, played_ms)
@@ -597,9 +673,9 @@ class VoiceSession:
             self._playhead_posted = True
             self._post("playhead", None)
 
-    def interrupt(self, played_ms: float) -> None:
+    def interrupt(self, played_ms: float, epoch: int | None = None) -> None:
         """The customer stopped the reply by hand, and their player has dropped the rest."""
-        self._post("stop_pressed", played_ms)
+        self._post("stop_pressed", (played_ms, epoch))
 
     def _audio(self, line: _Line, audio: bytes) -> None:
         """A piece of a reply's audio from the synthesis: on to the client, without long silences.
@@ -663,7 +739,7 @@ class VoiceSession:
         self._pause_seen.clear()
         self._client_paused = True
         self._paused_since = self._clock()
-        self._tell(VoicePlayback(action="pause"))
+        self._sub.offer(VoicePlayback(action="pause", id=self._flushes), first=True)
 
     def _let_play(self) -> None:
         """Nobody is weighing who speaks any more: a player that was paused for that goes on."""
@@ -673,12 +749,13 @@ class VoiceSession:
             reply = self._audible()
             if reply is not None and reply.due is not None:
                 reply.due += self._clock() - self._paused_since  # it plays that much later
-            self._tell(VoicePlayback(action="resume"))
+            self._sub.offer(VoicePlayback(action="resume", id=self._flushes), first=True)
 
     def _flush_client(self) -> None:
         """The client drops what it has buffered and says where its playhead stands."""
         self._client_paused = False
-        self._tell(VoicePlayback(action="flush"))
+        self._flushes += 1
+        self._tell(VoicePlayback(action="flush", id=self._flushes))
         self._client_at = None  # until its report comes, see `playhead`
 
     def _status(self, state: str) -> None:
@@ -732,6 +809,8 @@ class VoiceSession:
                 await self._shutdown("error", "it ran into a problem")
 
     async def _on_greet(self, _: None) -> None:
+        if self._hub.busy or self._hub.turns > 0:
+            return  # a message was typed in the moment voice came on: its answer is what counts
         await self._speak(None, GREETING)
 
     async def _on_hush(self, _: None) -> None:
@@ -793,7 +872,7 @@ class VoiceSession:
         if leaving is not None and not leaving.stopped and now - leaving.since >= _LEAVE_S:
             # Its check is taking too long. What was heard of it is kept as unverified.
             leaving.stopped = True
-            await self._hub.interrupt_turn(leaving.heard)
+            await self._hub.interrupt_turn(leaving.heard, leaving.turn_id)
         pending = self._pending
         if pending is not None and leaving is None and now - pending.since >= _WAIT_FOR_TYPED_S:
             self._pending = self._said = None
@@ -875,12 +954,19 @@ class VoiceSession:
         line, error = failure
         now = self._clock()
         if line is self._spare:
-            if now - line.born < _YOUNG_S:
+            if line.asked is not None and now - line.asked < _YOUNG_S:
                 self._spare_failed_at = now  # closed as soon as it was open: see `_warm`
-            self._warm()
+            self._spare = self._line()
+            if self._hub.busy or self._utterance is not None:
+                self._warm()  # a reply is on its way
             return
         reply = line.reply
         if reply is None or reply.over:
+            return
+        if reply.made is not None:
+            # All of its audio has been made and passed on. The connection had nothing left
+            # to do but be closed, and the service got there first. Stopping the player for
+            # that would cut off the end of a reply that is complete.
             return
         logger.warning("the voice dropped in session %s: %s", self._hub.session_id, error)
         again = self._line_failed_at is None or now - self._line_failed_at > _RECONNECT_ONCE_PER_S
@@ -896,6 +982,45 @@ class VoiceSession:
         self._rest()
 
     # The customer speaks.
+
+    def _hear_again(self, reply: _Reply) -> None:
+        """A reply has stopped while the recogniser's turn was not being taken.
+
+        Without echo cancellation, speech during a reply cannot be told from the reply, and
+        the whole turn is passed over. Once the reply has stopped, by itself or because Stop
+        was pressed, what the customer goes on to say in that same turn is theirs. The
+        reply's own words at the turn's start are left out of it.
+        """
+        if self._deaf is not None and self._deaf == self._utterance:
+            self._deaf = None
+            self._over_echo = self._lately(reply)
+            self._worded = False
+
+    def _lately(self, reply: _Reply) -> str:
+        """The words of a reply that can have reached the customer's ear, and so the microphone.
+
+        Words the player has not got to cannot come back as an echo. A customer who says
+        something the reply was only going to say is the customer. Compared with the whole
+        reply, such a sentence was taken for the reply's own voice and passed over.
+        """
+        if reply.over:
+            return reply.reached
+        said = ""
+        if reply.first_audio is not None and self._client_at is not None:
+            played_ms = max(0.0, min(self._played - self._client_at, reply.sent_ms))
+            voice_ms = reply.in_voice_time(played_ms) + _ECHO_MARGIN_MS
+            if reply.made is not None and reply.made_ms > 0:
+                chars = len(reply.text) * voice_ms / reply.made_ms
+            else:
+                chars = voice_ms * _FASTEST_CHARS_PER_MS
+            end = reply.text.find(" ", int(chars))
+            said = reply.text if end < 0 else reply.text[:end]
+        ended = self._ended
+        before = (
+            ended[1] if ended is not None and self._clock() - ended[0] < _ECHO_LINGERS_S else ""
+        )
+        reply.reached = " ".join(part for part in (before, reply.before, said) if part)
+        return reply.reached
 
     def _audible(self) -> _Reply | None:
         """The reply the customer is hearing, or about to."""
@@ -936,6 +1061,7 @@ class VoiceSession:
         self._digits_seen, self._digits_at, self._ending = 0, now, False
         self._echo_of = self._over_echo = None
         self._worded = False
+        self._warm()  # whatever they say, a reply will follow it
         hushed, self._hushed_at = self._hushed_at is not None, None
         reply = self._audible()
         if reply is not None and reply.first_audio is not None and not self._barge_in:
@@ -960,34 +1086,44 @@ class VoiceSession:
             await self._cut_in()  # they have more to say, and nothing has been heard yet
             return
         # Either the customer speaks over the reply, or the microphone hears the reply.
-        if self._leaky and wording.sounds_like_echo(turn.transcript, reply.speaking) is not False:
+        played = self._lately(reply)
+        if self._leaky and wording.sounds_like_echo(turn.transcript, played) is not False:
             # It has heard the reply before in this session. Playback is not stopped for that
             # again: it goes on until words come that the reply does not have.
             self._let_play()
-            self._echo_of = reply.speaking
+            self._echo_of = reply
             return
         if not self._client_paused:
             self._pause_client()
         self._paused_at = self._clock()
-        await self._weigh(turn, reply.speaking)
+        await self._weigh(turn, reply)
 
-    async def _weigh(self, turn: Turn, speaking: str) -> None:
+    async def _weigh(self, turn: Turn, reply: _Reply) -> None:
         """Decide whose voice the recogniser is hearing while playback is paused."""
-        verdict = wording.sounds_like_echo(turn.transcript, speaking)
-        if verdict is True and self._spoke_after(turn, speaking):
-            verdict, self._over_echo = False, speaking  # the reply's words, and then their own
+        played = self._lately(reply)
+        verdict = wording.sounds_like_echo(turn.transcript, played)
+        if verdict is True and self._spoke_after(turn, played):
+            verdict = False  # the reply's words, and then their own
         if verdict is True:
             self._leaky = True
             self._let_play()
-            self._echo_of = speaking
+            self._echo_of = reply
         elif verdict is False:
+            if self._begins_as(turn, played):
+                self._over_echo = played  # those words are left out of what they said
             await self._cut_in()
             await self._note(turn)
 
-    def _spoke_after(self, turn: Turn, speaking: str) -> bool:
+    def _begins_as(self, turn: Turn, played: str) -> bool:
+        """Whether a transcript begins with words the reply had just said."""
+        said = wording.tidy_digits(turn.transcript)
+        return wording.without_echo(said, played) != said
+
+    def _spoke_after(self, turn: Turn, played: str) -> bool:
         """Whether a transcript that begins with the reply's words goes on with the customer's."""
-        rest = wording.without_echo(wording.tidy_digits(turn.transcript), speaking)
-        return wording.is_speech(rest)
+        said = wording.tidy_digits(turn.transcript)
+        rest = wording.without_echo(said, played)
+        return rest != said and wording.is_speech(rest)
 
     async def _speech_goes_on(self, turn: Turn) -> None:
         if not self._worded:
@@ -997,15 +1133,16 @@ class VoiceSession:
         if self._paused_at is not None:
             reply = self._audible()
             if reply is not None:
-                await self._weigh(turn, reply.speaking)
+                await self._weigh(turn, reply)
                 return
             self._let_play()  # the reply ended while its player was paused
         if self._echo_of is not None:
-            echo = wording.sounds_like_echo(turn.transcript, self._echo_of) is not False
-            if echo and not self._spoke_after(turn, self._echo_of):
+            played = self._lately(self._echo_of)
+            echo = wording.sounds_like_echo(turn.transcript, played) is not False
+            if echo and not self._spoke_after(turn, played):
                 return
             # Words the reply does not have: the customer is speaking over it.
-            self._over_echo, self._echo_of = self._echo_of, None
+            self._over_echo, self._echo_of = played, None
             if self._audible() is not None and not self._client_paused:
                 self._pause_client()
             await self._cut_in()
@@ -1097,21 +1234,30 @@ class VoiceSession:
         if self._paused_at is not None:
             # A word or two, over before it was clear whose they were.
             reply = self._audible()
-            if (
-                reply is not None
-                and wording.sounds_like_echo(turn.transcript, reply.speaking)
-                and not self._spoke_after(turn, reply.speaking)
-            ):
-                self._leaky = True
-                self._let_play()
-                return ""
+            if reply is not None:
+                played = self._lately(reply)
+                verdict = wording.sounds_like_echo(turn.transcript, played)
+                if verdict is None:
+                    # One word the reply had just said is taken for the reply only where
+                    # the microphone is known to hear it. Two are, anywhere.
+                    alone = len(wording.words(turn.transcript)) < 2
+                    verdict = (self._leaky or not alone) and wording.is_short_echo(
+                        turn.transcript, played
+                    )
+                if verdict and not self._spoke_after(turn, played):
+                    self._leaky = True
+                    self._let_play()
+                    return ""
+                if self._begins_as(turn, played):
+                    self._over_echo = played
             await self._cut_in()
         if self._echo_of is not None:
-            echo, self._echo_of = self._echo_of, None
-            if not self._spoke_after(turn, echo):
+            reply, self._echo_of = self._echo_of, None
+            played = self._lately(reply)
+            if not self._spoke_after(turn, played):
                 self._rest()  # the microphone heard the reply and nothing else
                 return ""
-            self._over_echo = echo  # the reply's words, and then the customer's
+            self._over_echo = played  # the reply's words, and then the customer's
             await self._cut_in()
         said = self._words(turn)
         if not said:
@@ -1125,8 +1271,7 @@ class VoiceSession:
         if refusal is not None:
             if early is not None:
                 self._hub.let_go(early)
-            self._tell(refusal)
-            await self._shutdown("limit", refusal.message)
+            await self._shutdown("limit", refusal.message)  # which tells the client why
             return
         now = self._clock()
         ended = None
@@ -1157,6 +1302,12 @@ class VoiceSession:
         if owed:
             # Before anything else they hear that an answer they heard the start of was wrong.
             await self._speak(None, owed, must=True)
+        unverified, self._unverified = self._unverified, None
+        if unverified is not None:
+            # The turn before failed after they had heard some of its answer, which nobody
+            # could check. The turn that starts now reads that they heard it, and that it
+            # was never verified. Kept until now so that the failed turn could be retried.
+            await self._hub.log.keep_heard(unverified[1], unverified[0])
         if self._hub.start_turn(said, "voice", early=early):
             self._status("thinking")
         else:
@@ -1177,18 +1328,24 @@ class VoiceSession:
         self._next.clear()
         heard: str | None = None
         turn_id: str | None = None
+        # Their own turn, if it is the one that runs. A typed message's turn is not, and it may
+        # have begun a moment ago without this loop having heard of it yet.
+        ours = self._hub.current is None or self._hub.current == self._turn_id
+        running = self._turn_id if self._hub.busy and self._turn_id is not None and ours else None
         if reply is not None:
-            heard = await self._cut(reply, played_ms) or ""
             turn_id = reply.turn_id
+
+            async def keep(heard: str) -> None:
+                # The reply's turn is over and stored. It is cut down to what was heard of
+                # it, unless that was all of it.
+                said = self._said_text.get(turn_id, "")
+                if turn_id in queued or not _same(heard, said):
+                    await self._hub.log.keep_heard(heard, turn_id)
+
+            over = turn_id is not None and turn_id != running
+            heard = await self._cut(reply, played_ms, note=keep if over else None) or ""
         else:
             self._let_play()
-        # Their own turn, if it is the one that runs. A typed message's turn is not.
-        running = self._turn_id if self._hub.busy and self._turn_id is not None else None
-        if turn_id is not None and turn_id != running and running is None:
-            # The reply's turn is over and stored. It is cut down to what was heard of it.
-            whole = turn_id not in queued and _same(heard or "", self._said_text.get(turn_id, ""))
-            if not whole:
-                await self._hub.interrupt_turn(heard or "")
         if running is None:
             if pressed and self._hub.busy:
                 self._hub.cancel()  # a typed message's turn, stopped the way its own Stop would
@@ -1198,13 +1355,21 @@ class VoiceSession:
             # Its answer was being said, or had been, and is not confirmed yet.
             was = heard if turn_id == running else self._heard_text.get(running)
             self._leaving = _Leaving(running, was or "", self._clock())
+            if running in self._confirmed:
+                # Its last word has arrived already, and only the turn's end is to come.
+                self._leaving.final = self._said_text[running]
         else:
             # Nothing of it has been said. It is stopped, and leaves no word behind.
             self._cut_turns.add(running)
             await self._hub.stop()
         self._rest()
 
-    async def _on_stop_pressed(self, played_ms: float) -> None:
+    async def _on_stop_pressed(self, pressed: tuple[float, int | None]) -> None:
+        played_ms, epoch = pressed
+        if epoch is not None and epoch < self._flushes:
+            # The reply they stopped has been cut since, and the flush that says so is on its
+            # way to them. What plays now is not what they pressed Stop on.
+            return
         self._played = max(self._played, played_ms)
         flushed = self._audible() is not None
         await self._cut_in(played_ms, pressed=True)
@@ -1224,6 +1389,7 @@ class VoiceSession:
             if event.mode == "voice":
                 self._voice_turns.add(turn_id)
                 self._turn_id, self._drafts = turn_id, {}
+                self._warm()
                 await self._count_heard(turn_id)
             else:
                 # The customer has typed instead. What is being said belongs to an older turn.
@@ -1232,6 +1398,9 @@ class VoiceSession:
                 reply = self._audible()
                 if reply is not None:
                     await self._cut(reply, keep=False)
+                # Nobody is weighing who speaks any more. Left set, the pause would run out a
+                # moment later and be taken for the customer speaking over this new turn.
+                self._let_play()
                 self._rest()
             return
         if kind == "assistant.message":
@@ -1264,6 +1433,16 @@ class VoiceSession:
         elif kind == "answer.drafted":
             if not event.held:
                 await self._say(turn_id, self._drafts.get(event.call_id, ""))
+        elif kind == "tool.started":
+            words = ONE_MOMENT.get(event.name)
+            if (
+                words
+                and turn_id not in self._acked
+                and turn_id not in self._said_text
+                and self._utterance is None
+            ):
+                self._acked.add(turn_id)
+                await self._speak(None, words, must=True, filler=True)
         elif kind == "answer.retracted":
             await self._withdraw(turn_id)
         elif kind == "assistant.message":
@@ -1271,10 +1450,20 @@ class VoiceSession:
             await self._say(turn_id, event.text)
         elif kind in ("turn.failed", "turn.interrupted"):
             await self._withdraw(turn_id)
+            heard = self._took_back.pop(turn_id, None)
+            self._speech_end = None  # if the turn is picked up again, nobody has just spoken
             if kind == "turn.failed":
-                await self._speak(None, TURN_FAILED)
+                if heard:
+                    # They heard some of an answer, and the check that would have confirmed
+                    # it or taken it back never gave a verdict.
+                    self._unverified = (turn_id, heard)
+                    await self._speak(None, TOOK_BACK_FAILED)
+                else:
+                    await self._speak(None, TURN_FAILED)
             await self._turn_over()
         elif kind == "turn.finished":
+            self._took_back.pop(turn_id, None)
+            self._speech_end = None
             await self._turn_over()
 
     async def _on_refusal(self, event: BaseModel) -> None:
@@ -1302,11 +1491,12 @@ class VoiceSession:
             if kind != "turn.finished":
                 # The check never gave a verdict. What was heard stays in the conversation as
                 # words nobody verified, see `repair`.
-                await self._hub.interrupt_turn(leaving.heard)
+                await self._hub.interrupt_turn(leaving.heard, leaving.turn_id)
             elif leaving.retracted:
                 self._owed = leaving.final  # they heard the start of an answer that did not stand
             elif not _same(leaving.heard, leaving.final):
-                await self._hub.interrupt_turn(leaving.heard)  # it stands, as far as it was heard
+                # It stands, as far as it was heard.
+                await self._hub.interrupt_turn(leaving.heard, leaving.turn_id)
             await self._turn_over()
 
     async def _turn_over(self) -> None:
@@ -1373,25 +1563,35 @@ class VoiceSession:
             await self._speak(turn_id, rest, before=said)
 
     async def _speak(
-        self, turn_id: str | None, words: str, before: str = "", *, must: bool = False
+        self,
+        turn_id: str | None,
+        words: str,
+        before: str = "",
+        *,
+        must: bool = False,
+        filler: bool = False,
+        after: float | None = None,
     ) -> None:
         """Hand one complete piece of text to the synthesis, as the reply now being spoken.
 
-        It takes the connection that was opened for it and has another one opened for the
-        reply after it. It waits its turn behind a reply that has to be heard to its end: a
-        correction, or the first piece of the same answer.
+        It takes the connection that was opened for it. It waits its turn behind a reply
+        that has to be heard to its end: a correction, "one moment", or the first piece of
+        the same answer. `after` is when the customer stopped speaking, if this is what they
+        hear first in reply.
         """
         if turn_id is not None:
             self._said_text[turn_id] = f"{before} {words}".strip()
+        if after is None and (filler or (turn_id is not None and not before)):
+            after = self._speech_end
         current = self._audible()
         if current is not None:
             if current.must or (before and current.turn_id == turn_id):
-                self._next.append(_Queued(turn_id, words, before, must))
+                self._next.append(_Queued(turn_id, words, before, must, after))
                 return
             await self._settle(current)
-        line = self._spare
-        self._warm()
-        after = self._speech_end if turn_id is not None and not before else None
+        line, self._spare = self._spare, self._line()
+        if self._hub.busy:
+            self._warm()  # the turn is still running, and may have more to say
         for last_try in (False, True):
             try:
                 await self._open(line)
@@ -1403,6 +1603,7 @@ class VoiceSession:
                     text=words,
                     before=before,
                     must=must,
+                    filler=filler,
                 )
                 reply.last_audio = reply.began
                 line.reply = self._reply = reply
@@ -1433,23 +1634,38 @@ class VoiceSession:
             await self._cut(reply, keep=False)
 
     async def _withdraw(self, turn_id: str) -> None:
-        """Stop saying an answer that did not stand. What replaces it is said in full."""
+        """Stop saying an answer that did not stand. What replaces it is said in full.
+
+        What the customer had heard of it by then is noted in `_took_back`, for a turn that
+        goes on to fail: then nothing replaces the answer, and they have to be told.
+        """
         self._next = [item for item in self._next if item.turn_id != turn_id]
         reply = self._audible()
+        heard = self._heard_text.get(turn_id, "")
         if reply is not None and reply.turn_id == turn_id:
             self._paused_at = self._hushed_at = None
-            await self._cut(reply, keep=False)
+            heard = await self._cut(reply) or ""
+        if heard and turn_id in self._said_text and turn_id not in self._confirmed:
+            self._took_back[turn_id] = heard
         self._said_text.pop(turn_id, None)
         self._heard_text.pop(turn_id, None)
 
     async def _cut(
-        self, reply: _Reply, played_ms: float | None = None, *, keep: bool = True
+        self,
+        reply: _Reply,
+        played_ms: float | None = None,
+        *,
+        keep: bool = True,
+        note: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | None:
         """Stop a reply in mid-speech. Returns what the customer had heard of it.
 
         With `keep` false nobody needs to know, and None comes back. `played_ms` is where the
         client's player stood if it has said so itself, as it does when Stop is pressed.
+        `note` is called with what was heard before the clients are told the reply was cut:
+        a message one of them sends in answer must find that already noted.
         """
+        self._lately(reply)  # where its words stand now, for whoever asks after it is over
         reply.over = True
         heard: str | None = None
         heard_ms = 0.0
@@ -1467,7 +1683,10 @@ class VoiceSession:
                 # The voice is told where playback stood, on its own clock, and says which
                 # words that was. Its clock began with this reply: the connection has spoken
                 # nothing else.
-                result = await reply.line.speaker.interrupt(reply.in_voice_time(heard_ms))
+                # Never past the audio it has made: it refuses such an offset, and the words
+                # would have to be estimated.
+                offset = min(reply.in_voice_time(heard_ms), reply.made_ms)
+                result = await reply.line.speaker.interrupt(offset)
                 heard = result.text_spoken if result is not None else None
             if keep and heard is None:
                 # The voice could not say. Nothing played means nothing heard. Otherwise this
@@ -1476,13 +1695,16 @@ class VoiceSession:
                 total_ms = reply.made.audio_ms if reply.made is not None else 0.0
                 voice_ms = reply.in_voice_time(heard_ms)
                 chars = len(reply.text) * voice_ms / total_ms if total_ms else heard_ms * 0.014
-                heard = reply.text[: int(chars)].rsplit(" ", 1)[0] if heard_ms else ""
+                heard = _whole_words(reply.text, int(chars)) if heard_ms else ""
             if keep:
                 heard = f"{reply.before} {heard}".strip()
+                if note is not None:
+                    await note(heard)
         finally:
             # Also when voice is being stopped in the middle of this: the client must not go on
             # playing, the connection must not stay open, and the reply is paid for once.
             self._flush_client()
+            self._hear_again(reply)
             self._hang_up(reply.line)  # which also stops what the voice was still making
             await self._account(
                 reply,
@@ -1523,13 +1745,18 @@ class VoiceSession:
         # A player that was paused for a word that never came would stay paused, and the next
         # reply would queue behind nothing and never be heard.
         self._let_play()
+        reply.reached = " ".join(part for part in (reply.before, reply.text) if part)
+        self._ended = (self._clock(), reply.text)
+        self._hear_again(reply)
         self._hang_up(reply.line)
         if reply.turn_id is not None:
             self._heard_text[reply.turn_id] = reply.speaking
         await self._account(reply, made=reply.made, interrupted=False)
         if self._next:
             item = self._next.pop(0)
-            await self._speak(item.turn_id, item.words, item.before, must=item.must)
+            await self._speak(
+                item.turn_id, item.words, item.before, must=item.must, after=item.after
+            )
         else:
             self._rest()
 
@@ -1559,6 +1786,7 @@ class VoiceSession:
                 interrupted=interrupted,
                 played_ms=round(played_ms) if played_ms is not None else None,
                 text_spoken=text_spoken,
+                filler=reply.filler,
                 cost_usd=round(chars / 1000 * self._config.tts_usd_per_1k_chars, 6),
             ),
             reply.turn_id,

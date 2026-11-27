@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { ACCOUNTS, type DemoAccount } from "@/lib/demo";
 
@@ -32,11 +32,19 @@ interface Props {
 function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
+    // Opening the menu puts the keyboard on its first account.
+    menu.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus();
     const close = (event: Event) => {
-      if (event instanceof KeyboardEvent ? event.key === "Escape" : !root.current?.contains(event.target as Node)) setOpen(false);
+      if (event instanceof KeyboardEvent ? event.key === "Escape" : !root.current?.contains(event.target as Node)) {
+        // The focus would go with the menu. Escape gives it back to the button that opened it.
+        if (event instanceof KeyboardEvent && menu.current?.contains(document.activeElement)) trigger.current?.focus();
+        setOpen(false);
+      }
     };
     window.addEventListener("keydown", close);
     window.addEventListener("pointerdown", close);
@@ -46,9 +54,21 @@ function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
     };
   }, [open]);
 
+  const onMenuKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>("[role='menuitem']")];
+    const at = items.findIndex((item) => item === document.activeElement);
+    const last = items.length - 1;
+    const moves: Record<string, number> = { ArrowDown: at >= last ? 0 : at + 1, ArrowUp: at <= 0 ? last : at - 1, Home: 0, End: last };
+    const to = moves[event.key];
+    if (to === undefined) return;
+    event.preventDefault();
+    items[to]?.focus();
+  };
+
   return (
     <div ref={root} className="relative">
       <button
+        ref={trigger}
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -58,7 +78,15 @@ function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
         <Glyph name="person" /> Demo accounts
       </button>
       {open ? (
-        <div role="menu" aria-label="Demo accounts" className="absolute bottom-full left-0 z-10 mb-8 flex w-[min(420px,calc(100vw-48px))] flex-col gap-4 rounded-cards bg-graphite-card p-12">
+        // It floats over the conversation, whose cards share its colour. The border and a ring of
+        // the page's own colour set it apart, and on a short screen it scrolls instead of running off.
+        <div
+          ref={menu}
+          role="menu"
+          aria-label="Demo accounts"
+          onKeyDown={onMenuKey}
+          className="absolute bottom-full left-0 z-30 mb-8 flex max-h-[calc(100dvh-96px)] w-[min(420px,calc(100vw-48px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-cards border border-slate-border bg-graphite-card p-12 ring-4 ring-onyx-canvas"
+        >
           <Caption className="px-12 py-8">Puts the account number and PIN into your message</Caption>
           {ACCOUNTS.map((account) => (
             <button

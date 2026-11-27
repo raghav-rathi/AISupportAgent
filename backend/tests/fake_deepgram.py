@@ -4,7 +4,7 @@ It does what the live service was seen to do in the cases the voice session depe
 nothing more. `/v2/listen` takes audio and says only what a test tells it to say. `/v2/speak`
 turns text into audio at a fixed number of milliseconds per character, so a test can tell which
 characters a customer has heard after so many milliseconds of playback. Every character is a
-tone, except `~`, which is silence: a test writes the voice's pauses into the text.
+tone, except `^`, which is silence: a test writes the voice's pauses into the text.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 MS_PER_CHAR = 50
-SILENCE = "~"
+SILENCE = "^"
 _BYTES_PER_MS = 48  # mono PCM16 at 24 kHz
 _FRAME_BYTES = 3840  # 80 ms, the size the live service sends
 _TONE = b"\x00\x10" * (MS_PER_CHAR * _BYTES_PER_MS // 2)  # one character, well above silence
@@ -124,6 +124,9 @@ class Speaking:
 
     async def run(self) -> None:
         await self.ws.send(json.dumps({"type": "Connected"}))
+        if self.fake.over_quota:
+            await self._send({"type": "Error", "code": "QUOTA_EXCEEDED", "description": "no"})
+            return
         maker = asyncio.create_task(self._make())
         try:
             async for raw in self.ws:
@@ -241,6 +244,7 @@ class FakeDeepgram:
         self.pace: float | None = None  # see Speaking._make
         self.mute = False  # take text and make no audio, like a voice that has hung
         self.refuse_interrupts = False  # answer every interrupt with a warning
+        self.over_quota = False  # let a voice connection open, then say no and close it
         self.keys: list[str | None] = []  # the Authorization header of each connection
         self._server = None
         self._arrived = asyncio.Condition()

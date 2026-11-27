@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -35,6 +35,9 @@ class Escalation(TypedDict):
     reason: str
     priority: str
     summary: str
+    # For an answer that failed its check: the customer got none of it, so there is nothing
+    # to take back, only an answer that is not given.
+    unseen: NotRequired[bool]
 
 
 def _append_or_reset(current: list | None, update: list | None) -> list:

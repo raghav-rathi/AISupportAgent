@@ -26,6 +26,7 @@ from supportagent.api.app import (
 from supportagent.api.limits import Budget, Counter, SlidingWindow, client_address
 from supportagent.config import get_settings
 from supportagent.crm import world as worlds
+from supportagent.events import VoiceUsage
 from supportagent.llm.client import ResilientLLM
 
 ORIGIN = "http://ui.test"
@@ -805,3 +806,71 @@ def test_a_counter_caps_what_one_key_holds_at_a_time():
     assert [counter.take("a"), counter.take("a"), counter.take("a")] == [True, True, False]
     counter.give_back("a")
     assert counter.take("a") and counter.take("b")
+
+
+async def test_what_is_recorded_while_a_turn_ends_reaches_clients_after_the_turns_last_event(
+    serve, monkeypatch
+):
+    rt, address = await serve(ScriptedModel("m", say("Hello.")))
+    client = await Client.open(address)
+    hub = rt.app.state.hubs._hubs[client.ready["session_id"]]
+    # The store is slow for the write that ends the turn, and in that moment voice records
+    # something of its own.
+    saving, let = asyncio.Event(), asyncio.Event()
+    save = hub.log.save
+
+    async def slow(redactor=None, *, release=None):
+        if release is not None and not let.is_set():
+            saving.set()
+            await let.wait()
+        await save(redactor, release=release)
+
+    monkeypatch.setattr(hub.log, "save", slow)
+    await client.say("Hi")
+    await saving.wait()
+    recorded = asyncio.create_task(hub.record(VoiceUsage(listened_s=1.0, cost_usd=0.0001), None))
+    await asyncio.sleep(0.05)
+    let.set()
+    await recorded
+    # Sent the other way round, the client would drop the turn's end as a number it has
+    # passed, and wait on a finished turn for good.
+    finished = await client.until("turn.finished")
+    usage = await client.until("voice.usage")
+    assert usage["seq"] == finished["seq"] + 1
+    seqs = [event["seq"] for event in client.stream()]
+    assert seqs == sorted(seqs)
+    await client.ws.close()
+
+
+async def test_a_passage_an_earlier_customers_plan_could_read_is_not_handed_to_whoever_comes_next(
+    serve,
+):
+    model = ScriptedModel(
+        "m",
+        call("verify_identity", account_number="53920164", pin="2458"),
+        call("search_knowledge_base", query="How fast do you respond to a P1 outage?"),
+        say("Within one hour [1]."),
+        call("verify_identity", account_number="10482917", pin="0000"),
+        say("That did not match."),
+        call("verify_identity", account_number="10482917", pin="0001"),
+        say("That did not match."),
+        call("verify_identity", account_number="10482917", pin="0002"),
+        say("Verification is locked."),
+    )
+    rt, address = await serve(model)
+    rt.gate = ALWAYS_ANSWER
+    client = await Client.open(address)
+    await client.say("Account 53920164, PIN 2458. How fast do you respond to a P1 outage?")
+    result = await client.until("retrieval.result")
+    await client.until("turn.finished")
+    enterprise = next(h["chunk_id"] for h in result["hits"] if h["tiers"] == ["enterprise"])
+    await client.send(type="passage.get", chunk_id=enterprise)
+    assert (await client.until("passage.detail"))["chunk_id"] == enterprise
+    # Three wrong PINs for another account lock verification, and nobody is verified any more.
+    for guess in ("0000", "0001", "0002"):
+        await client.say(f"Now account 10482917, PIN {guess}.")
+        await client.until("turn.finished")
+    await client.send(type="passage.get", chunk_id=enterprise)
+    refused = await client.until("error")
+    assert (refused["code"], refused["chunk_id"]) == ("not_found", enterprise)
+    await client.ws.close()

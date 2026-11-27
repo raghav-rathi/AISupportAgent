@@ -24,7 +24,8 @@ export type KeyFocus =
   | "none" // nothing that takes keys: the page or plain text
   | "pointer-button" // a button the pointer focused, which shows no focus ring
   | "control" // a button, link or tab the keyboard focused
-  | "field"; // a text field, select or editable region
+  | "field" // a text field, select or editable region
+  | "region"; // inside the observability drawer, a dialog or a menu, which have keys of their own
 
 export interface StopKeyPress {
   key: string; // KeyboardEvent.key
@@ -36,24 +37,20 @@ export interface StopKeyPress {
   dialogOpen: boolean; // an open dialog or menu takes Escape for itself
 }
 
-/**
- * `stop`: prevent the default and stop. `block`: prevent the default and do nothing else, so the
- * space bar neither scrolls nor activates a button the pointer left focused. `pass`: leave it.
- */
-export type StopKeyDecision = "stop" | "block" | "pass";
+/** `stop`: prevent the default and stop. `pass`: leave the key to the page. */
+export type StopKeyDecision = "stop" | "pass";
 
 /** What a key press does while voice is on. `canStop` says whether Stop is enabled. */
 export function stopKey(press: StopKeyPress, canStop: boolean): StopKeyDecision {
-  if (press.repeat || press.modified || press.defaultPrevented) return "pass";
+  // With nothing to stop, the keys do what they do on any page: scroll, press, close.
+  if (!canStop || press.repeat || press.modified || press.defaultPrevented) return "pass";
+  // The drawer's panels scroll with the space bar, and dialogs and menus take both keys.
+  if (press.focus === "region") return "pass";
   if (press.key === " ") {
     // A button the pointer focused would toggle on the space bar, which nobody aiming at Stop
     // wants. A keyboard user who focused a control gets its own action.
-    if (press.focus !== "none" && press.focus !== "pointer-button") return "pass";
-    return canStop ? "stop" : "block";
+    return press.focus === "none" || press.focus === "pointer-button" ? "stop" : "pass";
   }
-  if (press.key === "Escape") {
-    if (press.dialogOpen || press.fieldHasSelection || !canStop) return "pass";
-    return "stop";
-  }
+  if (press.key === "Escape") return press.dialogOpen || press.fieldHasSelection ? "pass" : "stop";
   return "pass";
 }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib import resources
 
 import psycopg
@@ -42,7 +42,10 @@ async def migrate(dsn: str) -> list[str]:
                     await conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (name,))
                 applied.append(name)
         finally:
-            await conn.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK,))
+            # A broken connection fails here too. Its error must not hide the one already raised,
+            # and the server drops the lock with the session anyway.
+            with suppress(psycopg.Error):
+                await conn.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK,))
     return applied
 
 
@@ -57,7 +60,8 @@ async def ingest_lock(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await conn.execute("SELECT pg_advisory_unlock(%s)", (_INGEST_LOCK,))
+        with suppress(psycopg.Error):
+            await conn.execute("SELECT pg_advisory_unlock(%s)", (_INGEST_LOCK,))
 
 
 async def _configure(conn: psycopg.AsyncConnection) -> None:
@@ -73,7 +77,8 @@ def make_pool(dsn: str, *, max_size: int = 10) -> AsyncConnectionPool:
     """
     return AsyncConnectionPool(
         dsn,
-        min_size=1,
+        # A turn holds one connection and needs a second. Opening that one mid-turn delays it.
+        min_size=2,
         max_size=max_size,
         open=False,
         configure=_configure,

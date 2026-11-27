@@ -2,7 +2,7 @@ import { type ReactNode, useState } from "react";
 
 import { BAND_LABELS, FAILURE_LABELS, PLAN_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
 import type { RetrievalHit, Ticket } from "@/lib/protocol";
-import { type Passage, type Step, type ToolStep, type Turn, type TurnStatus, heardOf, totalCost, turnUsage } from "@/lib/state";
+import { type Passage, type Step, type ToolStep, type Turn, type TurnStatus, hasTrace, heardOf, totalCost, turnUsage } from "@/lib/state";
 
 import { type Cites, RichText, citedNumbers } from "./RichText";
 import { Button, Caption, Glyph, type GlyphName, Spinner, Tag } from "./ui";
@@ -225,11 +225,13 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
     if (typeof passages[hit.chunk_id] !== "object") onPassage(hit.chunk_id);
   };
   const cites: Cites = { valid: new Set(cited.map((hit) => hit.n)), open: openSource, onCite: toggleSource };
-  const ended = status !== "running" && (turn.calls.length > 0 || turn.steps.length > 0);
+  const ended = status !== "running" && hasTrace(turn);
   // A spoken reply the visitor cut off: what they heard of it, which is all the assistant will
   // assume they know. Null when the reply was not cut off.
   const heard = heardOf(turn);
-  const cutShort = heard !== null && turn.answer !== null;
+  // A spoken reply that was stopped says what was heard in its own notice below, once.
+  const stoppedReply = status === "interrupted" && turn.mode === "voice" && turn.resumable === false;
+  const cutShort = heard !== null && turn.answer !== null && !stoppedReply;
 
   return (
     <article className="flex flex-col gap-20">
@@ -284,7 +286,7 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
                 key={hit.n}
                 type="button"
                 aria-expanded={openSource === hit.n}
-                aria-controls={sourceId}
+                aria-controls={shown?.n === hit.n ? sourceId : undefined}
                 onClick={() => toggleSource(hit.n)}
                 className={`inline-flex min-h-32 items-center rounded-tags px-12 py-4 text-left text-caption font-w480 leading-[1.3] hover:text-ivory-text ${
                   openSource === hit.n ? "bg-ivory-text text-onyx-canvas hover:text-onyx-canvas" : "bg-obsidian-button text-ash-text"

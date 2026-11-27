@@ -137,6 +137,8 @@ export interface TraceSet {
   status: "loading" | "ready";
   items: LlmTrace[];
   forCalls: number; // how many model calls the turn had finished when these were asked for
+  /** Asked for while the turn ran. The server stores a turn's traces once the turn is over. */
+  duringTurn: boolean;
 }
 
 export type Passage = PassageDetail | "loading" | "missing";
@@ -166,6 +168,8 @@ export interface AppState {
   voice: Voice;
   /** What speech cost that belongs to no turn: a greeting, and listening while nobody spoke. */
   speechUsd: number;
+  /** Counts the times voice went off without the visitor turning it off. */
+  voiceDrops: number;
   /**
    * Model calls started early, for a turn the visitor seemed about to begin, that never came.
    * Null cost when one of them reported none.
@@ -196,6 +200,7 @@ export const initialState: AppState = {
   passages: {},
   voice: noVoice,
   speechUsd: 0,
+  voiceDrops: 0,
   unusedCalls: { count: 0, costUsd: 0 },
 };
 
@@ -235,17 +240,21 @@ export function reduce(state: AppState, action: Action): AppState {
       const turn = state.turns.find((t) => t.id === action.turnId);
       const before = state.traces[action.turnId];
       const forCalls = turn ? finishedCalls(turn) : 0;
+      const duringTurn = turn?.status === "running";
       return {
         ...state,
-        traces: { ...state.traces, [action.turnId]: { status: "loading", items: before?.items ?? [], forCalls } },
+        traces: { ...state.traces, [action.turnId]: { status: "loading", items: before?.items ?? [], forCalls, duringTurn } },
       };
     }
     case "looked":
       return typeof state.passages[action.chunkId] === "object"
         ? state
         : { ...state, passages: { ...state.passages, [action.chunkId]: "loading" } };
-    case "reset":
-      return { ...initialState, drafts: state.drafts };
+    case "reset": {
+      // A message the old conversation never accepted goes back to the composer, not with it.
+      const kept = unsend(state);
+      return { ...initialState, draft: kept.draft, drafts: kept.drafts };
+    }
     case "dismiss":
       return { ...state, notice: null, voice: { ...state.voice, notice: null } };
     case "voice":
@@ -259,6 +268,7 @@ export function reduce(state: AppState, action: Action): AppState {
           bargeIn: action.bargeIn ?? state.voice.bargeIn,
           notice: action.notice ?? null,
         },
+        voiceDrops: action.status === "off" && action.notice ? state.voiceDrops + 1 : state.voiceDrops,
       };
     case "voice-latency":
       return { ...state, turns: state.turns.map((turn) => (turn.id === action.turnId ? { ...turn, heardAfterMs: action.ms } : turn)) };
@@ -305,7 +315,15 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   if (e.type === "session.ready") {
     // A different ID means the server started a new session: the old one is gone.
     const same = state.sessionId === e.session_id;
-    const kept = same ? state : { ...initialState, pending: state.pending, draft: state.draft, drafts: state.drafts };
+    // What was asked on the connection that dropped will not be answered on this one. Taken out,
+    // it is asked for again where it is shown.
+    const kept = same
+      ? {
+          ...state,
+          traces: Object.fromEntries(Object.entries(state.traces).filter(([, set]) => set.status !== "loading")),
+          passages: Object.fromEntries(Object.entries(state.passages).filter(([, passage]) => passage !== "loading")),
+        }
+      : { ...initialState, pending: state.pending, draft: state.draft, drafts: state.drafts };
     return {
       ...kept,
       connection: "open",
@@ -331,15 +349,19 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     // Everything this client missed has arrived. A message sent on an earlier connection that
     // shows up in none of it never reached the server. Its text goes back to the visitor, who
     // decides whether to send it again: the client never sends a message twice by itself.
-    const next = { ...state, replaying: false };
+    const next = { ...state, replaying: false, turns: settled(state.turns, state.busy) };
     return next.pending && next.pending.epoch < next.epoch ? unsend(next) : next;
   }
   if (e.type === "error") {
     const next = { ...state, notice: e.message };
     if (e.code === "not_found") {
-      const passages = Object.fromEntries(
-        Object.entries(state.passages).map(([id, passage]) => [id, passage === "loading" ? "missing" : passage]),
-      ) as Record<string, Passage>;
+      // The answer names its passage. One from a server that names none is about every passage
+      // still loading.
+      const passages = e.chunk_id
+        ? { ...state.passages, [e.chunk_id]: "missing" as const }
+        : (Object.fromEntries(
+            Object.entries(state.passages).map(([id, passage]) => [id, passage === "loading" ? "missing" : passage]),
+          ) as Record<string, Passage>);
       return { ...next, notice: null, passages };
     }
     // The server answers every message under the ID the client gave it. This one started no turn.
@@ -347,9 +369,11 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   }
   if (e.type === "trace.list") {
     const turn = state.turns.find((t) => t.id === e.turn_id);
-    const forCalls = state.traces[e.turn_id ?? ""]?.forCalls ?? (turn ? finishedCalls(turn) : 0);
+    const held = state.traces[e.turn_id ?? ""];
+    const forCalls = held?.forCalls ?? (turn ? finishedCalls(turn) : 0);
+    const duringTurn = held?.duringTurn ?? turn?.status === "running";
     return e.turn_id
-      ? { ...state, traces: { ...state.traces, [e.turn_id]: { status: "ready", items: e.traces, forCalls } } }
+      ? { ...state, traces: { ...state.traces, [e.turn_id]: { status: "ready", items: e.traces, forCalls, duringTurn } } }
       : state;
   }
   if (e.type === "passage.detail") {
@@ -387,6 +411,15 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   if (index < 0) {
     turns = [...turns, newTurn(e.turn_id, "", "text", e.ts, null)];
     index = turns.length - 1;
+  } else if (
+    turns[index].status !== "running" &&
+    !(turns[index].resumable && index === turns.length - 1) &&
+    e.type !== "speech.heard" &&
+    e.type !== "speech.spoken"
+  ) {
+    // The turn is over, and only the newest can be picked up again. What speech measured is
+    // kept. Anything else that arrives late does not open the turn again.
+    return state;
   }
   turns = turns.with(index, applyToTurn(turns[index], e));
   const tickets = e.type === "escalation.created" ? withTicket(state.tickets, e.ticket) : state.tickets;
@@ -399,8 +432,9 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
       return { ...next, busy: false, resumable: e.retryable };
     case "turn.interrupted":
       return { ...next, busy: false, resumable: e.resumable };
+    case "speech.heard":
     case "speech.spoken":
-      return next; // the audio of a reply ends after its turn has: no turn is running
+      return next; // speech is measured after its turn has ended: no turn is running
     default:
       return { ...next, busy: true };
   }
@@ -414,6 +448,19 @@ function withCall(turn: Turn, id: string, change: (call: ModelCall) => ModelCall
 
 function withTool(turn: Turn, id: string, change: (step: ToolStep) => ToolStep): Step[] {
   return turn.steps.map((step) => (step.kind === "tool" && step.id === id ? change(step) : step));
+}
+
+/**
+ * After a replay, a turn that never got its last event and is not the one running stopped with
+ * the server. A step it left running did not finish, and the server will not say so.
+ */
+function settled(turns: Turn[], busy: boolean): Turn[] {
+  const stale = (turn: Turn, index: number) =>
+    turn.status === "running" &&
+    !(busy && index === turns.length - 1) &&
+    turn.steps.some((step) => step.kind === "tool" && (step.status === "running" || step.status === "retrying"));
+  if (!turns.some(stale)) return turns;
+  return turns.map((turn, index) => (stale(turn, index) ? { ...turn, steps: stopSteps(turn.steps) } : turn));
 }
 
 /** A turn that ended while a step was still running: that step did not finish. */
@@ -630,10 +677,19 @@ function finishedCalls(turn: Turn): number {
   return turn.calls.filter((call) => call.finished).length;
 }
 
-/** True when the traces the client holds for this turn are older than the turn's model calls. */
+/**
+ * True when the traces the client holds for this turn are older than the turn's model calls, or
+ * were asked for while it ran and it has ended since. The server stores them at the end.
+ */
 export function tracesAreStale(state: AppState, turn: Turn): boolean {
   const held = state.traces[turn.id];
-  return !held || (held.status === "ready" && held.forCalls < finishedCalls(turn));
+  if (!held) return true;
+  return held.status === "ready" && (held.forCalls < finishedCalls(turn) || (held.duringTurn && turn.status !== "running"));
+}
+
+/** True when the drawer has something to show for an ended turn, a model call or not. */
+export function hasTrace(turn: Turn): boolean {
+  return turn.calls.length > 0 || turn.steps.length > 0 || turn.heard !== null || turn.spoken.length > 0;
 }
 
 export interface Usage {

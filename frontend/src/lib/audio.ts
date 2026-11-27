@@ -1,6 +1,6 @@
 // Audio engine for voice mode: microphone capture as 16 kHz PCM16 chunks and
-// playback of 24 kHz PCM16 with an exact playhead. Both run in AudioWorklets
-// loaded from /public/worklets.
+// playback of 24 kHz PCM16 with an exact playhead, or at the rates the server
+// names when voice starts. Both run in AudioWorklets loaded from /public/worklets.
 
 export const CAPTURE_RATE = 16000;
 export const PLAYBACK_RATE = 24000;
@@ -8,19 +8,43 @@ export const PLAYBACK_RATE = 24000;
 export const CHUNK_BYTES = 2560;
 /** How long a suspended context may stay suspended while the page is visible. */
 export const SUSPENDED_GIVE_UP_MS = 5000;
+/** How long the context has, once the microphone is ready, to start running. */
+export const RESUME_TIMEOUT_MS = 2000;
 
-/** What a playhead report follows: the regular tick, a command, or the end of the audio. */
-export type PlayheadCause = "tick" | "pause" | "resume" | "flush" | "drained";
+/**
+ * What a playhead report follows: the regular tick, a command, or the end of the audio. `flush` is
+ * the server's flush, `stop` the one of the visitor's own Stop.
+ */
+export type PlayheadCause = "tick" | "pause" | "resume" | "flush" | "stop" | "drained";
+
+/** The browser kept the audio context from running, so nothing the page plays would be heard. */
+export class SoundBlockedError extends Error {
+  constructor() {
+    super("the audio context did not start running");
+    this.name = "SoundBlockedError";
+  }
+}
+
+/**
+ * Whether the echo cancellation a microphone reports also removes what this page plays. "all"
+ * and true do. "remote-only" only removes the audio of calls, and anything else is none at all.
+ */
+export function cancelsEcho(reported: boolean | string | null): boolean {
+  return reported === true || reported === "all";
+}
 
 export interface VoiceAudioEvents {
-  /** 16 kHz mono PCM16, exactly 2560 bytes (80 ms) per call. */
+  /** Mono PCM16, 80 ms per call: 2560 bytes at 16 kHz, or at the rate given to `rates`. */
   onChunk(pcm: ArrayBuffer): void;
   /** Microphone level 0..1, once per chunk. */
   onMicLevel(level: number): void;
   /** Level 0..1 of the audio being played, with each playhead report. */
   onOutLevel(level: number): void;
-  /** Milliseconds of received audio played since start(), and milliseconds still buffered. */
-  onPlayhead(playedMs: number, bufferedMs: number, after: PlayheadCause): void;
+  /**
+   * Milliseconds of received audio played since start(), and milliseconds still buffered. `epoch`
+   * is the number of the server's last flush the player had when it made the report.
+   */
+  onPlayhead(playedMs: number, bufferedMs: number, after: PlayheadCause, epoch: number): void;
   /** Everything queued has been played. Fires once per run of audio. */
   onDrained(playedMs: number): void;
   /** The microphone went away: unplugged, switched off, or taken by the system. */
@@ -40,7 +64,10 @@ export interface VoiceEngine {
   play(pcm: ArrayBuffer): void;
   pause(): void;
   resume(): void;
-  flush(): void;
+  /** Without an epoch, the visitor's Stop. With one, the server's flush of that number. */
+  flush(epoch?: number): void;
+  /** The rates the server named when voice started: what it takes in, and what it sends. */
+  rates(input: number, output: number): void;
   playedMs(): number;
   /** Milliseconds from a sample leaving the playback worklet to it reaching the loudspeaker. */
   latencyMs(): number;
@@ -130,15 +157,16 @@ function seconds(value: number | undefined): number {
 type CaptureMessage = { type: "chunk"; pcm: ArrayBuffer; level: number };
 
 type PlaybackMessage =
-  | { type: "playhead"; playedMs: number; bufferedMs: number; level: number; after: PlayheadCause }
+  | { type: "playhead"; playedMs: number; bufferedMs: number; level: number; after: PlayheadCause; epoch: number }
   | { type: "drained"; playedMs: number };
 
 const MIC_SETTINGS = { channelCount: 1, noiseSuppression: false, autoGainControl: true };
 
 async function openMicrophone(): Promise<MediaStream> {
-  // "all" asks for echo cancellation against all system audio where the
-  // browser supports it. The DOM types only know booleans.
-  const preferred = { ...MIC_SETTINGS, echoCancellation: "all" } as unknown as MediaTrackConstraints;
+  // "all" asks for echo cancellation against all system audio, this page's playback included.
+  // Only an exact constraint makes a browser that cannot do it say so: as a mere preference it
+  // may pick no echo cancellation at all. The DOM types only know booleans.
+  const preferred = { ...MIC_SETTINGS, echoCancellation: { exact: "all" } } as unknown as MediaTrackConstraints;
   try {
     return await navigator.mediaDevices.getUserMedia({ audio: preferred });
   } catch (error) {
@@ -148,6 +176,19 @@ async function openMicrophone(): Promise<MediaStream> {
     }
     return navigator.mediaDevices.getUserMedia({ audio: { ...MIC_SETTINGS, echoCancellation: true } });
   }
+}
+
+/** Waits up to `ms` for `resumed` to settle, then says whether the context runs. */
+async function running(context: AudioContext, resumed: Promise<unknown>, ms: number): Promise<boolean> {
+  if (context.state === "running") return true;
+  let cancel = () => {};
+  const late = new Promise<void>((resolve) => {
+    cancel = schedule(ms, resolve);
+  });
+  await Promise.race([resumed, late]);
+  cancel();
+  // The state has had time to change since it was read above, which the compiler cannot know.
+  return (context.state as AudioContextState) === "running";
 }
 
 export class VoiceAudio implements VoiceEngine {
@@ -172,12 +213,21 @@ export class VoiceAudio implements VoiceEngine {
     return able ? null : "this browser cannot record audio";
   }
 
+  /**
+   * Call it from the click that turns voice on, and without awaiting anything before: the audio
+   * context is made and resumed before the first await, while the browser still counts the click.
+   * A permission prompt can stay open longer than the browser keeps it.
+   */
   async start(events: VoiceAudioEvents): Promise<VoiceAudioInfo> {
     if (!this.stopped) throw new Error("VoiceAudio is already started");
     this.stopped = false;
     this.played = 0;
     try {
-      // The microphone opens first so no playback node exists before it.
+      const context = new AudioContext({ latencyHint: "interactive" });
+      this.context = context;
+      const resumed = context.resume().catch(() => {});
+
+      // The microphone opens before any node is made.
       this.stream = await openMicrophone();
       this.checkRunning();
       const track = this.stream.getAudioTracks()[0];
@@ -190,8 +240,6 @@ export class VoiceAudio implements VoiceEngine {
         this.cleanups.push(() => track.removeEventListener("ended", onEnded));
       }
 
-      const context = new AudioContext({ latencyHint: "interactive" });
-      this.context = context;
       await Promise.all([
         context.audioWorklet.addModule("/worklets/capture.js"),
         context.audioWorklet.addModule("/worklets/playback.js"),
@@ -230,7 +278,7 @@ export class VoiceAudio implements VoiceEngine {
         if (message.type === "playhead") {
           this.played = Math.max(this.played, message.playedMs);
           events.onOutLevel(message.level);
-          events.onPlayhead(message.playedMs, message.bufferedMs, message.after);
+          events.onPlayhead(message.playedMs, message.bufferedMs, message.after, message.epoch);
         } else if (message.type === "drained") {
           this.played = Math.max(this.played, message.playedMs);
           events.onDrained(message.playedMs);
@@ -238,8 +286,11 @@ export class VoiceAudio implements VoiceEngine {
       };
       this.playback.connect(context.destination);
 
-      await context.resume();
+      // A resume the browser did not allow neither fails nor succeeds: it waits for a click that
+      // will not come, and voice would wait with it.
+      const runs = await running(context, resumed, RESUME_TIMEOUT_MS);
       this.checkRunning();
+      if (!runs) throw new SoundBlockedError();
       this.cleanups.push(
         keepRunning(context, documentVisibility, () => {
           if (!this.stopped) events.onSuspended();
@@ -258,7 +309,7 @@ export class VoiceAudio implements VoiceEngine {
     }
   }
 
-  /** Queues 24 kHz mono PCM16. The buffer is transferred to the worklet. */
+  /** Queues mono PCM16 at the server's output rate. The buffer is transferred to the worklet. */
   play(pcm: ArrayBuffer): void {
     if (this.stopped || !this.playback || pcm.byteLength === 0) return;
     this.playback.port.postMessage({ type: "audio", pcm }, [pcm]);
@@ -273,8 +324,14 @@ export class VoiceAudio implements VoiceEngine {
   }
 
   /** Drops buffered audio and ends a pause. The playhead keeps its value. */
-  flush(): void {
-    this.send({ type: "flush" });
+  flush(epoch?: number): void {
+    this.send(epoch === undefined ? { type: "flush" } : { type: "flush", epoch });
+  }
+
+  rates(input: number, output: number): void {
+    if (this.stopped) return;
+    this.capture?.port.postMessage({ type: "rates", outputRate: input });
+    this.playback?.port.postMessage({ type: "rates", sourceRate: output });
   }
 
   playedMs(): number {
@@ -293,7 +350,7 @@ export class VoiceAudio implements VoiceEngine {
     await this.release();
   }
 
-  private send(message: { type: "pause" | "resume" | "flush" }): void {
+  private send(message: { type: "pause" | "resume" | "flush"; epoch?: number }): void {
     if (this.stopped || !this.playback) return;
     this.playback.port.postMessage(message);
   }
@@ -318,7 +375,10 @@ export class VoiceAudio implements VoiceEngine {
       capture.port.postMessage({ type: "stop" });
       capture.port.onmessage = null;
     }
-    if (playback) playback.port.onmessage = null;
+    if (playback) {
+      playback.port.postMessage({ type: "stop" });
+      playback.port.onmessage = null;
+    }
     stream?.getTracks().forEach((track) => track.stop());
     source?.disconnect();
     capture?.disconnect();

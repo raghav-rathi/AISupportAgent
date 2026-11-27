@@ -11,6 +11,7 @@ from agent_harness import GROUNDED, MAYA, ScriptedJudge, llm_for, runtime, scala
 from fakes import ScriptedModel, call, http_error, say
 
 from supportagent.eventlog import EventLog, SessionGone, TurnInProgress
+from supportagent.events import TurnStarted, VoiceUsage
 from supportagent.session import NothingToResume, can_resume, run_turn
 
 
@@ -311,3 +312,78 @@ async def test_a_pin_stays_masked_after_the_session_is_picked_up_by_a_new_proces
     assert events[0].text == "Did **** work earlier? I have 1234 cards."
     stored = await stored_events(pool, session_id, world)
     assert not shows("4721", [e.model_dump() for e in [*events, *stored] if e.type != "llm.delta"])
+
+
+async def test_a_process_that_lost_its_claim_does_not_write_its_turn_over_the_new_owners(
+    pool, world
+):
+    session_id = uuid.uuid4().hex
+    old = await EventLog.open(pool, session_id, world, owner="old-instance")
+    await old.claim("turn-a", "text")
+    old.stamp(TurnStarted(mode="text", text="from the old one"), "turn-a")
+    # The old process stalls past its lease, and a new one takes the session and numbers its
+    # own events from the same place.
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET turn_heartbeat_at = now() - interval '2 minutes' WHERE id = %s",
+            (session_id,),
+        )
+    new = await EventLog.open(pool, session_id, world, owner="new-instance")
+    await new.claim("turn-b", "text")
+    new.stamp(TurnStarted(mode="text", text="from the new one"), "turn-b")
+    # The old one wakes up and saves. Nothing of its turn may land in the stream.
+    await old.save(release="turn-a")
+    await new.save(release="turn-b")
+    assert old.unsaved == []
+    stored = await new.since(0)
+    assert [(e.seq, e.text) for e in stored] == [(1, "from the new one")]
+
+
+async def test_what_voice_measured_is_stored_under_the_next_number_when_its_own_was_taken(
+    pool, world
+):
+    session_id = uuid.uuid4().hex
+    one = await EventLog.open(pool, session_id, world, owner="one")
+    two = await EventLog.open(pool, session_id, world, owner="two")
+    first = two.stamp_apart(VoiceUsage(listened_s=1.0, cost_usd=0.1), None)
+    await two.write_apart(first)
+    # A second process that had the session open has not heard of it, and gives its own event
+    # the same number. A deploy makes this possible for a moment.
+    mine = one.stamp_apart(VoiceUsage(listened_s=2.0, cost_usd=0.2), None)
+    assert mine.seq == first.seq
+    await one.write_apart(mine)
+    assert [(e.seq, e.listened_s) for e in await one.since(0)] == [(1, 1.0), (2, 2.0)]
+    assert one.unsaved == [] and one.last_seq == 2
+
+
+async def test_a_note_of_what_was_heard_outlasts_a_turn_that_never_wrote_anything(pool, world):
+    log = await EventLog.open(pool, uuid.uuid4().hex, world)
+    await log.claim("turn-a", "voice")
+    await log.save(release="turn-a")
+    await log.keep_heard("Refunds take", "turn-a")
+    # The next turn takes the note and is stopped before its first step is saved: the customer
+    # started their sentence again. The turn after that must still get it.
+    assert await log.claim("turn-b", "voice") == "Refunds take"
+    await log.save(release="turn-b")
+    assert await log.claim("turn-c", "voice") == "Refunds take"
+    await log.heard_used()
+    await log.save(release="turn-c")
+    assert await log.claim("turn-d", "voice") is None
+
+
+async def test_a_note_about_a_reply_is_not_kept_while_another_turn_is_already_answering(
+    pool, world
+):
+    log = await EventLog.open(pool, uuid.uuid4().hex, world)
+    await log.claim("turn-a", "voice")
+    await log.save(release="turn-a")
+    # A typed message's turn began in the moment the reply of turn-a was being cut.
+    await log.claim("typed", "text")
+    await log.keep_heard("Refunds take", "turn-a")
+    assert log.heard is None
+    await log.save(release="typed")
+    # Kept, the note would cut down the typed turn's reply, the last one by now.
+    assert await log.claim("turn-c", "voice") is None
+    # A note about the turn that is running is kept: that turn is about to be stopped for it.
+    await log.keep_heard("Hello", "turn-c")
+    assert log.heard == "Hello"

@@ -116,6 +116,8 @@ class ProtocolError(_Event):
     """The client sent something the server could not act on.
 
     `client_id` is set when the error answers one `user.message`: that message started no turn.
+    `chunk_id` is set when it answers a `passage.get`: that passage, and no other the client
+    may be waiting for.
     """
 
     type: Literal["error"] = "error"
@@ -136,6 +138,7 @@ class ProtocolError(_Event):
     ]
     message: str
     client_id: str | None = None
+    chunk_id: str | None = None
 
 
 class TurnStarted(_Event):
@@ -412,6 +415,8 @@ class SpeechSpoken(_Event):
     played_ms: float | None  # how much of the audio the customer heard, when interrupted
     # What the customer heard before they interrupted. The rest of the reply was not said.
     text_spoken: str | None = None
+    # Words of the assistant's own while a tool runs, "one moment", and not a turn's answer.
+    filler: bool = False
     cost_usd: float
 
 
@@ -456,10 +461,18 @@ class VoicePlayback(_Event):
 
     `pause` when the customer may be starting to speak, `resume` when that was nothing, `flush`
     when what is buffered must not be heard. The client answers each with a `voice.playhead`.
+
+    Flushes are numbered from 1, and `id` is the number of this flush, or of the last one so
+    far for a pause or a resume. The client names the last flush it has acted on in what it
+    sends, so that a report or a Stop that was on its way when a flush went out is not taken
+    for one made after it. A flush reaches the client in order with the audio: every piece
+    of audio after flush n belongs to a reply made after it. A pause or a resume may arrive
+    ahead of audio that was queued before it.
     """
 
     type: Literal["voice.playback"] = "voice.playback"
     action: Literal["pause", "resume", "flush"]
+    id: int = 0
 
 
 class SttPartial(_Event):

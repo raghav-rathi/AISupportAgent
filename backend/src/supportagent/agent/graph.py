@@ -73,19 +73,24 @@ _HAND_OFF_SPOKEN = (
     "I've passed your question to a specialist, and they will follow up. "
     "The ticket number is on your screen."
 )
+# An answer the customer saw or heard, which then failed its check, is taken back in these words.
+# One they got none of is not taken back: it is not given, in the words after them.
+_TAKE_BACK = "I need to take that back. I couldn't confirm it against the Fernhill help center. "
+_NOT_CONFIRMED = (
+    "I couldn't confirm an answer to that against the Fernhill help center, and I won't guess. "
+)
+_NOT_GIVEN = "I couldn't confirm an answer to that against the Fernhill help center. "
 _ESCALATION_TEXT = {
     "low_confidence": "I can't answer that from the Fernhill help center, and I won't guess. "
     + _HAND_OFF,
-    "ungrounded_answer": "I need to take that back. I couldn't confirm it against the Fernhill "
-    "help center. " + _HAND_OFF,
+    "ungrounded_answer": _TAKE_BACK + _HAND_OFF,
     "step_limit": "This needs more steps than I can take here, so I've passed it to a specialist "
     "as ticket {ticket}. They will follow up.",
 }
 _ESCALATION_SPOKEN = {
     "low_confidence": "I can't answer that from the Fernhill help center, and I won't guess. "
     + _HAND_OFF_SPOKEN,
-    "ungrounded_answer": "I need to take that back. I couldn't confirm it against the Fernhill "
-    "help center. " + _HAND_OFF_SPOKEN,
+    "ungrounded_answer": _TAKE_BACK + _HAND_OFF_SPOKEN,
     "step_limit": "This needs more steps than I can take here. " + _HAND_OFF_SPOKEN,
 }
 # Added to an answer that stands and that says the help center has no answer to something.
@@ -93,18 +98,28 @@ _FOLLOW_UP = "I've passed this to a specialist as ticket {ticket}. They will fol
 _FOLLOW_UP_SPOKEN = "I've passed this to a specialist, and they will follow up. The ticket number is on your screen."
 # For an answer taken back in a turn that had already opened a ticket.
 _ALREADY_WITH_A_PERSON = (
-    "I need to take that back. I couldn't confirm it against the Fernhill help center. "
-    "Your case is already with a specialist as ticket {ticket}. They will follow up."
+    _TAKE_BACK + "Your case is already with a specialist as ticket {ticket}. They will follow up."
 )
 _ALREADY_WITH_A_PERSON_SPOKEN = (
-    "I need to take that back. I couldn't confirm it against the Fernhill help center. "
-    "Your case is already with a specialist, and they will follow up."
+    _TAKE_BACK + "Your case is already with a specialist, and they will follow up."
 )
 # What the model reads in place of a reply the customer never got. The customer does not see it.
 _INTERRUPTED = "(The previous request was interrupted before I could reply.)"
 # The same for a reply the customer cut off by speaking over it. They heard its beginning.
 _CUT_OFF = "(The customer interrupted me here and heard nothing after this.)"
 _UNHEARD = "(The customer interrupted before hearing any of my reply.)"
+# The same for a reply that took back an answer the customer had heard. The reply stays in the
+# conversation whole: without it nothing would say that an answer was given and withdrawn.
+_CORRECTION_CUT = (
+    '(The customer interrupted this correction. Of it they heard: "{heard}" They may still '
+    "believe the answer it takes back.)"
+)
+_CORRECTION_UNHEARD = (
+    "(The customer interrupted before hearing this correction. They may still believe the "
+    "answer it takes back.)"
+)
+# How a reply is marked that takes back an answer the customer saw or heard.
+_TOOK_BACK = "took_back"
 # The same for an answer that was being said while its grounding check still ran, and whose
 # check never finished. The customer heard words nobody had verified.
 _UNVERIFIED = (
@@ -154,9 +169,21 @@ def _emitter(runtime: Runtime[AgentContext]) -> Emit:
     return emit
 
 
-def _held(state: AgentState) -> bool:
-    """True when a search this turn landed between the thresholds: the answer waits for the check."""
-    return any(record["band"] == "check" for record in state.get("evidence") or [])
+def _held(state: AgentState, mode: str = "text") -> bool:
+    """True when the answer waits for its check before the customer gets any of it.
+
+    Always when a search this turn landed between the thresholds. In a spoken turn also when
+    the turn has used a tool. Words that were said cannot be taken off a screen, and an answer
+    that rests on what a tool returned is the kind a check fails: a policy, an amount, an
+    account. A reply that used no tool is said while its check runs, and taken back aloud if
+    it fails.
+    """
+    if any(record["band"] == "check" for record in state.get("evidence") or []):
+        return True
+    if mode != "voice":
+        return False
+    messages = state.get("messages") or []
+    return any(isinstance(m, ToolMessage) for m in messages[_turn_start(messages) :])
 
 
 def _turn_start(messages: Sequence[AnyMessage]) -> int:
@@ -221,6 +248,10 @@ def repair(
         # which means taking the new message out and putting it back after the note.
         note = _INTERRUPTED if heard is None else _as_heard(heard, verified=not never_checked)
         updates += [RemoveMessage(id=new.id), AIMessage(note), HumanMessage(new.content)]
+    elif last is not None and heard is not None and last.additional_kwargs.get(_TOOK_BACK):
+        said = heard.strip()
+        note = _CORRECTION_CUT.format(heard=said) if said else _CORRECTION_UNHEARD
+        updates.append(last.model_copy(update={"content": f"{last.content} {note}"}))
     elif last is not None and heard is not None:
         # The reply was complete and approved, and the customer stopped listening part way.
         updates.append(last.model_copy(update={"content": _as_heard(heard)}))
@@ -265,7 +296,7 @@ async def begin(state: AgentState) -> dict[str, Any]:
 async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, Any]:
     ctx, emit = runtime.context, _emitter(runtime)
     steps = state.get("steps", 0) + 1
-    streamed = not _held(state)
+    streamed = not _held(state, ctx.mode)
     prompt = [
         SystemMessage(system_prompt(state.get("customer"), ctx.mode)),
         *for_prompt(state["messages"]),
@@ -461,7 +492,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
     ctx, emit = runtime.context, _emitter(runtime)
     answer = state["messages"][-1]
     text = str(answer.text).strip()
-    held = _held(state)
+    held = _held(state, ctx.mode)
     hits = [RetrievalHit(**hit) for record in state.get("evidence") or [] for hit in record["hits"]]
     final = AssistantMessage(text=text, held=held, hits=hits)
     asked = recent_customer_texts(state["messages"], ctx.redactor)
@@ -506,6 +537,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
                 priority="normal",
                 summary=f"The assistant's answer failed its grounding check ({why}). "
                 f"Customer question: {asked[-1] if asked else ''}",
+                unseen=held,
             ),
         }
 
@@ -589,6 +621,8 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
             **done,
             "messages": [*_settled(state, ctx, drop=answer.id), stored],
             "tickets": [ticket.model_dump()],
+            # A ticket was opened, as when the model opens one itself.
+            "outcome": "escalated",
         }
     emit(final)
     return {**done, "messages": _settled(state, ctx)}
@@ -597,15 +631,16 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
 def _needs_a_person(state: AgentState) -> bool:
     """Whether a reply that leaves a question open should get a ticket from the turn itself.
 
-    Not when the turn already opened one. And not when a search of this turn said that the
+    Not when the turn already opened one. And not when the turn's last search said that the
     topic belongs to another plan, or that the customer has to verify first: the reply then
     says so by design, and the judge now and then reads "not part of your plan" as a gap in the
-    help center.
+    help center. An earlier search of the turn does not count. The model searched again after
+    it, and what the reply leaves open is then more likely a real gap than that plan.
     """
     if (state.get("tickets") or [])[state.get("tickets_before", 0) :]:
         return False
-    bands = {record["band"] for record in state.get("evidence") or []}
-    return not bands & {"restricted", "verify"}
+    bands = [record["band"] for record in state.get("evidence") or []]
+    return not bands or bands[-1] not in ("restricted", "verify")
 
 
 def after_check(state: AgentState) -> Literal["escalate", "__end__"]:
@@ -630,6 +665,8 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
     opened = (state.get("tickets") or [])[state.get("tickets_before", 0) :]
     new_tickets: list[dict[str, Any]] = []
     spoken = runtime.context.mode == "voice"
+    # An answer the customer got none of is not taken back. It is not given.
+    unseen = reason == "ungrounded_answer" and bool(request.get("unseen"))
     if reason == "ungrounded_answer" and opened:
         # A tool already handed this turn to a person. A second ticket would only be noise.
         text = (
@@ -637,6 +674,8 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
             if spoken
             else _ALREADY_WITH_A_PERSON.format(ticket=Ticket(**opened[-1]).id)
         )
+        if unseen:
+            text = text.replace(_TAKE_BACK, _NOT_GIVEN)
     else:
         ticket = await open_ticket(
             runtime.context,
@@ -652,14 +691,18 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
             if spoken
             else _ESCALATION_TEXT[reason].format(ticket=ticket.id)
         )
+        if unseen:
+            text = text.replace(_TAKE_BACK, _NOT_CONFIRMED)
     # Whatever ends the turn here, an action that went through stays done. The customer has to
     # hear of it: a refund that was issued and never mentioned would be asked for again.
     done = _done_this_turn(state)
     if done:
         text += _DONE_SPOKEN if spoken else " Done so far: " + "; ".join(done) + "."
     runtime.stream_writer(AssistantMessage(text=text, held=True, hits=[]))
+    took_back = reason == "ungrounded_answer" and not unseen
+    reply = AIMessage(text, additional_kwargs={_TOOK_BACK: True}) if took_back else AIMessage(text)
     return {
-        "messages": [*_settled(state, runtime.context), AIMessage(text)],
+        "messages": [*_settled(state, runtime.context), reply],
         "tickets": new_tickets,
         "pending_escalation": None,
         "outcome": "escalated",

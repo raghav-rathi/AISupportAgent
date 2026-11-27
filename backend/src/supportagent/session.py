@@ -17,7 +17,7 @@ from supportagent.agent.context import ToolFaults, TurnUsage
 from supportagent.agent.early import EarlyCall
 from supportagent.agent.graph import user_turn
 from supportagent.crm import world as worlds
-from supportagent.eventlog import HEARTBEAT_S, EventLog
+from supportagent.eventlog import HEARTBEAT_S, LEASE_S, EventLog
 from supportagent.events import (
     LlmFinished,
     LlmReset,
@@ -60,13 +60,20 @@ async def _keep_claim(log: EventLog, turn_id: str, turn: asyncio.Task) -> None:
     the session over. Two writers on one conversation would overwrite each other, so this one
     gives up.
     """
+    renewed = time.monotonic()
     while True:
         await asyncio.sleep(HEARTBEAT_S)
         try:
             ours = await log.renew(turn_id)
         except Exception:
             logger.warning("could not renew the claim on session %s", log.session_id, exc_info=True)
-            continue
+            # A database that cannot be reached for a whole lease has let the claim run out,
+            # and another process may hold the session by now.
+            if time.monotonic() - renewed < LEASE_S:
+                continue
+            ours = False
+        else:
+            renewed = time.monotonic()
         if not ours:
             logger.error("lost the claim on session %s, stopping its turn", log.session_id)
             turn.cancel()
@@ -187,9 +194,12 @@ async def run_turn(
     async def end(event: BaseModel) -> None:
         if waits.open_call is not None:
             publish(LlmReset(call_id=waits.open_call, reason="cancelled"))
-        stamped = log.stamp(redactor.event(event), turn_id)
-        await log.save(redactor, release=turn_id)
-        on_event(stamped)
+        # Nothing else is numbered between this event getting its number and going out, or
+        # clients would get a later event first and drop this one. See `EventLog.closing`.
+        async with log.closing:
+            stamped = log.stamp(redactor.event(event), turn_id)
+            await log.save(redactor, release=turn_id)
+            on_event(stamped)
 
     async def resumable() -> bool:
         """Whether the graph saved enough of this turn to pick it up again."""
@@ -209,6 +219,11 @@ async def run_turn(
                 stream_mode="custom",
                 version="v2",
             ):
+                if heard is not None:
+                    # The first event of the graph comes after its first step has been saved,
+                    # and that step put the note into the conversation.
+                    heard = None
+                    await log.heard_used()
                 publish(part["data"])
             after = await rt.graph.aget_state(config)
         except LLMUnavailable as exc:

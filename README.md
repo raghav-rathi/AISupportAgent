@@ -6,7 +6,7 @@ The project follows a brief that asks for streaming chat, live voice, multi-step
 
 ## Status
 
-Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support.vercel.app**: the microphone button is next to Send. The chat UI and the backend run on hosted models, speech runs on Deepgram. After it was deployed the phase was audited: four independent reviews of the code, the measurements and what this file claimed, and a second pass by its author. The code that is here has the fixes for what it found. Two of them changed how voice works: the model now starts on a spoken message before the recogniser has called it finished, and playback pauses on the microphone getting loud, before the recogniser has a word. What was measured before and after is under [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet. That is the last check of the phase and it is the project owner's.
+Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support.vercel.app**: the microphone button is next to Send. The chat UI and the backend run on hosted models, speech runs on Deepgram. After it was deployed the phase was audited twice: by its author with four independent reviews of the code, the measurements and what this file claimed, and by two outside teams who wrote scripts that reproduce what they found. The code that is here has the fixes for both. Four of them changed how voice works. The model starts on a spoken message before the recogniser has called it finished. Playback pauses on the microphone getting loud, before the recogniser has a word. A spoken answer that rests on a tool is said only after its grounding check, and the customer hears "one moment" while the tool runs. And whether the microphone is hearing the reply or the customer is decided on the words the player has reached, not on the whole reply. What was measured before and after is under [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet: that session is the project owner's.
 
 | What the brief asks for | State today |
 |---|---|
@@ -26,9 +26,8 @@ Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support
 ```mermaid
 flowchart LR
     C["Browser or terminal"] <-->|"WebSocket, numbered events"| H["Session hub"]
-    H --> B["begin"]
     subgraph L["Agent loop, LangGraph"]
-        B --> A["agent"]
+        B["begin"] --> A["agent"]
         A -->|"tool call"| T["tools"]
         T --> A
         A -->|"final answer"| K["check"]
@@ -36,13 +35,14 @@ flowchart LR
         T -->|"hand off"| E
         K -->|"unsupported"| E
     end
+    H --> B
     T <--> P[("Postgres: mock CRM, pgvector, checkpoints, event log")]
 ```
 
 1. `begin` stores the customer's message. If the last turn died half way, it first repairs the conversation, so the model never sees a tool call without a result.
 2. `agent` calls the model with the six tools. The model makes one tool call per step.
 3. `tools` runs the call inside a guard. The guard emits `tool.started` and `tool.finished`, enforces a timeout, retries a failure that may pass, and turns any other failure into an error the model can read.
-4. `check` sends the final answer and its evidence to a second model. Nothing tells the client "this is the answer" before that verdict. An answer with an unsupported statement is withdrawn. An answer that stands and says the help center lacks something gets a ticket added.
+4. `check` sends the final answer and its evidence to a second model. Nothing tells the client "this is the answer" before that verdict. An answer with an unsupported statement is withdrawn. If the customer had seen or heard none of it, the reply says it could not be confirmed, and takes nothing back. An answer that stands and says the help center lacks something gets a ticket added, and the turn ends as escalated.
 5. `escalate` opens a ticket and replies with fixed wording. No model writes that text. If the turn had already refunded or changed something, the reply says so.
 
 LangGraph saves the conversation in Postgres after every step. The event log is in Postgres too, numbered per session. A turn belongs to the session and not to the socket, so it finishes and is stored even when the client has gone.
@@ -101,11 +101,11 @@ The request wraps the evidence, the customer's words and the reply in tags that 
 
 ### PINs
 
-The model has to see the PIN to pass it to `verify_identity`. Nothing else should. A redactor masks it in every event, trace, ticket and search query. It removes it from the stored conversation once the tool has used it, and again when the turn ends, in case the model repeated it. It knows a PIN however it is written: with spaces or other characters between the digits, or spelled out. While a visitor is unverified, every number of 4 to 7 digits they type is masked in what the backend stores and sends, unless it reads as an amount, a date, a count or an ID.
+The model has to see the PIN to pass it to `verify_identity`. Nothing else should. A redactor masks it in every event, trace, ticket and search query. It removes it from the stored conversation once the tool has used it, and again when the turn ends, in case the model repeated it. It knows a PIN however it is written: with spaces or other characters between the digits, spelled out, or partly in numerals and partly in words. It learns whatever `verify_identity` is given as one, also under a wrong argument name. While a visitor is unverified, every number of 4 to 7 digits they type is masked in what the backend stores and sends, unless it reads as an amount, a date, a count or an ID.
 
 A spoken PIN needs more than that, because speech arrives a digit at a time and the page shows the words as they are recognised. A PIN said alone is "4", then "4 7", then "4 7 2", before it is four digits. So what is recognised goes through the redactor at every step, and three more rules apply to the customer's own words. A number of any length is masked when a word such as "PIN" stands before it, or an account number does. While the customer has been asked for the account number and the PIN, or has started to give them, every number of up to 7 digits is masked, and what follows the eighth digit of a longer one. And while nobody is verified, a spoken message that is nothing but a number is masked from its first digit. An audit of the first version found the first three digits of a PIN on the page for a moment in most cases. `evals.speech pins` now checks every transcript the recogniser sends on the way, 1,572 of them over 20 clips heard four ways. A digit of the PIN could be read in one: the recogniser wrote "The dentist three" for "The PIN is three", for a quarter of a second. That case is fixed and is a test.
 
-A conversation that another process picks up later still masks its PINs. The session stores keyed hashes of them, never the PINs.
+A conversation that another process picks up later still masks its PINs. The session stores keyed hashes of them, never the PINs, and the new process tries every stretch of digits or number words that its mask would cover against those hashes.
 
 Two gaps remain. A PIN typed in a message stays in the saved conversation until the model calls the tool. If it never does, the PIN is masked when the next turn ends. And a customer who says a PIN in two halves, in two messages, with no word that names it and without having been asked, has the halves masked on the page and in the stored events, and in the saved conversation only once the model has used the whole PIN.
 
@@ -121,7 +121,7 @@ Two gaps remain. A PIN typed in a message stays in the saved conversation until 
 - The server closes a connection with a code that says what to do next: come back at once after falling behind, come back when the visitor returns after idling, wait after too many conversations, start a new conversation when the old one has expired. The page follows the code.
 - With `FAULT_INJECTION=true` a client can queue simulated timeouts, rate limits, outages and tool failures for its own session. That is how the failure paths get shown in a demo, and it is on at the public address.
 - When the speech service fails, voice turns off with a message and the conversation goes on in text. The Voice section says what is retried first.
-- One address can start 30 conversations an hour and hold 12 connections. A conversation takes 60 messages and 4 connections. `DAILY_BUDGET_USD` stops new turns once the stored model cost of the last 24 hours reaches it. A model call that was cut short reports no usage, so it is stored as a call of unknown cost and counted at a fixed amount: stopping turns is no way around the budget.
+- One address can start 30 conversations an hour and hold 12 connections. A conversation takes 60 messages and 4 connections. `DAILY_BUDGET_USD` stops new turns once the stored model cost of the last 24 hours reaches it. A model call that was cut short reports no usage, so it is stored as a call of unknown cost and counted at a fixed amount: stopping turns is no way around the budget. A conversation is kept for at least a day after its last use, whatever `SESSION_TTL_HOURS` says: the budgets are read from the stored events, and a conversation purged sooner would take its spend along.
 - Voice has limits of its own, because an open microphone is paid for by the second whether anyone speaks or not. One address can hold 2 of the 4 voice lines, turn voice on 6 times a minute, and use an hour of it in 24 hours. `DAILY_SPEECH_BUDGET_USD` is the stored cost of speech in 24 hours, 3 dollars unless set otherwise: at that limit voice does not come on, a voice session that is on ends within half a minute, and typed messages go on. All are settings, and the page says so when the server turns it away.
 - `/health` answers once the database is reachable and the embedding model is loaded, so a host that waits for it sends no visitor to a process that is still starting.
 
@@ -294,29 +294,30 @@ flowchart LR
 
 Four rules decide what the voice session does.
 
-1. Nothing unconfirmed is spoken. Text a model writes on the way to a tool call is never said. An answer is said once the model has finished writing it and the step is known to be the answer. An answer the scope gate held is said only after its grounding check. An answer that fails its check after it began is cut off, and the correction is said in its place.
+1. Nothing unconfirmed is spoken. Text a model writes on the way to a tool call is never said. An answer that rests on what a tool returned, a policy, an amount, an account, is said only after its grounding check has passed. Typed, such an answer streams to the screen while it is checked and is taken off if it fails. Words that were said cannot be taken off, so voice waits. While the turn's first tool runs the customer hears one sentence of the app's own, such as "Let me check that for you." It says what is being done and claims nothing. A reply that used no tool, a greeting or a question back, is said once the model has finished writing it, while its check runs. If it fails the check it is cut off and the correction is said in its place. If the turn fails before a verdict, the customer is told to disregard what they heard.
 2. The customer can always interrupt: by speaking, with the Stop button, the space bar or Escape. Playback pauses when the microphone gets much louder than it has been while the reply played, which is about a sixth of a second after they start. Flux reports a turn once it has a word, half a second later. If no turn follows, playback goes on. If the words Flux hears are the reply's own, coming back through the microphone, playback goes on too. Otherwise the reply is cancelled. The backend tells the voice where playback stood and gets back the words that had been played. Those are stored with the session, and the next turn, spoken or typed, puts them into the conversation in place of the full reply. The model then reads only what the customer heard, followed by a note that they interrupted.
-3. An interruption gets no answer past its check. An answer on a confident search is spoken while its grounding check still runs. If the customer speaks over it in that second, the voice stops and the check runs on. What they said waits for the verdict. If the check fails, they hear the correction before anything else, and the model reads the correction and not the words they heard. If the check never finishes, those words go into the conversation marked as unverified, not as something the assistant said.
-4. Numbers get time. When a reply asks for the account number or the PIN, or the customer starts to read digits out, the recogniser is switched to write digits as numerals and to wait out pauses for as long as the turn has a digit in it. The turn ends when twelve digits have stood still for 0.6 s or after 3 s of silence. A sentence without a digit ends the way any other does.
+3. An interruption gets no answer past its check. This is about a reply that used no tool, which is said while it is checked. If the customer speaks over it in that second, the voice stops and the check runs on. What they said waits for the verdict. If the check fails, they hear the correction before anything else, and the model reads the correction and not the words they heard. A correction they speak over stays in the conversation whole, with a note of how much of it they heard. If the check never finishes, the words they heard go into the conversation marked as unverified, not as something the assistant said.
+4. Numbers get time. When a reply asks for the account number or the PIN, or the customer starts to read digits out, the recogniser is switched to write digits as numerals and to wait out pauses for as long as the turn has a digit in it. The turn ends when twelve digits have stood still for 0.6 s or after 3 s of silence. A sentence without a digit ends the way any other does. A digit that only sizes a number, "my 8 digit account number", is not counted as one of its digits.
 
 What is done to make it answer sooner.
 
 - The model starts before the turn does. Flux says early that a turn may be over, and says so for certain a quarter of a second later at the median, 0.6 s later for the turns that take longest to end. The agent's first model call goes out on the early signal, with exactly the prompt the turn would send. If the turn then ends on the same words, it takes that call in place of making its own. If the customer went on speaking, the call is dropped: it is left to finish, and what it cost is stored where the daily budget counts it. On 34 test clips 14 calls were for nothing, at about $0.0004 each.
 - A model call of a spoken turn that has sent no token after 0.45 s is sent a second time, and the answer is whichever of the two starts first. The first token took 0.25 s at the median on the hosted model, more than 0.8 s for one call in fourteen, and five seconds now and then. The cost counts the prompt twice for such a call.
 - A turn's speech starts with its first sound. Flux TTS begins a reply with silence, sometimes more than a second of it. Whatever silence comes before the first sound is left out, except the last 40 ms.
+- While a tool runs, the customer is not left in silence: "one moment" is on its way a tenth of a second after the tool starts, and the checked answer follows it.
 
 Two things about the voice were measured and are worked around.
 
-- On a connection that has already spoken, Flux TTS begins the next reply with silence: about a second in most of 18 trials, 4.3 s in the worst. The first reply on a connection starts within a fifth of a second. So every reply gets a connection of its own, opened while the previous one plays.
+- On a connection that has already spoken, Flux TTS begins the next reply with silence: about a second in most of 18 trials, 4.3 s in the worst. The first reply on a connection starts within a fifth of a second. So every reply gets a connection of its own. It is opened when the customer begins to speak or a turn starts. Opened sooner, it sat idle through a quiet minute, was closed by the service and opened again, over and over. A service that closes a connection as soon as it is open is not asked for another for half a minute.
 - In most sessions the voice pauses for a second or more between sentences, in one trial for 4.6 s. Silence beyond 240 ms is left out of what the client gets, except the last 40 ms before the voice goes on. The reply keeps the places where audio was left out, so an interruption is still reported in the voice's own time.
 
-The page shows a microphone button when the server has voice. With voice on there is a level meter for each side, the customer's words as they are recognised, what the assistant is doing, a Stop button and an End voice button. Stop is there for as long as voice is on, and stops whatever is running: the reply being spoken, the spoken turn being thought about, or a typed message's turn. The space bar and Escape press it, unless the keyboard's focus is on a control the visitor reached with the keyboard. A spoken message is marked as spoken. A reply that was cut off is dimmed, with the words that were heard above it. The panel says that the visitor is talking to an AI, that speech goes to Deepgram, and that the demo keeps the words and no audio. The drawer gains a voice section per turn: the wait for the end of the turn, the model's first token, the voice's first sound, the time from the last word to the first sound as the server and as the browser measured it, and the cost of speech.
+The page shows a microphone button when the server has voice. The first time it is pressed in a page, the panel says what voice does with the visitor's speech and offers Start microphone. Only that button opens the microphone. With voice on there is a level meter for each side, the customer's words as they are recognised, what the assistant is doing, a Stop button and an End voice button. Stop is there for as long as voice is on, and stops whatever is running: the reply being spoken, the spoken turn being thought about, or a typed message's turn. The space bar and Escape press it, unless the keyboard's focus is on a control the visitor reached with the keyboard, in a text field, or inside the observability drawer. With nothing to stop, both keys do what they do on any page. A spoken message is marked as spoken. A reply that was cut off is dimmed, with the words that were heard above it. The panel says that the visitor is talking to an AI, that speech goes to Deepgram, and that the demo keeps the words and no audio. The drawer gains a voice section per turn: the wait for the end of the turn, the model's first token, the voice's first sound, the time from the last word to the first sound as the server and as the browser measured it, and the cost of speech.
 
 A typed message works while voice is on. Its turn is answered in text, and it is not stopped by someone speaking: what was said waits for it to end and then starts a turn of its own.
 
-The browser asks for echo cancellation and reads back what it got. Without it the microphone hears the reply, so speech during a reply is not taken as an interruption, and the panel says to use Stop or the keys. Where the microphone has heard the reply once in a conversation, playback is no longer paused for it: it goes on until words come that the reply does not have.
+The browser is asked to cancel the echo of everything it plays, and the page reads back what it got. Only that, or a plain yes from a browser that does not name the kinds, counts. Without it the microphone hears the reply, so speech during a reply is not taken as an interruption, and the panel says to use Stop or the keys. What is said right after Stop counts again. Whether the recogniser is hearing the reply or the customer is decided on runs of words the player has reached, with a number counting as a number however it is spelled. Words the reply was only going to say cannot be its echo, and a sentence that opens with "wait" or "stop" never is. Where the microphone has heard the reply once in a conversation, playback is no longer paused for it: it goes on until words come that the reply does not have.
 
-When the speech service fails, voice turns off and the conversation goes on in text. A recogniser connection that drops is opened again once. A voice connection that drops takes its reply with it, and so does one that takes the text and sends no audio for five seconds. The text of that reply is on the screen. A second failure within half a minute ends voice with a message. A microphone that is unplugged ends voice with a message too. A voice session lasts at most ten minutes and ends after two minutes in which nobody speaks. What one visitor may use of it is under When things fail.
+When the speech service fails, voice turns off and the conversation goes on in text. A recogniser connection that drops is opened again once. A voice connection that drops takes its reply with it, and so does one that takes the text and sends no audio for five seconds. The text of that reply is on the screen. A connection that the service closes once a reply's audio is complete cuts nothing. A second failure within half a minute ends voice with a message. A microphone that is unplugged ends voice with a message too. A voice session lasts at most ten minutes and ends after two minutes in which nobody speaks. What one visitor may use of it is under When things fail.
 
 ## Evals
 
@@ -358,7 +359,7 @@ Read these with care.
 
 ### Voice, measured
 
-The table below is the run of 2026-11-27 at 01:34, before the audit and its changes. Its first two rows no longer describe the code, and its clock was kinder than it should have been: it took a reply's first piece of audio for its first sound, which could be 80 ms of quiet, and it sent each piece of microphone audio 80 ms before a microphone could have. The run on the changed code follows in the next commit.
+The table below is the run of 2026-11-27 at 01:34, before the audits and their changes. Its first two rows no longer describe the code, and its clock was kinder than it should have been: it took a reply's first piece of audio for its first sound, which could be 80 ms of quiet, and it sent each piece of microphone audio 80 ms before a microphone could have. A second run, at 05:13 on commit `796f751` and on the stricter clock, gave 0.85 s at the median and 1.72 s at the 95th percentile for the first sound over 39 turns without tools, and 0.19 s for the pause over 10 interruptions. The code has changed again since: an answer that rests on a tool now waits for its check. The full table for the code as it is follows in the next commit.
 
 On the deployed backend, on 2026-11-27, with `supportagent.cli.voice_client` running on a lab machine. It plays WAV files as the microphone in real time and plays the reply into a playhead that moves at the speed of sound, so it measures what a caller waits. The clips are synthetic speech from six of Deepgram's Aura voices.
 
@@ -399,8 +400,8 @@ One socket per client, at `/ws`. The client speaks first.
 | `fault.inject` | Queues a simulated failure, when the server allows it |
 | `voice.start`, `voice.stop` | Turns voice on or off for this connection. `voice.start` says whether the browser got echo cancellation, and carries an ID for the attempt. `voice.started`, the `voice.stopped` that ends it and a refusal all name that ID, so a page that stops and starts again quickly knows which is which. |
 | binary frames | Microphone audio while voice is on: mono PCM16 at 16 kHz, 80 ms a frame. Without voice they are dropped. |
-| `voice.playhead` | How much of the reply's audio has been played, a few times a second and after every pause, flush and end of audio |
-| `voice.interrupt` | The visitor pressed Stop, with the playhead at that moment. The server always answers with a flush, and until then the page plays nothing it receives: those are pieces of the reply that was stopped. |
+| `voice.playhead` | How much of the reply's audio has been played, a few times a second and after every pause, flush and end of audio. Names the last flush the page has acted on. |
+| `voice.interrupt` | The visitor pressed Stop, with the playhead at that moment and the number of the last flush the page had acted on. Until a flush with a higher number arrives the page plays nothing it receives: those are pieces of the reply that was stopped. |
 
 The server answers with events. Those that belong to the conversation carry a sequence number and are stored:
 
@@ -410,11 +411,11 @@ The server answers with events. Those that belong to the conversation carry a se
 - tools: `tool.started`, `tool.retry`, `tool.error`, `tool.finished`
 - guardrails: `retrieval.result`, `guardrail.verdict`, `answer.retracted`, `escalation.created`
 - reply: `answer.drafted` when a step is known to be the answer, then `assistant.message`, always after the verdict
-- speech, stored: `speech.heard` and `speech.spoken` with timings and cost for a spoken turn, `voice.usage` for listening time no turn accounts for
+- speech, stored: `speech.heard` and `speech.spoken` with timings and cost for a spoken turn, `speech.spoken` marked `filler` for "one moment", `voice.usage` for listening time no turn accounts for
 - on request: `trace.list`, `passage.detail`
-- voice, to the connection with the microphone only and not stored: `voice.started`, `voice.stopped`, `voice.state`, `stt.partial`, `voice.playback` with pause, resume or flush, and the reply's audio as binary frames at 24 kHz
+- voice, to the connection with the microphone only and not stored: `voice.started`, `voice.stopped`, `voice.state`, `stt.partial`, `voice.playback` with pause, resume or flush, and the reply's audio as binary frames at 24 kHz. Flushes are numbered. A flush arrives in order with the audio. A pause or a resume may overtake audio that is still queued.
 
-`turn.finished` says what the customer waited for: the first sign of work, the first text of the answer that stood, and the approved answer. Prompt traces are stored and not streamed.
+`turn.finished` says what the customer waited for: the first sign of work, the first text of the answer that stood, and the approved answer. Prompt traces are stored and not streamed. An `error` that answers a `passage.get` names the passage.
 
 `llm.finished` says three things about a call that are not usage: how long before its turn it was started, for a spoken turn's first call. That it was started for a turn that never came, in which case it has no turn and is stored for the budget. And that its turn was stopped while it ran, in which case its cost is unknown. It also says when the request went out twice.
 
@@ -462,7 +463,7 @@ Dockerfile       the backend image
 
 1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
 2. Phase 2 is deployed. Two outside reviews after it led to a hardening pass, which is the commit history from `6e9a2b3` on. Deploys are started by hand. CI runs on every push.
-3. Phase 3, voice, is built, deployed and audited. Open from it: the project owner's own session on loudspeakers and on headphones.
+3. Phase 3, voice, is built, deployed and audited twice. Open from it: the project owner's own session on loudspeakers and on headphones.
 4. Phase 4: hardening and the write-up.
 
 ## Known gaps
@@ -476,10 +477,12 @@ Dockerfile       the backend image
 - The local reranker does not hold the scope gate. Use the hosted one, as the example settings do.
 - The page's content security policy allows inline scripts, which Next.js needs for a statically built page.
 - The CRM is a set of fixtures. Nothing here talks to a real billing system.
-- Voice has been heard by a recogniser and by a scripted caller, not by a person. Echo on loudspeakers is the untested part. Two things depend on it: the guard against the assistant hearing itself, which compares words, and the pause on the microphone getting loud, which assumes the reply leaves little in the microphone. Both step back when they see the reply in the microphone, and both have only run in tests and on audio without an echo.
+- Voice has been heard by a recogniser and by a scripted caller, not by a person. Echo on loudspeakers is the untested part. Two things depend on it: the guard against the assistant hearing itself, which compares words, and the pause on the microphone getting loud, which assumes the reply leaves little in the microphone. Both step back when they see the reply in the microphone, and both have only run in tests and on audio without an echo. Which words the reply has reached is worked out from the player's reports, a few a second, with a second's allowance.
 - How long a caller waits for the first sound depends mostly on two things this app does not control: how long the recogniser takes to call a turn over, which is longer after a statement than after a question, and how long the model takes to its first token, which varies from call to call.
 - After an interruption the conversation may hold one or two words fewer than the customer heard. In the scripted caller it never held more. A browser's player counts audio as played when it hands it to the sound card, which is right for what is cut: what was handed over is heard.
 - A model call that is dropped or cut short has been paid for in part, and its provider reports no usage for it. It is counted at a fixed amount, which can be more or less than it cost.
-- The voice's greeting is spoken and not stored: it is no turn of the conversation.
+- The voice's greeting is no turn of the conversation: what it cost is stored, and its words are not in the transcript. The same goes for "one moment".
+- In a spoken turn an answer that uses a tool comes later than it would on a screen, by the time its check takes. "One moment" covers the wait. A reply that uses no tool is still said before its check, so a wrong one is heard before it is taken back.
+- After a lockout or a change of account, a passage is handed out only if the plan of whoever is verified now may read it. The prompt traces of earlier turns are not hidden: the conversation on the page shows the same account data, and New conversation is what clears both.
 - A spoken answer carries no citation numbers, so the page has no source chips for it. The drawer still shows what the search returned.
 - Leaving silence out of the voice's audio shortens its pauses. It cannot bring the next words in sooner, so a long pause of the voice can still be heard as a short gap.

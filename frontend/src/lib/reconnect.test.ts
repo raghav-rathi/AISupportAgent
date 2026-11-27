@@ -6,7 +6,12 @@ const noJitter = () => 1;
 
 describe("after the socket closes", () => {
   it("comes straight back when the server says the client only fell behind", () => {
-    expect(planAfterClose(CLOSE.fellBehind, 3, noJitter)).toEqual({ kind: "retry", delayMs: 0 });
+    expect(planAfterClose(CLOSE.fellBehind, 0, noJitter)).toEqual({ kind: "retry", delayMs: 0 });
+  });
+
+  it("backs off when the client falls behind again before it has caught up", () => {
+    const delays = [1, 2, 3, 50].map((attempt) => planAfterClose(CLOSE.fellBehind, attempt, noJitter));
+    expect(delays.map((plan) => (plan.kind === "retry" ? plan.delayMs : -1))).toEqual([500, 1000, 2000, 8000]);
   });
 
   it("backs off after a dropped network, and keeps trying", () => {

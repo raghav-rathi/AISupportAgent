@@ -231,3 +231,31 @@ async def test_purging_removes_unused_conversations_and_keeps_the_ones_in_use(po
         async with pool.connection() as conn:
             for world_id in ids.values():
                 await worlds.delete_world(conn, world_id)
+
+
+async def test_purging_keeps_a_conversation_that_is_open_in_this_process(pool, today):
+    ids = [f"test-{uuid.uuid4().hex[:12]}" for _ in range(2)]
+    open_here, unused = ids
+    async with pool.connection() as conn:
+        for world_id in ids:
+            await worlds.create_world(conn, world_id, today)
+            await conn.execute(
+                "INSERT INTO sessions (id, world_id) VALUES (%s, %s)", (world_id, world_id)
+            )
+        await conn.execute(
+            "UPDATE worlds SET created_at = now() - interval '3 days' WHERE id = ANY(%s)", (ids,)
+        )
+        # Both were quiet for three days. One was resumed a moment ago and has not done anything.
+        await conn.execute(
+            "UPDATE sessions SET last_active_at = now() - interval '3 days' WHERE id = ANY(%s)",
+            (ids,),
+        )
+    try:
+        async with pool.connection() as conn:
+            assert await worlds.purge_worlds(conn, timedelta(days=2), keep={open_here}) == 1
+            cur = await conn.execute("SELECT id FROM sessions WHERE id = ANY(%s)", (ids,))
+            assert {row["id"] for row in await cur.fetchall()} == {open_here}
+    finally:
+        async with pool.connection() as conn:
+            for world_id in ids:
+                await worlds.delete_world(conn, world_id)

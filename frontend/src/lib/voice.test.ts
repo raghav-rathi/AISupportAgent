@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PlayheadCause, VoiceAudioEvents, VoiceAudioInfo, VoiceEngine } from "./audio";
+import { type PlayheadCause, SoundBlockedError, type VoiceAudioEvents, type VoiceAudioInfo, type VoiceEngine } from "./audio";
 import type { ClientMessage, ServerEvent } from "./protocol";
 import type { Action } from "./state";
 import { FLUSH_TIMEOUT_MS, START_TIMEOUT_MS, VoiceLink, type VoiceSocket } from "./voice";
@@ -13,6 +13,11 @@ class FakeAudio implements VoiceEngine {
   playhead = 0;
   private events: VoiceAudioEvents | null = null;
 
+  constructor(
+    private readonly echo: boolean | string | null = true,
+    private readonly failure: unknown = null,
+  ) {}
+
   get on(): VoiceAudioEvents {
     if (!this.events) throw new Error("not started");
     return this.events;
@@ -20,7 +25,8 @@ class FakeAudio implements VoiceEngine {
 
   start(events: VoiceAudioEvents): Promise<VoiceAudioInfo> {
     this.events = events;
-    return Promise.resolve({ echoCancellation: true, contextRate: 48000 });
+    if (this.failure) return Promise.reject(this.failure);
+    return Promise.resolve({ echoCancellation: this.echo, contextRate: 48000 });
   }
   play(pcm: ArrayBuffer): void {
     this.played.push(pcm);
@@ -31,8 +37,11 @@ class FakeAudio implements VoiceEngine {
   resume(): void {
     this.calls.push("resume");
   }
-  flush(): void {
-    this.calls.push("flush");
+  flush(epoch?: number): void {
+    this.calls.push(epoch === undefined ? "flush" : `flush ${epoch}`);
+  }
+  rates(input: number, output: number): void {
+    this.calls.push(`rates ${input} ${output}`);
   }
   playedMs(): number {
     return this.playhead;
@@ -57,7 +66,7 @@ class FakeSocket implements VoiceSocket {
   }
 }
 
-function setup(problem: string | null = null) {
+function setup(problem: string | null = null, echo: boolean | string | null = true, failure: unknown = null) {
   const actions: Action[] = [];
   const audios: FakeAudio[] = [];
   const socket = new FakeSocket();
@@ -65,7 +74,7 @@ function setup(problem: string | null = null) {
   let attempts = 0;
   const link = new VoiceLink((action) => actions.push(action), {
     createAudio: () => {
-      const audio = new FakeAudio();
+      const audio = new FakeAudio(echo, failure);
       audios.push(audio);
       return audio;
     },
@@ -94,6 +103,9 @@ function setup(problem: string | null = null) {
     lastVoice() {
       return actions.filter((action) => action.type === "voice").at(-1);
     },
+    latencies() {
+      return actions.filter((action) => action.type === "voice-latency");
+    },
   };
 }
 
@@ -109,9 +121,12 @@ const event = (fields: Record<string, unknown>) => ({ seq: 0, ts: 0, turn_id: nu
 const started = (attempt: string) => event({ type: "voice.started", input_rate: 16000, output_rate: 24000, attempt });
 const stopped = (attempt: string, reason = "idle", message = "voice turned off after a while of silence") =>
   event({ type: "voice.stopped", reason, message, attempt });
-const playback = (action: "pause" | "resume" | "flush") => event({ type: "voice.playback", action });
+const playback = (action: "pause" | "resume" | "flush", id: number) => event({ type: "voice.playback", action, id });
 const refusal = (clientId: string | null, code = "voice_unavailable") =>
   event({ type: "error", code, message: "voice is not available", client_id: clientId });
+const turnStarted = (turnId: string, mode: "voice" | "text" = "voice") =>
+  event({ type: "turn.started", turn_id: turnId, mode, text: "Hi", client_id: null });
+const turnEnded = (type: "turn.finished" | "turn.failed" | "turn.interrupted", turnId: string) => event({ type, turn_id: turnId });
 const frame = () => new ArrayBuffer(4800);
 
 beforeEach(() => {
@@ -155,6 +170,34 @@ describe("starting voice", () => {
     vi.advanceTimersByTime(START_TIMEOUT_MS * 2);
     expect(v.statuses().at(-1)).toBe("on");
   });
+
+  it("offers barge-in only for echo cancellation that also removes what the page plays", async () => {
+    const cases: [boolean | string | null, boolean][] = [
+      ["all", true],
+      [true, true],
+      ["remote-only", false],
+      [false, false],
+      ["none", false],
+      ["", false],
+      [null, false],
+    ];
+    for (const [echo, bargeIn] of cases) {
+      const v = setup(null, echo);
+      await v.link.start();
+      expect(v.socket.messages()).toEqual([{ type: "voice.start", echo_cancellation: bargeIn, attempt: "a1" }]);
+    }
+  });
+
+  it("says that the browser kept the sound off when the audio could not start running", async () => {
+    const v = setup(null, true, new SoundBlockedError());
+    await v.link.start();
+    expect(v.lastVoice()).toEqual({ type: "voice", status: "off", notice: "the browser did not allow sound to play" });
+  });
+
+  it("hands the rates the server names to the audio", async () => {
+    const v = await live();
+    expect(v.audio.calls).toContain("rates 16000 24000");
+  });
 });
 
 describe("which events belong to this voice", () => {
@@ -191,22 +234,64 @@ describe("which events belong to this voice", () => {
     v.link.handle(stopped("", "client", ""));
     expect(v.lastVoice()).toEqual({ type: "voice", status: "off", notice: null });
   });
+
+  it("turns off a voice the server started for an attempt that was given up", async () => {
+    const v = setup();
+    await v.link.start();
+    v.link.stop();
+    const before = v.actions.length;
+    v.link.handle(started("a1"));
+    expect(v.socket.messages().filter((message) => message.type === "voice.stop")).toHaveLength(2);
+    expect(v.actions).toHaveLength(before); // the page stays off
+  });
+
+  it("leaves the stopping to the server when a newer start is on its way", async () => {
+    const v = setup();
+    await v.link.start();
+    v.link.stop();
+    await v.link.start(); // attempt a2 replaces a1 on the server
+    v.link.handle(started("a1"));
+    expect(v.socket.messages().filter((message) => message.type === "voice.stop")).toHaveLength(1);
+    v.link.handle(started("a2"));
+    expect(v.statuses().at(-1)).toBe("on");
+  });
 });
 
 describe("Stop", () => {
-  it("drops the stopped reply's audio until the server's flush, then plays again", async () => {
+  it("drops the stopped reply's audio until a flush numbered above the one it sent", async () => {
     const v = await live();
+    v.link.handle(playback("flush", 1));
     v.link.play(frame());
     expect(v.audio.played).toHaveLength(1);
     v.link.interrupt();
-    expect(v.audio.calls).toEqual(["flush"]);
-    v.audio.on.onPlayhead(1200, 0, "flush"); // the worklet answers the flush with its playhead
-    expect(v.socket.messages().at(-1)).toEqual({ type: "voice.interrupt", played_ms: 1200 });
+    expect(v.audio.calls.at(-1)).toBe("flush");
+    v.audio.on.onPlayhead(1200, 0, "stop", 1); // the worklet answers the Stop with its playhead
+    expect(v.socket.messages().at(-1)).toEqual({ type: "voice.interrupt", played_ms: 1200, epoch: 1 });
     v.link.play(frame()); // sent by the server before it heard of the Stop
+    v.link.handle(playback("flush", 1)); // the same flush again changes nothing
+    v.link.play(frame());
     expect(v.audio.played).toHaveLength(1);
-    v.link.handle(playback("flush"));
+    v.link.handle(playback("flush", 2));
     v.link.play(frame()); // the next reply
     expect(v.audio.played).toHaveLength(2);
+  });
+
+  it("stays silent through a flush the server sent before it heard of the Stop", async () => {
+    const v = await live();
+    v.link.interrupt();
+    v.link.handle(playback("flush", 1)); // crossed the Stop on the way
+    v.link.play(frame());
+    v.audio.on.onPlayhead(800, 0, "stop", 0);
+    v.audio.on.onPlayhead(800, 0, "flush", 1);
+    expect(v.socket.messages().slice(-2)).toEqual([
+      { type: "voice.interrupt", played_ms: 800, epoch: 1 },
+      { type: "voice.playhead", played_ms: 800, buffered_ms: 0, after: "flush", epoch: 1 },
+    ]);
+    v.link.play(frame());
+    expect(v.audio.played).toHaveLength(0);
+    v.link.handle(playback("flush", 2));
+    v.link.play(frame());
+    expect(v.audio.played).toHaveLength(1);
   });
 
   it("plays again after two seconds when the server's flush does not come", async () => {
@@ -224,14 +309,34 @@ describe("Stop", () => {
     const v = await live();
     v.link.interrupt();
     v.link.interrupt();
-    expect(v.audio.calls).toEqual(["flush"]);
+    expect(v.audio.calls.filter((call) => call === "flush")).toHaveLength(1);
+  });
+});
+
+describe("pause and resume", () => {
+  it("follows them when they come after the flush they name", async () => {
+    const v = await live();
+    v.link.handle(playback("pause", 0));
+    v.link.handle(playback("resume", 0));
+    expect(v.audio.calls.slice(-2)).toEqual(["pause", "resume"]);
+  });
+
+  it("keeps one that overtook its flush until that flush, and drops one from before the last flush", async () => {
+    const v = await live();
+    v.link.handle(playback("pause", 1));
+    expect(v.audio.calls).not.toContain("pause");
+    v.link.handle(playback("flush", 1));
+    expect(v.audio.calls.slice(-2)).toEqual(["flush 1", "pause"]);
+    v.link.handle(playback("flush", 2));
+    v.link.handle(playback("resume", 1));
+    expect(v.audio.calls.at(-1)).toBe("flush 2");
   });
 });
 
 describe("the playhead", () => {
   it("is reported at most every 100 ms while it ticks, and a report after resume counts as a tick", async () => {
     const v = await live();
-    const report = (playedMs: number, after: PlayheadCause) => v.audio.on.onPlayhead(playedMs, 500, after);
+    const report = (playedMs: number, after: PlayheadCause) => v.audio.on.onPlayhead(playedMs, 500, after, 0);
     report(100, "tick");
     v.advance(50);
     report(150, "tick"); // too soon
@@ -243,22 +348,82 @@ describe("the playhead", () => {
     report(220, "resume");
     const heads = v.socket.messages().filter((message) => message.type === "voice.playhead");
     expect(heads).toEqual([
-      { type: "voice.playhead", played_ms: 100, buffered_ms: 500, after: "tick" },
-      { type: "voice.playhead", played_ms: 200, buffered_ms: 500, after: "tick" },
-      { type: "voice.playhead", played_ms: 220, buffered_ms: 500, after: "pause" },
-      { type: "voice.playhead", played_ms: 220, buffered_ms: 500, after: "tick" },
+      { type: "voice.playhead", played_ms: 100, buffered_ms: 500, after: "tick", epoch: 0 },
+      { type: "voice.playhead", played_ms: 200, buffered_ms: 500, after: "tick", epoch: 0 },
+      { type: "voice.playhead", played_ms: 220, buffered_ms: 500, after: "pause", epoch: 0 },
+      { type: "voice.playhead", played_ms: 220, buffered_ms: 500, after: "tick", epoch: 0 },
     ]);
   });
 
-  it("times voice to voice from half way into the last loud chunk to the sound leaving the speaker", async () => {
+  it("answers a flush with the number of that flush", async () => {
+    const v = await live();
+    v.link.handle(playback("flush", 1));
+    v.link.handle(playback("flush", 2));
+    v.audio.on.onPlayhead(300, 0, "flush", 1);
+    v.audio.on.onPlayhead(300, 0, "flush", 2);
+    expect(v.audio.calls.slice(-2)).toEqual(["flush 1", "flush 2"]);
+    expect(v.socket.messages().slice(-2)).toEqual([
+      { type: "voice.playhead", played_ms: 300, buffered_ms: 0, after: "flush", epoch: 1 },
+      { type: "voice.playhead", played_ms: 300, buffered_ms: 0, after: "flush", epoch: 2 },
+    ]);
+  });
+});
+
+describe("voice to voice, as heard here", () => {
+  it("times from half way into the last loud chunk to the sound leaving the speaker, once the turn has finished", async () => {
     const v = await live();
     v.audio.latency = 30;
     v.audio.on.onMicLevel(0.5); // loud, at 1000
     v.advance(500);
-    v.link.handle(event({ type: "turn.started", turn_id: "t1", mode: "voice", text: "Hi", client_id: null }));
+    v.link.handle(turnStarted("t1"));
     v.advance(700); // now 2200
-    v.audio.on.onPlayhead(50, 400, "tick"); // the first sample left the worklet at 2150
-    expect(v.actions).toContainEqual({ type: "voice-latency", turnId: "t1", ms: 2150 + 30 - (1000 - 40) });
+    v.audio.on.onPlayhead(50, 400, "tick", 0); // the first sample left the worklet at 2150
+    expect(v.latencies()).toEqual([]);
+    v.link.handle(turnEnded("turn.finished", "t1"));
+    expect(v.latencies()).toEqual([{ type: "voice-latency", turnId: "t1", ms: 2150 + 30 - (1000 - 40) }]);
+  });
+
+  it("times each turn from loud sound of its own", async () => {
+    const v = await live();
+    v.audio.on.onMicLevel(0.5);
+    v.link.handle(turnStarted("t1"));
+    v.link.handle(turnEnded("turn.finished", "t1"));
+    v.audio.playhead = 1000;
+    v.advance(60_000);
+    v.audio.on.onMicLevel(0.01); // too quiet to count
+    v.link.handle(turnStarted("t2"));
+    v.link.handle(turnEnded("turn.finished", "t2"));
+    v.audio.on.onPlayhead(1050, 0, "tick", 0);
+    expect(v.latencies()).toEqual([]);
+  });
+
+  it("is not thrown off by a level that is not a number", async () => {
+    const v = await live();
+    v.audio.on.onMicLevel(Number.NaN);
+    v.audio.on.onMicLevel(0.5);
+    v.link.handle(turnStarted("t1"));
+    v.link.handle(turnEnded("turn.finished", "t1"));
+    v.audio.on.onPlayhead(50, 0, "tick", 0);
+    expect(v.latencies()).toHaveLength(1);
+  });
+
+  it("gives no figure to a turn that failed, was cut off, or was typed", async () => {
+    for (const end of ["turn.failed", "turn.interrupted"] as const) {
+      const v = await live();
+      v.audio.on.onMicLevel(0.5);
+      v.link.handle(turnStarted("t1"));
+      v.audio.on.onPlayhead(50, 0, "tick", 0);
+      v.link.handle(turnEnded(end, "t1"));
+      v.link.handle(turnEnded("turn.finished", "t1"));
+      expect(v.latencies()).toEqual([]);
+    }
+    const v = await live();
+    v.audio.on.onMicLevel(0.5);
+    v.link.handle(turnStarted("t1"));
+    v.link.handle(turnStarted("t2", "text"));
+    v.audio.on.onPlayhead(50, 0, "tick", 0);
+    v.link.handle(turnEnded("turn.finished", "t1"));
+    expect(v.latencies()).toEqual([]);
   });
 });
 

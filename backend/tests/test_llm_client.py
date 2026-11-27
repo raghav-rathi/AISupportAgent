@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import time
 
@@ -35,6 +36,17 @@ class Harness:
 
     async def complete(self, **kwargs):
         return await self.llm.complete([], emit=self.events.append, **kwargs)
+
+    def start(self, kind):
+        """Start a call in the background. Returns it, and what is set at its first `kind`."""
+        seen = asyncio.Event()
+
+        def emit(event):
+            self.events.append(event)
+            if event.type == kind:
+                seen.set()
+
+        return asyncio.create_task(self.llm.complete([], emit=emit)), seen
 
     def types(self):
         return [e.type for e in self.events]
@@ -173,6 +185,29 @@ async def test_text_from_a_failed_attempt_is_reset_before_the_retry():
         "llm.delta",
         "llm.finished",
     ]
+
+
+async def test_text_of_a_call_cancelled_mid_stream_is_reset():
+    slow = LLMPolicy(first_token_timeout_s=1.0, stall_timeout_s=5.0, total_timeout_s=10.0)
+    h = Harness(ScriptedModel("primary", ["Hel", 5.0, "lo"]), policy=slow)
+    call, seen = h.start("llm.delta")
+    await seen.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert h.types() == ["llm.started", "llm.delta", "llm.reset"]
+    assert h.of("llm.reset")[0].reason == "cancelled"
+
+
+async def test_a_call_cancelled_before_any_text_sends_no_reset():
+    slow = LLMPolicy(first_token_timeout_s=1.0, stall_timeout_s=5.0, total_timeout_s=10.0)
+    h = Harness(ScriptedModel("primary", [5.0, "Hel"]), policy=slow)
+    call, seen = h.start("llm.started")
+    await seen.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert h.types() == ["llm.started"]
 
 
 async def test_an_error_inside_the_stream_is_reset_retried_and_failed_over():

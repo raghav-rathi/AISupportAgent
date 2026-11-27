@@ -289,7 +289,9 @@ class FluxSpeaker:
             return None
         message: dict = {"type": "Interrupt"}
         if offset_ms is not None:
-            message["playback_offset"] = {"type": "time_ms", "value": round(offset_ms)}
+            # Rounded down: half a millisecond past the audio it has made, and the service
+            # refuses the offset.
+            message["playback_offset"] = {"type": "time_ms", "value": int(offset_ms)}
         self._answer = asyncio.get_running_loop().create_future()
         self._discarding = True
         try:

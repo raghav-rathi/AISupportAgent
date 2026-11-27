@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import date, timedelta
 
 from psycopg import AsyncConnection, sql
@@ -114,25 +115,31 @@ async def delete_world(conn: AsyncConnection, world_id: str) -> None:
         await conn.execute("DELETE FROM worlds WHERE id = %s", (world_id,))
 
 
-# A world is in use while one of its sessions did something lately or is running a turn that some
-# process still renews. Such a world is never purged, however old it is.
+# A world is in use while one of its sessions did something lately, is running a turn that some
+# process still renews, or is open in the process that purges. Such a world is never purged,
+# however old it is.
 _UNUSED = sql.SQL(
     "w.created_at < now() - %(age)s AND NOT EXISTS ("
     "SELECT 1 FROM sessions s WHERE s.world_id = w.id AND (s.last_active_at > now() - %(age)s "
-    "OR (s.turn_running AND s.turn_heartbeat_at > now() - %(lease)s)))"
+    "OR (s.turn_running AND s.turn_heartbeat_at > now() - %(lease)s) OR s.id = ANY(%(keep)s)))"
 )
 
 
 async def purge_worlds(
-    conn: AsyncConnection, older_than: timedelta, lease: timedelta = timedelta(seconds=45)
+    conn: AsyncConnection,
+    older_than: timedelta,
+    lease: timedelta = timedelta(seconds=45),
+    *,
+    keep: Collection[str] = (),
 ) -> int:
     """Delete worlds that are older than `older_than` and have not been used for as long.
 
     Age alone would delete a conversation in the middle of a turn: its events would then fail to
-    store, and its saved state would be written back with no session to belong to. Returns how
-    many worlds went.
+    store, and its saved state would be written back with no session to belong to. `keep` names
+    sessions that are open in this process: one resumed after two quiet days has done nothing yet
+    that marks it active, and it goes on to write into its world. Returns how many worlds went.
     """
-    params = {"age": older_than, "lease": lease}
+    params = {"age": older_than, "lease": lease, "keep": list(keep)}
     async with conn.transaction():
         cur = await conn.execute(
             sql.SQL("SELECT w.id FROM worlds w WHERE {} FOR UPDATE OF w SKIP LOCKED").format(

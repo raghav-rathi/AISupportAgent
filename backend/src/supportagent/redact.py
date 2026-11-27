@@ -7,9 +7,10 @@ through a Redactor first.
 A Redactor masks four things:
 
 - Every value the session has passed to verify_identity as a PIN, right or wrong, however it is
-  written: as digits, with anything short between the digits, or spelled out. In the customer's
-  own words this rule has no exceptions. In text the app wrote itself, a match that is plainly an
-  amount, a date or an ID is left alone, so a refund of $47.21 survives a PIN of 4721.
+  written: as digits, with anything short between the digits, spelled out, or partly each. In
+  the customer's own words this rule has no exceptions. In text the app wrote itself, a match
+  that is plainly an amount, a date or an ID is left alone, so a refund of $47.21 survives a PIN
+  of 4721.
 - A number whose keyed hash the session has stored. A process that picks a session up after a
   reload or a restart has never seen its PINs. The hashes tell it which numbers to mask again.
 - A number next to a word such as "PIN" or "passcode", or right after an account number. In the
@@ -101,6 +102,13 @@ _JOINT = re.compile(r"\s{1,3}|\s?[-.,_/:*\u2013\u2014]\s?")
 # digit nor a letter. The value is known here, so anything short between its digits still gives it
 # away.
 _GAP = r"[^0-9A-Za-z]{0,3}"
+_GAP_ONLY = re.compile(_GAP)
+# Numerals of up to three digits and number words in one run: "47 twenty-one", "4 seven 2 one".
+# A longer numeral is a number of its own, and an account number before the words of a PIN is not
+# part of it.
+_MIXED = re.compile(
+    rf"\b(?:\d{{1,3}}|{_WORD})\b(?:{_BETWEEN_WORDS}(?:\d{{1,3}}|{_WORD})\b)*", re.IGNORECASE
+)
 _CUE = re.compile(
     r"\b(?:pins?|p\.i\.n\.?|passcode|pass\s?code|password|passphrase"
     r"|(?:security|access|secret|verification|support)\s+code)\b",
@@ -131,10 +139,29 @@ _LABELLED = re.compile(
     r"(?:\s(?:code|number|no\.?))?(?:\s(?:is|was|of))?\s?[:#=]?\s?$",
     re.IGNORECASE,
 )
-# A number at the end of text that is still streaming. It may be the start of a PIN.
-_UNFINISHED_NUMBER = re.compile(r"\d[\d \t\-.,_/:*\u2013\u2014]{0,40}$")
+# The start of a number word, or of "and", cut off where a stream chunk ends: "t" may be "two".
+_WORD_STARTS = "|".join(
+    sorted(
+        {
+            word[:size]
+            for word in [*_UNITS, *_TEENS, *_TENS, *_SCALES, *_REPEATS, "and"]
+            for size in range(1, len(word))
+        },
+        key=len,
+        reverse=True,
+    )
+)
+# A number at the end of text that is still streaming, in numerals, in words or in both. It may
+# be the start of a PIN: "47", "four seven", "four seven t".
+_UNFINISHED_NUMBER = re.compile(
+    rf"(?:(?:\d|\b(?:{_WORD})\b)(?:[\d \t\-.,_/:*\u2013\u2014]|\b(?:and|{_WORD})\b){{0,40}})?"
+    rf"(?:\b(?:{_WORD_STARTS}))?$",
+    re.IGNORECASE,
+)
 # A message that is one short number and nothing else: "58.", "2 4".
 _BARE_NUMBER = re.compile(r"\W*(\d(?:[\d\s\-.,]{0,12}\d)?)\W*")
+# A message that is number words and nothing else: "five eight.".
+_BARE_WORDS = re.compile(rf"\W*({_SPOKEN.pattern})\W*", re.IGNORECASE)
 # Nothing but numbers, as numerals or as words: "9 0", "nine zero three.", "4721".
 _ONLY_NUMBERS = re.compile(rf"\W*(?:(?:\d+|{_WORD})\b\W*)+", re.IGNORECASE)
 # Keys whose values identify something and are never free text.
@@ -224,6 +251,41 @@ def _numbers(text: str) -> list[tuple[int, int, str]]:
         end = groups[last][1]
         found.append((start, end, re.sub(r"\D", "", text[start:end])))
         index = last + 1
+    return found
+
+
+def _mixed_digits(run: str) -> str:
+    """The digits of a number said partly in numerals and partly in words."""
+    pieces = re.split(r"(\d+)", run)
+    return "".join(piece if piece.isdigit() else spoken_digits(piece) for piece in pieces)
+
+
+def _candidates(text: str, said: Iterable[str]) -> set[str]:
+    """The numbers in the text that a learned PIN's mask would cover, for `_recognise` to try.
+
+    A learned PIN is masked wherever its digits stand in whole groups with up to three other
+    characters between them, and wherever they are part of the digits of number words. A process
+    that has only the PIN's hash has to try every such stretch: "4|7|2|1", "47--21", the 47-21 of
+    "Step 1: 47-21", the last four of twelve number words. `said` holds the digits of the runs of
+    number words.
+    """
+    found: set[str] = set()
+    groups = list(_DIGITS.finditer(text))
+    for first in range(len(groups)):
+        digits = ""
+        for index in range(first, len(groups)):
+            if index > first and not _GAP_ONLY.fullmatch(
+                text, groups[index - 1].end(), groups[index].start()
+            ):
+                break
+            digits += groups[index].group()
+            if len(digits) > 12:
+                break
+            if len(digits) >= 3:
+                found.add(digits)
+    for digits in said:
+        for size in range(3, min(len(digits), 12) + 1):
+            found.update(digits[start : start + size] for start in range(len(digits) - size + 1))
     return found
 
 
@@ -361,14 +423,13 @@ class Redactor:
         if 3 <= len(digits) <= 12 and digits not in self._secrets:
             self._remember(digits)
 
-    def _recognise(self, candidates: Iterable[str]) -> None:
+    def _recognise(self, text: str, said: list[str]) -> None:
         """Learn again the PINs an earlier process stored hashes of."""
         if len(self._known) == len(self._secrets):
             return  # every stored hash already has its value
-        for digits in candidates:
-            if 3 <= len(digits) <= 12 and digits not in self._secrets:
-                if self._hash(digits) in self._known:
-                    self._remember(digits)
+        for digits in _candidates(text, said):
+            if digits not in self._secrets and self._hash(digits) in self._known:
+                self._remember(digits)
 
     def text(
         self, text: str, *, customer: bool = False, guess: bool = True, known_only: bool = False
@@ -392,7 +453,12 @@ class Redactor:
             (m.start(), m.end(), spoken_digits(m.group()), m.group())
             for m in _SPOKEN.finditer(text)
         ]
-        self._recognise([digits for _, _, digits in numbers] + [digits for _, _, digits, _ in runs])
+        mixed = [
+            (m.start(), m.end(), _mixed_digits(m.group()))
+            for m in _MIXED.finditer(text)
+            if re.search(r"\d", m.group()) and re.search(r"[A-Za-z]", m.group())
+        ]
+        self._recognise(text, [run[2] for run in runs] + [run[2] for run in mixed])
 
         spans: list[tuple[int, int]] = []
         for pattern in self._secrets.values():
@@ -438,6 +504,26 @@ class Redactor:
                 )
             ):
                 spans.append((start, end))
+        for start, end, digits in mixed:
+            # Partly numerals and partly words: "47 twenty-one", "4 seven 2 one". Each part may
+            # be too short to count alone, so the run is judged as one number. The strict rule
+            # stays out: "charged 100 one time" would read as 1001.
+            if any(secret in digits for secret in self._secrets):
+                if customer or not _plainly_not_a_pin(text, start, end):
+                    spans.append((start, end))
+                continue
+            if known_only or _counts_something(text, start, end):
+                continue
+            cue_before = _cue_before(text, start)
+            cued = cue_before or _cue_after(text, end)
+            if any(
+                _reads_as_something_else(text, at, to, part, cue_before=cue_before, cued=cued)
+                for at, to, part in numbers
+                if start <= at < end
+            ):
+                continue  # "$47 twenty", "at 10:30 two"
+            if (cued and len(digits) >= 3) or (customer and (cued or expecting)):
+                spans.append((start, end))
         if customer and not known_only:
             spans += self._pieces(text)
         return _mask(text, spans)
@@ -445,12 +531,21 @@ class Redactor:
     def _pieces(self, text: str) -> list[tuple[int, int]]:
         """Where a message that is only a number holds the start or the end of a learned PIN."""
         bare = _BARE_NUMBER.fullmatch(text)
-        if bare is None:
-            return []
-        digits = re.sub(r"\D", "", bare.group(1))
+        if bare is not None:
+            digits, span = re.sub(r"\D", "", bare.group(1)), bare.span(1)
+        else:
+            # The same half in words, "five eight.". One word alone is more often an answer
+            # than half a PIN, and "oh" and "one" are words first, as above.
+            said = _BARE_WORDS.fullmatch(text)
+            if said is None:
+                return []
+            words = [w for w in _WORD_BREAK.split(said.group(1).lower()) if w and w != "and"]
+            if len(words) < 2 or set(words) <= {"oh", "o", "one"}:
+                return []
+            digits, span = spoken_digits(said.group(1)), said.span(1)
         for secret in self._secrets:
             if len(digits) < len(secret) and (secret.startswith(digits) or secret.endswith(digits)):
-                return [bare.span(1)]
+                return [span]
         return []
 
     def data(self, value: Any, *, customer: bool = False, key: str = "") -> Any:
@@ -472,8 +567,18 @@ class Redactor:
         return value
 
     def _harvest(self, value: Any) -> None:
-        """Learn every `pin` in a tool call, so the same PIN is masked wherever else it shows."""
+        """Learn every `pin` in a tool call, so the same PIN is masked wherever else it shows.
+
+        Every argument of a verify_identity call but the account number counts, as in the
+        guard: a model that names the field `code` has still been handed the PIN, and the trace
+        of its call is written before the guard sees it.
+        """
         if isinstance(value, dict):
+            args = value.get("args")
+            if value.get("name") == "verify_identity" and isinstance(args, dict):
+                for key, item in args.items():
+                    if key != "account_number" and _is_secret("pin", item):
+                        self.learn(item)
             for key, item in value.items():
                 if _is_secret(key, item):
                     self.learn(item)

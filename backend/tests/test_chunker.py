@@ -324,6 +324,30 @@ def test_an_indented_fence_keeps_its_section_and_its_plans():
     assert intro.content == tildes
 
 
+def test_a_fence_indented_under_a_wide_list_marker_is_still_a_fence():
+    # Under "10. " the item's text starts four spaces in, so its fence is indented by four.
+    doc = (
+        "---\nid: d5\ntitle: D5\ntiers: free, pro, enterprise\n---\n\n# D5\n\n"
+        "## Enterprise Reset\n<!-- tiers: enterprise -->\n\n"
+        "10. Run reset:\n    ```bash\n# Reset cluster node\nfernhill-ctl reset\n    ```\n"
+    )
+    chunks = chunk_document(doc, "d5.md")
+    assert [(c.heading_path, c.tiers, c.content) for c in chunks] == [
+        (
+            ("Enterprise Reset",),
+            ("enterprise",),
+            "10. Run reset:\n    ```bash\n# Reset cluster node\nfernhill-ctl reset\n    ```",
+        ),
+    ]
+
+    # Outside a list, four spaces make indented code and not a fence.
+    indented = "    ```\n## a heading"
+    chunks = by_path(chunk_document(DOC.replace("Intro paragraph.", indented)))
+    # The heading after it is a heading: it ends the block, and the sections go on.
+    assert chunks[()].content == "    ```"
+    assert ("Limits",) in chunks
+
+
 @pytest.mark.parametrize(
     "marker",
     [

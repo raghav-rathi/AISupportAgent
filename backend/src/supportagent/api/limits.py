@@ -8,6 +8,7 @@ and processes.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import time
 from collections import OrderedDict, deque
@@ -187,11 +188,20 @@ class Budget:
         self.limit_usd, self.speech_limit_usd = limit_usd, speech_limit_usd
         self._spent = self._speech = 0.0
         self._read_at: float | None = None
+        self._reading = asyncio.Lock()
 
     async def _read(self) -> None:
-        now = self._clock()
-        if self._read_at is not None and now - self._read_at < self._refresh_s:
+        if self._fresh():
             return
+        # One reading at a time: callers that arrive while it runs wait for it and use it.
+        async with self._reading:
+            if not self._fresh():
+                await self._query()
+
+    def _fresh(self) -> bool:
+        return self._read_at is not None and self._clock() - self._read_at < self._refresh_s
+
+    async def _query(self) -> None:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT coalesce(sum(CASE WHEN type = 'llm.finished' "
@@ -208,7 +218,7 @@ class Budget:
             )
             row = await cur.fetchone()
         self._spent, self._speech = float(row["models"]), float(row["speech"])
-        self._read_at = now
+        self._read_at = self._clock()
 
     async def spent(self) -> float:
         """Dollars spent on models and searches in the last 24 hours, as of the last reading."""

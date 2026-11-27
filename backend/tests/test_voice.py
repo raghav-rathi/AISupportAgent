@@ -12,7 +12,6 @@ import asyncio
 import pytest
 from agent_harness import (
     ALWAYS_ANSWER,
-    ALWAYS_CHECK,
     GROUNDED,
     REFUND_QUESTION,
     UNGROUNDED,
@@ -27,7 +26,7 @@ from voice_harness import speech as speech  # the fixture: the fake speech servi
 
 from supportagent.agent.judge import Verdict
 from supportagent.voice import session as voice_session
-from supportagent.voice.session import GREETING, TURN_FAILED
+from supportagent.voice.session import GREETING, ONE_MOMENT, TURN_FAILED
 
 
 async def test_a_spoken_question_is_answered_aloud_and_a_typed_one_is_not(serve, speech):
@@ -94,7 +93,9 @@ async def test_a_reply_that_is_over_before_its_check_leaves_voice_listening(serv
     await caller.ws.close()
 
 
-async def test_text_the_model_writes_on_the_way_to_a_tool_is_never_said(serve, speech):
+async def test_while_a_tool_runs_the_voice_says_one_moment_and_never_the_models_own_aside(
+    serve, speech
+):
     model = ScriptedModel(
         "m",
         say_then_call("Let me look that up.", "search_knowledge_base", query=REFUND_QUESTION),
@@ -106,53 +107,90 @@ async def test_text_the_model_writes_on_the_way_to_a_tool_is_never_said(serve, s
     await caller.call()
     ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
+    # The search has started: words of our own fill the wait. What the model wrote on its way
+    # to the tool is not among them, however alike the two read.
+    one_moment = ONE_MOMENT["search_knowledge_base"]
+    await caller.hear(ms_of(one_moment))
+    assert speech.replies == [one_moment]
     await caller.until("turn.finished")
+    # The answer waits until "one moment" has been heard to its end.
+    await asyncio.sleep(0.1)
+    assert speech.replies == [one_moment]
+    await caller.played(caller.audio_ms, after="drained")
+    filler = await caller.until("speech.spoken")
+    assert (filler["filler"], filler["turn_id"], filler["interrupted"]) == (True, None, False)
     # No citation number and no markup either: a voice cannot read them.
-    assert speech.replies == ["You have 14 days to ask."]
+    await eventually(lambda: speech.replies == [one_moment, "You have 14 days to ask."])
     assert speech.warnings == [] and speech.interrupts == []
     await caller.ws.close()
 
 
-async def test_an_answer_the_gate_held_is_said_only_after_its_check(serve, speech):
+async def test_an_answer_that_rests_on_a_tool_is_said_only_after_its_check(serve, speech):
     model = ScriptedModel(
         "m", call("search_knowledge_base", query=REFUND_QUESTION), say("You have 14 days [1].")
     )
     rt, address = await serve(model, **voice(speech))
-    rt.gate, rt.judge = ALWAYS_CHECK, SlowJudge(GROUNDED)
+    # The gate was confident. Typed, this answer would be on the screen while it is checked.
+    rt.gate, rt.judge = ALWAYS_ANSWER, SlowJudge(GROUNDED)
     caller = await Caller.open(address)
     await caller.call()
     ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
+    one_moment = ONE_MOMENT["search_knowledge_base"]
+    await caller.hear(ms_of(one_moment))
+    await caller.played(caller.audio_ms, after="drained")
     drafted = await caller.until("answer.drafted")
     await rt.judge.asked.wait()
     # Voice has had the drafted answer for a while by the time anything is looked at: a rule
     # that spoke it too early would have sent its text by now.
     await caller.mic(3)
     await asyncio.sleep(0.3)
-    assert drafted["held"] is True and caller.audio_ms == 0
-    assert speech.replies == [] and not any(side.messages for side in speech.speaking)
+    assert drafted["held"] is True and caller.audio_ms == ms_of(one_moment)
+    assert speech.replies == [one_moment] and caller.of("llm.delta") == []
 
     rt.judge.let.set()
     await caller.until("turn.finished")
-    await caller.hear(ms_of("You have 14 days."))
-    assert speech.replies == ["You have 14 days."]
+    await caller.hear(ms_of(one_moment) + ms_of("You have 14 days."))
+    assert speech.replies == [one_moment, "You have 14 days."]
     await caller.ws.close()
 
 
-async def test_an_answer_that_fails_its_check_is_cut_off_and_corrected_aloud(serve, speech):
+async def test_an_answer_that_rests_on_a_tool_and_fails_its_check_is_never_said(serve, speech):
     model = ScriptedModel(
         "m", call("search_knowledge_base", query=REFUND_QUESTION), say("You have 365 days [1].")
     )
     rt, address = await serve(model, **voice(speech))
-    rt.gate, rt.judge = ALWAYS_ANSWER, SlowJudge(UNGROUNDED)
+    rt.gate, rt.judge = ALWAYS_ANSWER, ScriptedJudge(UNGROUNDED)
     caller = await Caller.open(address)
     await caller.call()
     ear = await speech.ear()
     await ask(caller, ear, REFUND_QUESTION)
-    # The gate was confident, so the answer is being said while the judge still reads.
+    one_moment = ONE_MOMENT["search_knowledge_base"]
+    await caller.hear(ms_of(one_moment))
+    await caller.played(caller.audio_ms, after="drained")
+    message = await caller.until("assistant.message")
+    await caller.until("turn.finished")
+    await eventually(lambda: len(speech.replies) == 2)
+    # Nothing of the answer was said, so nothing is taken back: it is not given.
+    assert speech.replies[1] == message["text"] and "365" not in " ".join(speech.replies)
+    assert message["text"].startswith("I couldn't confirm an answer to that")
+    assert "take that back" not in message["text"] and caller.of("answer.retracted") == []
+    assert speech.interrupts == [] and caller.of("voice.playback") == []
+    await caller.ws.close()
+
+
+async def test_an_answer_that_fails_its_check_is_cut_off_and_corrected_aloud(serve, speech):
+    # No tool was used, so the reply is said while it is checked, as a typed one would stream.
+    rt, address = await serve(ScriptedModel("m", say("You have 365 days.")), **voice(speech))
+    rt.judge = SlowJudge(UNGROUNDED)
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, REFUND_QUESTION)
     await rt.judge.asked.wait()
     await caller.hear(ms_of("You have 365 days."))
     assert speech.replies == ["You have 365 days."]
+    await caller.played(300)
 
     rt.judge.let.set()
     assert await caller.playback() == "flush"  # what the client has buffered must not be heard
@@ -164,7 +202,7 @@ async def test_an_answer_that_fails_its_check_is_cut_off_and_corrected_aloud(ser
     assert message["text"].startswith("I need to take that back.")
     assert "on your screen" in message["text"] and "ESC-" not in message["text"]
     taken_back = caller.of("speech.spoken")[0]
-    assert taken_back["interrupted"] is True and taken_back["text_spoken"] is None
+    assert (taken_back["interrupted"], taken_back["text_spoken"]) == (True, "You ha")
     # The correction plays from where the client stood, and its end is noticed.
     await caller.hear(ms_of("You have 365 days.") + ms_of(message["text"]))
     await caller.played(300 + ms_of(message["text"]), after="drained")
@@ -176,14 +214,9 @@ async def test_a_sentence_the_check_adds_is_said_after_the_answer_and_counts_as_
     serve, speech
 ):
     answer = "The help center has nothing on that."
-    model = ScriptedModel(
-        "m",
-        call("search_knowledge_base", query=REFUND_QUESTION),
-        say(f"{answer} [1]"),
-        say("Okay."),
-    )
+    model = ScriptedModel("m", say(answer), say("Okay."))
     rt, address = await serve(model, **voice(speech))
-    rt.gate, rt.judge = ALWAYS_ANSWER, ScriptedJudge(Verdict(grounded=True, unresolved=True))
+    rt.judge = ScriptedJudge(Verdict(grounded=True, unresolved=True))
     caller = await Caller.open(address)
     await caller.call()
     ear = await speech.ear()
@@ -373,9 +406,10 @@ async def test_when_the_voice_cannot_say_what_was_heard_it_is_reckoned_from_the_
     await caller.hear(ms_of(REPLY))
     await caller.send(type="voice.interrupt", played_ms=600)
     cut = await caller.until("speech.spoken")
-    # 600 ms of 3.2 s is twelve characters of 64, cut back to a whole word.
+    # 600 ms of 3.2 s is twelve characters of 64: "Refunds take", which ends there. A word that
+    # was cut would not count.
     assert speech.warnings == ["INVALID_INTERRUPT_OFFSET"] and speech.interrupts == []
-    assert (cut["interrupted"], cut["played_ms"], cut["text_spoken"]) == (True, 600, "Refunds")
+    assert (cut["interrupted"], cut["played_ms"], cut["text_spoken"]) == (True, 600, "Refunds take")
     await caller.ws.close()
 
 
@@ -384,21 +418,44 @@ async def test_a_voice_connection_that_drops_takes_its_reply_and_not_the_convers
 ):
     model = ScriptedModel("m", say(REPLY), say("Still here."))
     _, address = await serve(model, **voice(speech))
+    speech.pace = 4.0  # the voice makes its audio four times as fast as it plays, not at once
     caller = await Caller.open(address)
     await caller.call()
     ear = await speech.ear()
     await ask(caller, ear, QUESTION)
     await caller.until("turn.finished")
-    await caller.hear(ms_of(REPLY))
+    await caller.hear(800)  # a quarter of the reply has arrived when the connection goes
     await speech.speaking[0].ws.close()
+    speech.pace = None
     assert await caller.playback() == "flush"
     assert (await caller.until("speech.spoken"))["interrupted"] is True
+    arrived = caller.audio_ms  # of the reply that was lost, all that ever came
     await caller.played(300, after="flush")
 
     await ask(caller, ear, "Are you still there?")
     await caller.until("turn.finished")
-    await caller.hear(ms_of(REPLY) + ms_of("Still here."))
+    await caller.hear(arrived + ms_of("Still here."))
     assert speech.replies == [REPLY, "Still here."] and caller.of("voice.stopped") == []
+    await caller.ws.close()
+
+
+async def test_a_voice_connection_that_closes_after_its_reply_is_made_cuts_nothing(serve, speech):
+    _, address = await serve(ScriptedModel("m", say(REPLY)), **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, QUESTION)
+    await caller.until("turn.finished")
+    # All of the reply's audio is with the client, which has played a third of it, when the
+    # service closes the connection it no longer needs.
+    await caller.hear(ms_of(REPLY))
+    await caller.played(1000)
+    await speech.speaking[0].ws.close()
+    await caller.mic(3)
+    await asyncio.sleep(0.2)
+    assert caller.of("voice.playback") == [] and caller.of("speech.spoken") == []
+    await caller.played(ms_of(REPLY), after="drained")
+    assert (await caller.until("speech.spoken"))["interrupted"] is False
     await caller.ws.close()
 
 

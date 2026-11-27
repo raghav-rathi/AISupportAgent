@@ -23,6 +23,9 @@ const development = process.env.NODE_ENV !== "production";
 const contentSecurityPolicy = [
   "default-src 'self'",
   `script-src 'self' 'unsafe-inline'${development ? " 'unsafe-eval'" : ""}`,
+  // Audio worklets load under script-src. This names the page's own files for workers as well,
+  // so a browser that counts worklets as workers loads them too.
+  "worker-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",

@@ -507,6 +507,12 @@ class ResilientLLM:
                     emit(LlmReset(call_id=call_id, reason="server_error"))
                 raise
             raise _AttemptFailed(failure, text_went_out, isinstance(exc, InjectedFault)) from exc
+        except asyncio.CancelledError:
+            # Whoever stopped this call may not know that text of it is on screen. In a turn the
+            # session would take it back too, and it sees this reset and does not send a second.
+            if text_went_out:
+                emit(LlmReset(call_id=call_id, reason="cancelled"))
+            raise
         finally:
             closer = getattr(stream, "aclose", None)
             if closer is not None:

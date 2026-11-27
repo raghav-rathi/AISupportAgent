@@ -109,6 +109,11 @@ class VoiceStop(BaseModel):
     type: Literal["voice.stop"]
 
 
+# No playhead is further on than a day of audio. JSON can spell an infinite number, 1e999, and
+# an infinite playhead would count as every reply played to its end.
+_DAY_MS = 86_400_000.0
+
+
 class VoicePlayhead(BaseModel):
     """How much of the audio the server sent has been played, counted from `voice.started`.
 
@@ -117,23 +122,29 @@ class VoicePlayhead(BaseModel):
     """
 
     type: Literal["voice.playhead"]
-    played_ms: float = Field(ge=0)
-    buffered_ms: float = Field(default=0, ge=0)
+    played_ms: float = Field(ge=0, le=_DAY_MS, allow_inf_nan=False)
+    buffered_ms: float = Field(default=0, ge=0, le=_DAY_MS, allow_inf_nan=False)
     # What the report follows: the regular tick, a pause or a flush the server asked for, or
     # the last of the audio having been played.
     after: Literal["tick", "pause", "flush", "drained"] = "tick"
+    # The number of the last flush the client has acted on, see `VoicePlayback`. None from a
+    # client that does not count them, which is then taken at its word.
+    epoch: int | None = Field(default=None, ge=0)
 
 
 class VoiceInterrupt(BaseModel):
     """The customer stopped the reply by hand. The client has dropped what it had buffered.
 
-    The server always answers with a `voice.playback` flush, also when nothing was playing.
-    Until that arrives the client plays no audio it receives: those are pieces of the reply
-    that was stopped, sent before the server knew.
+    `epoch` is the number of the last flush the client had acted on when Stop was pressed.
+    Until a flush with a higher number arrives the client plays no audio it receives: those
+    are pieces of the reply that was stopped, sent before the server knew. The server sends
+    that flush in answer to this message, also when nothing was playing, unless one has
+    gone out since the epoch named here: then the reply that was stopped is cut already.
     """
 
     type: Literal["voice.interrupt"]
-    played_ms: float = Field(ge=0)
+    played_ms: float = Field(ge=0, le=_DAY_MS, allow_inf_nan=False)
+    epoch: int | None = Field(default=None, ge=0)
 
 
 ClientMessage = Annotated[

@@ -6,7 +6,7 @@
  * `VoiceLink` is the one place that moves the page's voice status between off, starting and on.
  */
 
-import { type PlayheadCause, VoiceAudio, type VoiceEngine, schedule } from "./audio";
+import { type PlayheadCause, SoundBlockedError, VoiceAudio, type VoiceEngine, cancelsEcho, schedule } from "./audio";
 import type { ClientMessage, ServerEvent } from "./protocol";
 import type { Action } from "./state";
 
@@ -45,7 +45,8 @@ export class Levels {
   }
 }
 
-function microphoneProblem(error: unknown): string {
+function startProblem(error: unknown): string {
+  if (error instanceof SoundBlockedError) return "the browser did not allow sound to play";
   const name = error instanceof DOMException ? error.name : "";
   if (name === "NotAllowedError" || name === "SecurityError") return "the browser did not allow the microphone";
   if (name === "NotFoundError" || name === "OverconstrainedError") return "no microphone was found";
@@ -78,14 +79,19 @@ export class VoiceLink {
   private attempt: string | null = null; // the ID of the voice.start in flight or answered
   private cancelStartTimeout: (() => void) | null = null;
   private live = false; // the server has said that voice is on
-  private stopPressed = false; // the next local flush is the visitor's own Stop
+  private epoch = 0; // the number of the server's last flush that was handled here
+  // A pause or resume that came ahead of the flush before it, kept until that flush arrives.
+  private early: { action: "pause" | "resume"; epoch: number } | null = null;
   private muted = false; // audio of the stopped reply may still arrive: drop it until the server's flush
+  private interrupted: number | null = null; // the epoch the Stop was sent with, once it has been
   private cancelUnmute: (() => void) | null = null;
   private tickedAt = 0;
   // For the time from the visitor's last word to the first sound of the reply, as heard here.
   private floor = 0.01;
   private loudAt = 0;
-  private waiting: { turnId: string; since: number; playedMs: number } | null = null;
+  // The voice turn being timed. `ms` is its figure, held back until the turn has finished: a turn
+  // that failed or was cut off gets none.
+  private waiting: { turnId: string; since: number; playedMs: number; ms: number | null; finished: boolean } | null = null;
   private socket: VoiceSocket | null = null;
 
   constructor(
@@ -131,14 +137,14 @@ export class VoiceLink {
         },
         onMicLevel: (level) => this.hear(level),
         onOutLevel: (level) => this.out.push(level, this.now()),
-        onPlayhead: (playedMs, bufferedMs, after) => this.report(playedMs, bufferedMs, after),
+        onPlayhead: (playedMs, bufferedMs, after, epoch) => this.report(playedMs, bufferedMs, after, epoch),
         onDrained: () => {},
         onMicLost: () => this.lose(audio, "the microphone was disconnected"),
         onSuspended: () => this.lose(audio, "voice stopped while the page was in the background"),
       });
       if (this.audio !== audio) return; // turned off while the browser was asking
       // Without echo cancellation the microphone hears the reply, and the server is told.
-      const bargeIn = info.echoCancellation !== false;
+      const bargeIn = cancelsEcho(info.echoCancellation);
       this.dispatch({ type: "voice", status: "starting", bargeIn });
       const attempt = this.newAttempt();
       this.attempt = attempt;
@@ -152,7 +158,7 @@ export class VoiceLink {
         this.end("the server did not answer");
       });
     } catch (error) {
-      if (this.audio === audio) this.end(microphoneProblem(error));
+      if (this.audio === audio) this.end(startProblem(error));
     }
   }
 
@@ -170,9 +176,9 @@ export class VoiceLink {
   /** Stop the reply that is playing or on its way. */
   interrupt(): void {
     if (!this.audio || !this.live || this.muted) return;
-    this.stopPressed = true;
     // Until the server's flush says it has stopped sending, what arrives is the stopped reply.
     this.muted = true;
+    this.interrupted = null;
     this.cancelUnmute = schedule(FLUSH_TIMEOUT_MS, () => {
       this.muted = false;
     });
@@ -190,27 +196,30 @@ export class VoiceLink {
    * of the reducer's.
    */
   handle(event: ServerEvent): boolean {
+    if (event.type === "voice.started" && !this.current(event.attempt)) {
+      // The server turned on a voice this page has given up on. A newer start on its way replaces
+      // it there. Without one, nothing would ever turn it off.
+      if (this.attempt === null) this.send({ type: "voice.stop" });
+      return false;
+    }
     const audio = this.audio;
     if (!audio) return false;
     switch (event.type) {
       case "voice.started":
-        if (!this.current(event.attempt)) break;
         this.live = true;
         this.cancelStartTimeout?.();
+        audio.rates(event.input_rate, event.output_rate);
         this.dispatch({ type: "voice", status: "on" });
         break;
       case "voice.stopped":
         if (this.current(event.attempt)) this.end(event.reason === "client" ? null : event.message || "it was stopped");
         break;
       case "voice.playback":
-        if (event.action === "pause") audio.pause();
-        else if (event.action === "resume") audio.resume();
-        else {
-          // Every Stop is answered by a flush. After it, audio is the next reply's.
-          this.muted = false;
-          this.cancelUnmute?.();
-          audio.flush();
-        }
+        if (event.action === "flush") this.flush(audio, event.id);
+        else if (event.id === this.epoch) this.command(audio, event.action);
+        // A pause or resume can overtake the flush the server sent before it. It waits for that
+        // flush, which would otherwise undo it. One from before the last flush is over already.
+        else if (event.id > this.epoch) this.early = { action: event.action, epoch: event.id };
         break;
       case "error":
         if (!this.refuses(event)) break;
@@ -218,11 +227,48 @@ export class VoiceLink {
         return true;
       case "turn.started":
         if (this.live && event.mode === "voice" && event.turn_id) {
-          this.waiting = { turnId: event.turn_id, since: this.loudAt, playedMs: audio.playedMs() };
+          this.waiting = { turnId: event.turn_id, since: this.loudAt, playedMs: audio.playedMs(), ms: null, finished: false };
+          // The next turn is timed from loud sound of its own.
+          this.loudAt = 0;
+        } else {
+          this.waiting = null; // the audio that comes next is not a voice turn's reply
         }
+        break;
+      case "turn.finished": {
+        const waiting = this.waiting;
+        if (!waiting || waiting.turnId !== event.turn_id) break;
+        waiting.finished = true;
+        this.settle();
+        break;
+      }
+      case "turn.failed":
+      case "turn.interrupted":
+        if (this.waiting?.turnId === event.turn_id) this.waiting = null;
         break;
     }
     return false;
+  }
+
+  /** The server's flush number `epoch`. After it, audio is of a reply made after it. */
+  private flush(audio: VoiceEngine, epoch: number): void {
+    if (epoch <= this.epoch) return; // handled already
+    this.epoch = epoch;
+    // Only a flush made after the server heard of the Stop ends the reply that was stopped.
+    if (this.muted && this.interrupted !== null && epoch > this.interrupted) {
+      this.muted = false;
+      this.cancelUnmute?.();
+    }
+    audio.flush(epoch);
+    const early = this.early;
+    if (early && early.epoch <= epoch) {
+      this.early = null;
+      if (early.epoch === epoch) this.command(audio, early.action);
+    }
+  }
+
+  private command(audio: VoiceEngine, action: "pause" | "resume"): void {
+    if (action === "pause") audio.pause();
+    else audio.resume();
   }
 
   /** An event about the attempt under way. An empty attempt comes from a server that sends none. */
@@ -250,8 +296,12 @@ export class VoiceLink {
     this.audio = null;
     this.attempt = null;
     this.live = false;
-    this.stopPressed = false;
+    this.epoch = 0;
+    this.early = null;
     this.muted = false;
+    this.interrupted = null;
+    this.floor = 0.01;
+    this.loudAt = 0;
     this.waiting = null;
     this.cancelStartTimeout?.();
     this.cancelUnmute?.();
@@ -265,29 +315,44 @@ export class VoiceLink {
 
   private hear(level: number): void {
     const now = this.now();
+    // A broken input can give NaN, which would stay in the floor for good.
+    if (!Number.isFinite(level)) {
+      this.mic.push(0, now);
+      return;
+    }
     this.mic.push(level, now);
     // The quietest the room gets, followed slowly. Sound well above it is the visitor speaking.
     this.floor = Math.min(level, this.floor * 1.01 + 0.00002);
     if (level > Math.max(0.015, this.floor * 4)) this.loudAt = now;
   }
 
-  private report(playedMs: number, bufferedMs: number, after: PlayheadCause): void {
+  /** Hands on the figure of the timed turn once it has one and the turn has finished. */
+  private settle(): void {
+    const waiting = this.waiting;
+    if (!waiting || waiting.ms === null || !waiting.finished) return;
+    this.waiting = null;
+    this.dispatch({ type: "voice-latency", turnId: waiting.turnId, ms: waiting.ms });
+  }
+
+  private report(playedMs: number, bufferedMs: number, after: PlayheadCause, epoch: number): void {
     const now = this.now();
     const waiting = this.waiting;
-    if (waiting && playedMs > waiting.playedMs + 1) {
+    if (waiting && waiting.ms === null && playedMs > waiting.playedMs + 1) {
       // The reply has begun to play. Its first sample left the worklet this long ago, and reached
       // the loudspeaker the output latency later.
       const heardAt = now - (playedMs - waiting.playedMs) + (this.audio?.latencyMs() ?? 0);
-      this.waiting = null;
       if (waiting.since > 0) {
-        const ms = Math.max(0, heardAt - (waiting.since - HALF_CHUNK_MS));
-        this.dispatch({ type: "voice-latency", turnId: waiting.turnId, ms });
+        waiting.ms = Math.max(0, heardAt - (waiting.since - HALF_CHUNK_MS));
+        this.settle();
+      } else {
+        this.waiting = null;
       }
     }
     if (!this.live) return;
-    if (after === "flush" && this.stopPressed) {
-      this.stopPressed = false;
-      this.send({ type: "voice.interrupt", played_ms: playedMs });
+    if (after === "stop") {
+      // The server answers with a flush numbered above this one. Until then nothing plays.
+      this.interrupted = this.epoch;
+      this.send({ type: "voice.interrupt", played_ms: playedMs, epoch: this.epoch });
       return;
     }
     if (after === "tick" || after === "resume") {
@@ -295,6 +360,6 @@ export class VoiceLink {
       this.tickedAt = now;
     }
     const cause = after === "resume" ? "tick" : after;
-    this.send({ type: "voice.playhead", played_ms: playedMs, buffered_ms: bufferedMs, after: cause });
+    this.send({ type: "voice.playhead", played_ms: playedMs, buffered_ms: bufferedMs, after: cause, epoch });
   }
 }

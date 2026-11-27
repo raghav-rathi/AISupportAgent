@@ -83,6 +83,27 @@ async def test_a_reply_that_skips_a_document_is_an_error_not_a_zero():
         await reranker(ranked((0, 0.9))).score("q", ["a", "b"])
 
 
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        ((0, 0.9), (0, 0.8), (1, 0.5)),  # index 0 twice, every document still named
+        ((0, 0.9), (2, 0.5)),  # index 2 for two documents
+    ],
+)
+async def test_a_reply_that_repeats_an_index_or_names_one_out_of_range_is_an_error(pairs):
+    with pytest.raises(HostedModelError, match="of 2 documents"):
+        await reranker(ranked(*pairs)).score("q", ["a", "b"])
+
+
+async def test_a_cost_of_true_is_no_price():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        results = [{"index": 0, "relevance_score": 0.5}]
+        return httpx.Response(200, json={"results": results, "usage": {"cost": True}})
+
+    _, cost = await reranker(handler).score_with_cost("q", ["a"])
+    assert cost is None
+
+
 @pytest.mark.parametrize("status", [429, 500, 503])
 async def test_a_busy_or_broken_service_raises_the_retryable_error(status):
     with pytest.raises(HostedModelError, match=str(status)):

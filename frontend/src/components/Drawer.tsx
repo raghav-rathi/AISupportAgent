@@ -209,7 +209,8 @@ const END_OF_TURN: Record<string, string> = {
 /** A spoken turn: where the time went between the last word and the first sound, and what speech cost. */
 function VoiceSection({ turn }: { turn: Turn }) {
   const heard = turn.heard;
-  const first = turn.spoken[0];
+  // The reply that stood: an answer taken back is followed by the one spoken in its place.
+  const reply = turn.spoken.at(-1);
   const firstToken = turn.calls.find((call) => call.purpose === "agent" && call.finished)?.finished?.ttft_ms;
   const chars = turn.spoken.reduce((sum, piece) => sum + piece.chars, 0);
   const cut = heardOf(turn);
@@ -222,8 +223,8 @@ function VoiceSection({ turn }: { turn: Turn }) {
           note={heard ? `${END_OF_TURN[heard.trigger] ?? heard.trigger}${heard.digit_mode ? ", waiting out pauses for digits" : ""}` : undefined}
         />
         <Metric label="Model first token" value={formatMs(firstToken)} note="of the first model call" />
-        <Metric label="Speech first audio" value={formatMs(first?.synthesis_ms)} note="from the text going out to the first audio back" />
-        <Metric label="Voice to voice" value={formatMs(first?.voice_to_voice_ms)} note="last word to first audio, at the server" />
+        <Metric label="Speech first audio" value={formatMs(reply?.synthesis_ms)} note="from the text going out to the first audio back" />
+        <Metric label="Voice to voice" value={formatMs(reply?.voice_to_voice_ms)} note="last word to first audio, at the server" />
         <Metric
           label="Voice to voice, here"
           value={formatMs(turn.heardAfterMs)}
@@ -265,8 +266,8 @@ function TurnPanel({ turn, status, passages, onPassage }: { turn: Turn; status: 
         />
         <Metric
           label="Estimated cost"
-          value={formatCost(usage.costUsd)}
-          note={`${usage.modelCalls} model calls, ${usage.toolCalls} tool calls`}
+          value={formatCost(totalCost(usage))}
+          note={`${usage.modelCalls} model calls, ${usage.toolCalls} tool calls${usage.speechUsd > 0 ? `, speech ${formatCost(usage.speechUsd)}` : ""}`}
         />
       </div>
       <Quiet>All four times count from the customer’s message. Time a stopped turn waited to be picked up is left out.</Quiet>
@@ -477,32 +478,55 @@ const FAILURES: { kind: FaultInject["kind"]; tool?: string; title: string; effec
   { kind: "speech_down", title: "Speech service down", effect: "Voice drops out if it is on, or fails to come on next time. The conversation goes on in text." },
 ];
 
-function FailuresPanel({ turnCount, queued, onQueued, onInject }: { turnCount: number; queued: Record<string, number>; onQueued: Props["onQueued"]; onInject: Props["onInject"] }) {
+function FailuresPanel({
+  turnCount,
+  voiceDrops,
+  queued,
+  onQueued,
+  onInject,
+}: {
+  turnCount: number;
+  voiceDrops: number;
+  queued: Record<string, number>;
+  onQueued: Props["onQueued"];
+  onInject: Props["onInject"];
+}) {
   return (
     <>
       <Quiet>Queue a simulated failure for your next message. It runs through the same code path as a real one.</Quiet>
       <ul className="flex flex-col gap-12">
-        {FAILURES.map((failure) => (
-          <li key={failure.kind} className="flex items-center gap-16 rounded-cards bg-onyx-canvas p-16">
-            <div className="flex min-w-0 flex-1 flex-col gap-4">
-              <p className="text-body-sm font-w480 leading-[1.45]">{failure.title}</p>
-              <p className="text-caption leading-[1.45] text-ash-text">{failure.effect}</p>
-            </div>
-            {queued[failure.kind] === turnCount ? (
-              <Tag>Queued</Tag>
-            ) : (
+        {FAILURES.map((failure) => {
+          // A failure of speech is used up when voice drops, which no turn counts.
+          const at = failure.kind === "speech_down" ? voiceDrops : turnCount;
+          const isQueued = queued[failure.kind] === at;
+          return (
+            <li key={failure.kind} className="flex items-center gap-16 rounded-cards bg-onyx-canvas p-16">
+              <div className="flex min-w-0 flex-1 flex-col gap-4">
+                <p className="text-body-sm font-w480 leading-[1.45]">{failure.title}</p>
+                <p className="text-caption leading-[1.45] text-ash-text">{failure.effect}</p>
+              </div>
+              {/* Queued, it stays a button, so the focus has somewhere to stay. */}
               <Button
                 variant="surface"
+                aria-label={`Queue ${failure.title}`}
+                aria-pressed={isQueued}
+                aria-disabled={isQueued || undefined}
                 onClick={() => {
-                  onInject(failure.kind, failure.tool);
-                  onQueued(failure.kind, turnCount);
+                  if (!isQueued && onInject(failure.kind, failure.tool)) onQueued(failure.kind, at);
                 }}
+                className={isQueued ? "cursor-default text-ash-text hover:opacity-100" : ""}
               >
-                Queue
+                {isQueued ? (
+                  <>
+                    <Glyph name="check" /> Queued
+                  </>
+                ) : (
+                  "Queue"
+                )}
               </Button>
-            )}
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
     </>
   );
@@ -512,11 +536,12 @@ interface Props {
   state: AppState;
   turnId: string | null; // null follows the newest turn
   overlay: boolean; // the drawer covers the conversation, as on a phone
-  queued: Record<string, number>; // which failures are queued, and at which turn count
-  onQueued: (kind: string, turnCount: number) => void;
+  queued: Record<string, number>; // which failures are queued, and at which turn count or drop of voice
+  onQueued: (kind: string, at: number) => void;
   onSelectTurn: (turnId: string | null) => void;
   onClose: () => void;
-  onInject: (kind: FaultInject["kind"], tool?: string) => void;
+  /** False when it could not be sent, and then nothing is queued. */
+  onInject: (kind: FaultInject["kind"], tool?: string) => boolean;
   onTraces: (turnId: string) => void;
   onPassage: (chunkId: string) => void;
 }
@@ -524,6 +549,7 @@ interface Props {
 export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn, onClose, onInject, onTraces, onPassage }: Props) {
   const [tab, setTab] = useState<Tab>("turn");
   const closer = useRef<HTMLButtonElement>(null);
+  const root = useRef<HTMLElement>(null);
   const turns = state.turns;
   const found = turnId ? turns.findIndex((turn) => turn.id === turnId) : -1;
   const index = found >= 0 ? found : turns.length - 1;
@@ -544,6 +570,35 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
     closer.current?.focus();
   }, []);
 
+  // Covering the page, the drawer keeps the keyboard. Tab goes round inside it, and Escape closes
+  // it wherever the focus is, also after the control that had it is gone.
+  useEffect(() => {
+    if (!overlay) return;
+    const onKey = (event: WindowEventMap["keydown"]) => {
+      const panel = root.current;
+      if (!panel) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const stops = [...panel.querySelectorAll<HTMLElement>("a[href], button, summary, input, select, textarea, [tabindex]")].filter(
+        (element) => element.tabIndex >= 0 && !element.matches(":disabled") && element.getClientRects().length > 0,
+      );
+      if (stops.length === 0) return;
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      const at = document.activeElement;
+      if (!panel.contains(at) || at === (event.shiftKey ? first : last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay, onClose]);
+
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
     const at = tabs.findIndex((t) => t.id === shown);
     const to = event.key === "ArrowRight" ? at + 1 : event.key === "ArrowLeft" ? at - 1 : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
@@ -558,6 +613,7 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
     <>
       {overlay ? <div aria-hidden="true" onClick={onClose} className="fixed inset-0 z-10 bg-onyx-canvas/70" /> : null}
       <aside
+        ref={root}
         id="observability"
         role={overlay ? "dialog" : undefined}
         aria-modal={overlay ? true : undefined}
@@ -628,7 +684,9 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
           className="flex min-h-0 flex-1 flex-col gap-32 overflow-y-auto px-32 pb-32 max-sm:px-20 max-sm:pb-20"
         >
           {shown === "session" ? <SessionPanel state={state} /> : null}
-          {shown === "failures" ? <FailuresPanel turnCount={turns.length} queued={queued} onQueued={onQueued} onInject={onInject} /> : null}
+          {shown === "failures" ? (
+            <FailuresPanel turnCount={turns.length} voiceDrops={state.voiceDrops} queued={queued} onQueued={onQueued} onInject={onInject} />
+          ) : null}
           {perTurn && !turn ? <Quiet>Send a message to see what the assistant does with it.</Quiet> : null}
           {shown === "turn" && turn ? (
             <TurnPanel turn={turn} status={shownStatus(state, turn)} passages={state.passages} onPassage={onPassage} />

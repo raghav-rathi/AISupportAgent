@@ -18,10 +18,11 @@ from agent_harness import (
 from fakes import ScriptedModel, call, say
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from supportagent.agent.graph import evidence_texts
+from supportagent.agent.graph import _needs_a_person, evidence_texts
 from supportagent.agent.judge import JudgeError, Verdict, parse_verdict
 from supportagent.agent.tickets import question_only
 from supportagent.agent.tools import CAPABILITIES
+from supportagent.kb.retrieval import may_read
 from supportagent.llm.errors import Failure, LLMUnavailable
 
 
@@ -161,7 +162,8 @@ async def test_an_answer_that_leaves_a_fernhill_question_open_gets_a_ticket_from
     assert len(final) == 1 and final[0].text.startswith(UPTIME) and ticket.id in final[0].text
     assert not of(events, "answer.retracted")
     state = await session.state()
-    assert state["outcome"] == "answered"
+    # A ticket was opened, so the turn ends the way it does when the model opens one itself.
+    assert state["outcome"] == "escalated"
     assert [t["id"] for t in state["tickets"]] == [ticket.id]
     assert state["messages"][-1].content == final[0].text  # the model reads what was said
     assert await scalar(pool, "SELECT count(*) FROM tickets WHERE world_id = %s", world) == 1
@@ -206,11 +208,22 @@ async def test_an_answer_that_settles_the_question_opens_no_ticket(pool, retriev
             "Account 10482917.\nPIN ****\nWhy was I charged twice? It was in March.",
             "Why was I charged twice? It was in March.",
         ),
-        # One sentence holds both, or nothing else was said: the message stays whole.
+        # Credentials joined to the question by a comma or "and" come off; the question stays.
         (
             "Account 10482917, PIN ****, why was I charged twice?",
-            "Account 10482917, PIN ****, why was I charged twice?",
+            "Why was I charged twice?",
         ),
+        (
+            "My account is 20573846 and PIN is ****, do you have a SOC 2 report?",
+            "Do you have a SOC 2 report?",
+        ),
+        # A mask that hides some other number is not a credential.
+        (
+            "Hello! Does Fernhill comply with ISO ****?",
+            "Hello! Does Fernhill comply with ISO ****?",
+        ),
+        ("What happens if I forget my PIN?", "What happens if I forget my PIN?"),
+        # Nothing but credentials was said: the message stays whole.
         ("10482917 and ****", "10482917 and ****"),
         ("We have 12 seats. Can we add 3?", "We have 12 seats. Can we add 3?"),
     ],
@@ -426,3 +439,23 @@ def test_a_verdict_says_when_the_reply_leaves_a_question_open():
 def test_a_verdict_that_lists_unsupported_statements_is_not_grounded_whatever_it_says():
     verdict = parse_verdict('{"grounded": true, "unsupported": ["the $500 bonus"]}')
     assert verdict == Verdict(grounded=False, unsupported=["the $500 bonus"])
+
+
+def test_only_the_turns_last_search_says_whether_an_open_question_is_the_plans_or_a_gap():
+    def searched(*bands):
+        return {"evidence": [{"band": band, "hits": []} for band in bands], "tickets": []}
+
+    assert _needs_a_person(searched())
+    assert _needs_a_person(searched("answer"))
+    assert not _needs_a_person(searched("restricted"))
+    assert not _needs_a_person(searched("answer", "verify"))
+    # The model searched again after the plan's passage, and that search answered. What the
+    # reply still leaves open is then a gap, and a gap gets a ticket.
+    assert _needs_a_person(searched("restricted", "answer"))
+    assert not _needs_a_person({**searched("answer"), "tickets": [{"id": "ESC-1"}]})
+
+
+def test_a_passage_is_read_by_the_plan_it_is_written_for_and_by_anyone_only_if_for_all():
+    assert may_read(["free", "pro", "enterprise"], None)
+    assert not may_read(["pro", "enterprise"], None)
+    assert may_read(["pro", "enterprise"], "pro") and not may_read(["enterprise"], "pro")

@@ -148,7 +148,11 @@ class Caller:
         self.first_sound_at: float | None = None  # and its first sample that is not silence
         self.paused_at: float | None = None
         self.stop_at_ms: float | None = None  # press Stop this far into the next reply
+        self.turn_mark = 0  # where in `events` the turn that was started last begins
+        self.one_moment = False  # a tool runs, and what is playing is "one moment"
         self.muted = False  # Stop was pressed, and the server has not answered yet
+        self.epoch = 0  # the number of the last flush acted on, see events.VoicePlayback
+        self.stopped_in = 0  # the epoch Stop was pressed in
         self.reply_from_ms = 0.0  # the playhead at the start of the reply in progress
         self.reply_from_byte = 0  # the same place in the audio that was played
         self.cuts: Path | None = None  # where to write what was played of a reply cut off
@@ -169,6 +173,7 @@ class Caller:
             played_ms=round(self.player.played_ms, 1),
             buffered_ms=round(self.player.buffered_ms, 1),
             after=after,
+            epoch=self.epoch,
         )
 
     async def microphone(self) -> None:
@@ -194,13 +199,16 @@ class Caller:
                 await self.report()
             self.was_playing = playing
             press = self.stop_at_ms
-            if press is not None and self.first_audio_at is not None:
+            if press is not None and self.first_audio_at is not None and not self.one_moment:
                 if self.player.played_ms - self.reply_from_ms >= press:
                     self.stop_at_ms = None
                     self.player.flush()
-                    self.muted = True  # until the server's flush: see VoiceInterrupt
+                    self.muted = True  # until a later flush of the server: see VoiceInterrupt
+                    self.stopped_in = self.epoch
                     await self.send(
-                        type="voice.interrupt", played_ms=round(self.player.played_ms, 1)
+                        type="voice.interrupt",
+                        played_ms=round(self.player.played_ms, 1),
+                        epoch=self.epoch,
                     )
                     self.note({"type": "client.stop", "played_ms": self.player.played_ms})
 
@@ -242,9 +250,22 @@ class Caller:
                             self.player.paused = False
                         else:
                             self.player.flush()
-                            self.muted = False
+                            self.epoch = event.get("id", self.epoch + 1)
+                            if self.epoch > self.stopped_in:
+                                self.muted = False
                         # The browser reports after each of the three, a resume as a tick.
                         await self.report("tick" if action == "resume" else action)
+                    elif kind == "tool.started":
+                        self.one_moment = True  # what plays until the answer is not the reply
+                    elif kind == "assistant.message" and self.first_audio_at is None:
+                        self.one_moment = False  # nothing was said while the tool ran
+                    elif kind in ("turn.failed", "turn.interrupted"):
+                        self.one_moment = False
+                    elif kind == "speech.spoken" and event.get("filler"):
+                        # "One moment" has been heard out. The audio after it is the answer,
+                        # and is timed as a reply of its own.
+                        self.first_audio_at = self.first_sound_at = None
+                        self.one_moment = False
                     elif kind == "session.ready":
                         self.session_id = event["session_id"]
                     elif kind == "session.caught_up":
@@ -290,9 +311,12 @@ class Caller:
 
         `over_ms` says it that long into the reply that is playing. `hear_out` false returns as
         soon as the turn has started, for a next step that speaks over the reply. `stop_at_ms`
-        presses Stop that long into the reply.
+        presses Stop that long into the reply. Where a turn uses a tool, the reply in both is
+        the answer and not the "one moment" before it.
         """
         pcm, onset_s, end_s = read_wav(path)
+        if over_ms is not None:
+            await self.answer_begins()
         mark = len(self.events)
         if over_ms is None:
             await self.quiet()
@@ -301,7 +325,6 @@ class Caller:
             self.first_audio_at = self.first_sound_at = None
             self.stop_at_ms = stop_at_ms
         else:
-            await self.until(lambda: self.first_sound_at is not None)
             await asyncio.sleep(max(0.0, self.first_sound_at + over_ms / 1000 - self.now()))
         self.paused_at = None
         self.taken_up.clear()
@@ -331,6 +354,7 @@ class Caller:
         if not started:
             return result | {"error": "no turn started"}
         turn_id = started[0]["turn_id"]
+        self.turn_mark = mark
         result["heard"] = started[0]["text"]
         result["turn_after_speech_ms"] = round((started[0]["at"] - end_at) * 1000)
         if not hear_out:
@@ -371,9 +395,24 @@ class Caller:
             if noted:
                 result[f"{name}_after_speech_ms"] = round((noted[0]["at"] - end_at) * 1000)
                 result[f"{name}_after_turn_ms"] = round((noted[0]["at"] - started[0]["at"]) * 1000)
+        sounds = self.since(mark, "client.first_sound")
+        if any(e.get("filler") for e in self.since(mark, "speech.spoken")) and len(sounds) > 1:
+            # The first sound was "one moment". The answer came after it.
+            result["answer_after_speech_ms"] = round((sounds[-1]["at"] - end_at) * 1000)
         if spoken.get("interrupted"):
             result |= self.keep_cut(mark)
         return result
+
+    async def answer_begins(self) -> None:
+        """Wait until the answer of the turn that was just started can be heard."""
+        await self.until(lambda: self.first_sound_at is not None)
+        if self.since(self.turn_mark, "tool.started"):
+            # What plays is "one moment". The answer follows once that has been heard out.
+            await self.until(
+                lambda: any(e.get("filler") for e in self.since(self.turn_mark, "speech.spoken")),
+                30,
+            )
+            await self.until(lambda: self.first_sound_at is not None, 30)
 
     def keep_cut(self, mark: int) -> dict:
         """Write what was played of the reply that was just cut off, to compare with the record."""
@@ -515,6 +554,10 @@ def summary(paths: list[Path]) -> None:
     print("Turns with tools:")
     print(
         f"  the customer stops, first sound: {_figures(of(tooled, 'first_sound_after_speech_ms'))}"
+    )
+    print(
+        "  the customer stops, first sound of the answer: "
+        f"{_figures(of(tooled, 'answer_after_speech_ms') or of(tooled, 'first_sound_after_speech_ms'))}"
     )
     tried = [r for r in rows if "interruption" in r]
     print(f"Speaking over a reply, {len(tried)} attempts:")

@@ -4,9 +4,9 @@ Rules:
 
 - A chunk never crosses a heading, because sections can be visible to different plans.
 - A chunk never starts or ends inside a fenced code block. A code block larger than the size limit
-  gets a chunk of its own. A fence may be indented by up to three spaces, as inside a list item, and
-  is closed by a fence of the same character that is at least as long. Inside a code block nothing
-  is a heading, a comment or a plan marker.
+  gets a chunk of its own. A fence may be indented by up to three spaces, and inside a list item by
+  up to seven, and is closed by a fence of the same character that is at least as long. Inside a
+  code block nothing is a heading, a comment or a plan marker.
 - A table or a numbered procedure is never split. Items separated by blank lines are still one list.
 - A bulleted list is split only when it alone is larger than the size limit, and then only between
   its top-level items. An item, and a code block inside it, is never cut.
@@ -60,6 +60,10 @@ _TIERS_MARK = re.compile(r"<!--\s*tiers:\s*([^<>]*?)\s*-->")
 _MENTIONS_TIER = re.compile(r"tier", re.IGNORECASE)
 # A backtick fence has no backtick after its opening run, so "```x```" on a line is not a fence.
 _FENCE = re.compile(r"^ {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+# The text of a list item starts after its marker, four spaces in under "10. ", and a fence there
+# may be indented by up to three spaces more.
+_FENCE_IN_ITEM = re.compile(r"^ {0,7}(`{3,}(?=[^`]*$)|~{3,})")
+_ITEM = re.compile(r"^ {0,3}(?:\d+[.)]|[-*+])\s")
 _ORDERED = re.compile(r"^\d+[.)]\s+")
 _BULLET = re.compile(r"^[-*+]\s+")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -171,14 +175,25 @@ def _front_matter(text: str, source: str) -> tuple[dict[str, str], list[str], in
     return meta, lines[end + 1 :], end + 2
 
 
-def _closes(line: str, fence: str) -> bool:
+def _opens(line: str, in_item: bool) -> re.Match[str] | None:
+    """The opening fence on `line`, if it is one. `in_item` is true inside a list item."""
+    return (_FENCE_IN_ITEM if in_item else _FENCE).match(line)
+
+
+def _reach(opener: re.Match[str]) -> int:
+    """How far the fence that closes the block `opener` opened may be indented."""
+    return 7 if opener.start(1) > 3 else 3
+
+
+def _closes(line: str, fence: str, reach: int = 3) -> bool:
     """True when `line` closes a code block opened with `fence`.
 
-    The closing fence repeats the opening character at least as often, after at most three spaces.
+    The closing fence repeats the opening character at least as often, after at most `reach`
+    spaces: three, or seven for a block opened deeper inside a list item.
     """
     mark = line.rstrip()
     run = mark.lstrip(" ")
-    return len(mark) - len(run) <= 3 and len(run) >= len(fence) and run == fence[0] * len(run)
+    return len(mark) - len(run) <= reach and len(run) >= len(fence) and run == fence[0] * len(run)
 
 
 def _split_comments(line: str, open_comment: bool) -> tuple[str, list[str], bool]:
@@ -236,6 +251,7 @@ def _blocks(lines: list[str]) -> list[_Block]:
     buffer: list[str] = []
     kind = "prose"
     fence: str | None = None
+    reach = 3
     gap = False  # a blank line came after the last line of the open list
 
     def flush() -> None:
@@ -248,22 +264,22 @@ def _blocks(lines: list[str]) -> list[_Block]:
     for line in lines:
         if fence:
             buffer.append(line)
-            if _closes(line, fence):
+            if _closes(line, fence, reach):
                 fence = None
                 if kind == "code":
                     flush()
             continue
-        opener = _FENCE.match(line)
+        opener = _opens(line, bool(buffer) and kind in _LISTS)
         if opener and buffer and kind in _LISTS and line[0] == " ":
             if gap:
                 buffer.append("")
                 gap = False
-            fence = opener.group(1)
+            fence, reach = opener.group(1), _reach(opener)
             buffer.append(line)
             continue
         if opener:
             flush()
-            kind, fence = "code", opener.group(1)
+            kind, fence, reach = "code", opener.group(1), _reach(opener)
             buffer.append(line)
             continue
         if not line.strip():
@@ -303,7 +319,9 @@ def _sections(
     level = 0  # level of the heading that opened the current section, 0 before the title
     opened_at = first_line
     fence: str | None = None
+    reach = 3
     fence_at = 0
+    in_item = False  # the last line with text belongs to a list item
     in_comment = False  # inside an HTML comment that spans lines
     comment_at = 0  # line where that comment opened
     preamble = True  # from a heading until the first content line of its section
@@ -319,12 +337,14 @@ def _sections(
         where = f"{source}:{number}"
         if fence:
             body.append(line)
-            if _closes(line, fence):
+            if _closes(line, fence, reach):
                 fence = None
             continue
-        opener = None if in_comment else _FENCE.match(line)
+        opener = None if in_comment else _opens(line, in_item)
         if opener:
             fence, fence_at, preamble = opener.group(1), number, False
+            reach = _reach(opener)
+            in_item = in_item and line[0] == " "
             body.append(line)
             continue
 
@@ -352,6 +372,7 @@ def _sections(
         heading = _HEADING.match(visible)
         if heading:
             flush()
+            in_item = False
             level, title = len(heading.group(1)), heading.group(2)
             while stack and stack[-1][0] >= level:
                 stack.pop()
@@ -393,6 +414,7 @@ def _sections(
             continue
         if visible.strip():
             preamble = False
+            in_item = bool(_ITEM.match(visible)) or (in_item and visible[0] in " \t")
         body.append(visible)
 
     if fence:
@@ -491,14 +513,16 @@ def _split_items(text: str, target: int) -> list[str]:
     lines = text.split("\n")
     bullets: list[tuple[int, int]] = []  # (line, indentation) of each bullet outside code blocks
     fence: str | None = None
+    reach = 3
     for i, line in enumerate(lines):
         if fence:
-            if _closes(line, fence):
+            if _closes(line, fence, reach):
                 fence = None
             continue
-        opener = _FENCE.match(line)
+        # The text is one list, so every line in it is inside an item.
+        opener = _opens(line, True)
         if opener:
-            fence = opener.group(1)
+            fence, reach = opener.group(1), _reach(opener)
             continue
         stripped = line.lstrip()
         if _BULLET.match(stripped):

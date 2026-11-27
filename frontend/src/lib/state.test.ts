@@ -4,6 +4,7 @@ import type { ServerEvent } from "./protocol";
 import {
   type AppState,
   callSpan,
+  hasTrace,
   heardOf,
   initialState,
   reduce,
@@ -241,6 +242,16 @@ describe("a turn", () => {
     const s = new Stream().ready().send("t1", started()).send("t1", interrupted(false));
     expect([s.turn.resumable, s.state.resumable]).toEqual([false, false]);
   });
+
+  it("is not opened again by what arrives after it has ended", () => {
+    const s = new Stream().ready().send("t1", started()).send("t1", message("Hello")).send("t1", finished());
+    s.send("t1", model("c9")).send("t1", delta("late", "c9"));
+    expect([s.turn.status, s.turn.streaming, s.turn.calls, s.state.busy, s.canSend]).toEqual(["answered", "", [], false, true]);
+    // A stopped turn that is no longer the newest cannot be picked up either.
+    s.send("t2", started()).send("t2", failed).send("t3", started()).send("t3", finished());
+    s.send("t2", model("c8"));
+    expect([s.state.turns[1].status, s.state.busy]).toEqual(["failed", false]);
+  });
 });
 
 describe("what the customer waited for", () => {
@@ -342,6 +353,13 @@ describe("a message on its way", () => {
     s.say("Hi", "m-2").refuse("too_long", "m-2");
     expect(s.state.draft?.n).not.toBe(first);
   });
+
+  it("goes back into the visitor's hands when the conversation starts over under it", () => {
+    // The server said the session is gone, and the page started a new one by itself.
+    const s = new Stream().ready().say("Refund INV-30417 please", "m-1");
+    s.state = reduce(s.state, { type: "reset" });
+    expect([s.state.pending, s.state.draft?.text, s.state.turns]).toEqual([null, "Refund INV-30417 please", []]);
+  });
 });
 
 describe("a connection", () => {
@@ -379,6 +397,18 @@ describe("a connection", () => {
     s.send("t1", { type: "escalation.created", ticket: ticket("ESC-2") });
     expect(s.state.tickets.map((t) => t.id)).toEqual(["ESC-1", "ESC-2"]);
   });
+
+  it("does not leave a step spinning in a turn the server stopped in", () => {
+    // The server went down in the middle of a tool. The stored stream ends there.
+    const s = new Stream().hello("s1", { last_seq: 2, busy: false, resumable: true });
+    s.send("t1", started()).send("t1", tool()).caughtUp();
+    expect(shownStatus(s.state, s.turn)).toBe("interrupted");
+    expect(s.turn.steps[0]).toMatchObject({ status: "stopped" });
+    // The turn that is running keeps its spinner.
+    const live = new Stream().hello("s1", { last_seq: 2, busy: true });
+    live.send("t1", started()).send("t1", tool()).caughtUp();
+    expect(live.turn.steps[0]).toMatchObject({ status: "running" });
+  });
 });
 
 describe("what is fetched on request", () => {
@@ -403,6 +433,36 @@ describe("what is fetched on request", () => {
     expect([s.state.passages.b, s.state.notice]).toEqual(["missing", null]);
     s.state = reduce(s.state, { type: "looked", chunkId: "a" });
     expect(s.state.passages.a).toMatchObject({ content: "14 days." }); // not reset to loading
+  });
+
+  it("asks again once the turn has ended for traces it asked for while the turn ran", () => {
+    const s = new Stream().ready().send("t1", started()).send("t1", model()).send("t1", modelDone());
+    s.state = reduce(s.state, { type: "asked", turnId: "t1" });
+    s.raw({ type: "trace.list", seq: 0, ts: 0, turn_id: "t1", traces: [] });
+    expect(tracesAreStale(s.state, s.turn)).toBe(false);
+    // The server stores the traces at the end of the turn: what came before is not the answer.
+    s.send("t1", message("Hello")).send("t1", finished());
+    expect(tracesAreStale(s.state, s.turn)).toBe(true);
+    s.state = reduce(s.state, { type: "asked", turnId: "t1" });
+    s.raw({ type: "trace.list", seq: 0, ts: 0, turn_id: "t1", traces: [] });
+    expect(tracesAreStale(s.state, s.turn)).toBe(false); // and only once
+  });
+
+  it("does not stay loading what was asked on a connection that dropped", () => {
+    const s = new Stream().ready().send("t1", started()).send("t1", model()).send("t1", modelDone());
+    s.state = reduce(s.state, { type: "asked", turnId: "t1" });
+    s.state = reduce(s.state, { type: "looked", chunkId: "a" });
+    s.drop().ready();
+    expect([s.state.traces.t1, s.state.passages.a]).toEqual([undefined, undefined]);
+    expect(tracesAreStale(s.state, s.turn)).toBe(true);
+  });
+
+  it("marks only the passage the server names as missing", () => {
+    const s = new Stream().ready();
+    s.state = reduce(s.state, { type: "looked", chunkId: "a" });
+    s.state = reduce(s.state, { type: "looked", chunkId: "b" });
+    s.raw({ seq: 0, ts: 0, turn_id: null, type: "error", code: "not_found", message: "no", client_id: null, chunk_id: "b" } as ServerEvent);
+    expect([s.state.passages.a, s.state.passages.b]).toEqual(["loading", "missing"]);
   });
 });
 
@@ -488,6 +548,29 @@ describe("voice", () => {
     s.raw({ seq: 2, ts: 2, turn_id: null, type: "voice.usage", listened_s: 60, cost_usd: 0.0065 } as ServerEvent);
     expect(sessionUsage(s.state.turns, s.state.speechUsd).speechUsd).toBeCloseTo(0.0095);
     expect(s.state.busy).toBe(false);
+  });
+
+  it("does not take what speech measured after a stop for a turn that is running", () => {
+    for (const end of [interrupted(false), interrupted(true), failed]) {
+      const s = new Stream().ready().send("t1", spokenTurn()).send("t1", end).send("t1", heardSpeech);
+      expect([s.turn.status, s.state.busy, s.canSend]).toEqual([end.type === "turn.failed" ? "failed" : "interrupted", false, true]);
+      expect(s.turn.heard).toMatchObject({ cost_usd: 0.0006 });
+    }
+  });
+
+  it("offers the trace of a spoken turn that made no model call", () => {
+    const s = new Stream().ready().send("t1", spokenTurn()).send("t1", heardSpeech).send("t1", interrupted(false));
+    expect(s.turn.calls).toEqual([]);
+    expect(hasTrace(s.turn)).toBe(true);
+  });
+
+  it("counts the times it went off without the visitor turning it off", () => {
+    const s = new Stream().ready("s1", { voice: true });
+    s.state = reduce(s.state, { type: "voice", status: "on" });
+    s.state = reduce(s.state, { type: "voice", status: "off", notice: null });
+    expect(s.state.voiceDrops).toBe(0);
+    s.state = reduce(s.state, { type: "voice", status: "off", notice: "simulated failure" });
+    expect(s.state.voiceDrops).toBe(1);
   });
 });
 

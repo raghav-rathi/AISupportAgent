@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 
 import { type DemoAccount, credentials } from "@/lib/demo";
 import { useSession } from "@/lib/session";
@@ -36,7 +37,8 @@ function useNarrow(): boolean {
  */
 function keyFocus(target: Element | null, byPointer: Element | null): KeyFocus {
   if (!target) return "none";
-  if (target.closest("input, textarea, select, [contenteditable='true']")) return "field";
+  if (target.closest("#observability, [role='dialog'], [role='menu']")) return "region";
+  if (target.closest("input, textarea, select") || (target instanceof HTMLElement && target.isContentEditable)) return "field";
   const control = target.closest("button, a, summary, [role='tab'], [role='menuitem']");
   if (!control) return "none";
   return control instanceof HTMLButtonElement && control === byPointer ? "pointer-button" : "control";
@@ -81,7 +83,8 @@ export function App() {
     session.startOver();
   };
   const closeDrawer = () => {
-    setDrawerOpen(false);
+    // The top bar is inert while the drawer covers the page, and an inert button takes no focus.
+    flushSync(() => setDrawerOpen(false));
     drawerToggle.current?.focus();
   };
   const pickAccount = (account: DemoAccount) => setPicked((before) => ({ text: credentials(account), n: (before?.n ?? 0) + 1 }));
@@ -89,6 +92,15 @@ export function App() {
   const voice = state.voice;
   const speech = session.voice;
   const voiceOn = voice.status !== "off";
+  // The first start of voice in a page load waits until the visitor has read what voice involves
+  // and pressed Start microphone. Later starts go straight through.
+  const [voiceAgreed, setVoiceAgreed] = useState(false);
+  const [askingVoice, setAskingVoice] = useState(false);
+  const startVoice = () => {
+    setAskingVoice(false);
+    setVoiceAgreed(true);
+    speech.start(); // in the click itself, so the browser lets the audio play
+  };
   // The panel's one Stop: a typed turn is cancelled as a turn, anything else of voice is
   // interrupted. Null when there is nothing to stop.
   const stopping = stopTarget(state);
@@ -113,7 +125,7 @@ export function App() {
       );
       if (decision === "pass") return;
       event.preventDefault();
-      if (decision === "stop") stop?.();
+      stop?.();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -127,6 +139,7 @@ export function App() {
         drawerToggle={drawerToggle}
         onToggleDrawer={() => (drawerOpen ? closeDrawer() : setDrawerOpen(true))}
         onStartOver={startOver}
+        inert={overlay}
       />
       <div className="flex min-h-0 flex-1">
         <main className="flex min-w-0 flex-1 flex-col" inert={overlay}>
@@ -166,7 +179,17 @@ export function App() {
               </div>
             </div>
           ) : null}
-          <VoicePanel voice={voice} mic={speech.mic} out={speech.out} onStop={stop} onEnd={speech.stop} onDismiss={session.dismiss} />
+          <VoicePanel
+            voice={voice}
+            mic={speech.mic}
+            out={speech.out}
+            onStop={stop}
+            onEnd={speech.stop}
+            onDismiss={session.dismiss}
+            asking={askingVoice && voice.offered && online}
+            onStart={startVoice}
+            onDecline={() => setAskingVoice(false)}
+          />
           <Composer
             ready={online && !state.busy && state.pending === null}
             // With voice on, the voice panel has the one Stop there is. It stops a typed turn as
@@ -179,7 +202,12 @@ export function App() {
             onAccount={pickAccount}
             voice={
               voice.offered
-                ? { on: voiceOn, starting: voice.status === "starting", ready: online, onToggle: voiceOn ? speech.stop : speech.start }
+                ? {
+                    on: voiceOn,
+                    starting: voice.status === "starting",
+                    ready: online,
+                    onToggle: voiceOn ? speech.stop : voiceAgreed ? speech.start : () => setAskingVoice(true),
+                  }
                 : null
             }
           />

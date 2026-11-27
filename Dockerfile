@@ -25,6 +25,9 @@ RUN python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge
 # The app runs as a user that owns nothing but the model cache it reads.
 RUN useradd --system --uid 10001 --no-create-home app && chown -R app /app/.cache
 USER app
+# The user has no home directory. A library that writes a cache or a config file under $HOME
+# finds one that exists and is writable.
+ENV HOME=/tmp
 
 WORKDIR /app/backend
 # The app answers /health only once its start-up is over and the embedding model is loaded, so a

@@ -13,12 +13,23 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from psycopg_pool import AsyncConnectionPool
 
 from supportagent.crm.policy import TIERS
 from supportagent.kb.models import Embedder, Reranker
+
+
+def may_read(tiers: Sequence[str], tier: str | None) -> bool:
+    """The plan filter of a search, for one passage.
+
+    A customer reads what is written for their plan. A visitor who is not verified reads only
+    what is written for every plan.
+    """
+    return set([tier] if tier else TIERS) <= set(tiers)
+
 
 # Reciprocal rank fusion: score = sum over legs of 1 / (k + rank). 60 is the constant from the RRF paper.
 _RRF_K = 60

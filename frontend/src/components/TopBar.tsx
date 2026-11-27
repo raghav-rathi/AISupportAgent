@@ -19,13 +19,14 @@ interface Props {
   drawerToggle: Ref<HTMLButtonElement>; // focus returns here when the drawer closes
   onToggleDrawer: () => void;
   onStartOver: () => void;
+  inert: boolean; // the drawer covers the page, and only it takes focus and clicks
 }
 
-export function TopBar({ state, drawerOpen, drawerToggle, onToggleDrawer, onStartOver }: Props) {
+export function TopBar({ state, drawerOpen, drawerToggle, onToggleDrawer, onStartOver, inert }: Props) {
   const online = state.connection === "open";
   const customer = state.customer;
   return (
-    <header className="flex h-72 shrink-0 items-center gap-16 bg-onyx-canvas/80 px-24 backdrop-blur-[20px] max-sm:gap-8 max-sm:px-16">
+    <header inert={inert} className="flex h-72 shrink-0 items-center gap-16 bg-onyx-canvas/80 px-24 backdrop-blur-[20px] max-sm:gap-8 max-sm:px-16">
       <div className="flex items-center gap-12">
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
           <circle cx="12" cy="12" r="10" />

@@ -4,6 +4,8 @@ and the masking of what the customer says before and after the app knows their P
 
 from __future__ import annotations
 
+import asyncio
+
 from agent_harness import DANIEL, MAYA, shows
 from fakes import ScriptedModel, call, say, usage
 from test_ws import serve as serve  # the fixture: the app on a free port
@@ -204,4 +206,46 @@ async def test_a_call_started_early_for_nothing_and_a_call_cut_short_both_count_
         (True, False),
     ]
     assert await Budget(pool, None).spent() - before >= 0.004 - 1e-9
+    await caller.ws.close()
+
+
+async def test_a_voice_service_that_turns_connections_away_is_not_asked_over_and_over(
+    serve, speech
+):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    # From now on the service lets a voice connection open, says it is over its quota, and
+    # closes it. Asked again at once each time, it was asked three hundred times in a quarter
+    # of a second.
+    speech.over_quota = True
+    opened = len(speech.speaking)
+    await ask(caller, ear, "Hi")
+    stopped = await caller.until("voice.stopped")
+    assert stopped["reason"] == "error"
+    await caller.mic(3)
+    await asyncio.sleep(0.3)
+    assert len(speech.speaking) - opened <= 3
+    # The answer is on the screen all the same.
+    assert [e["text"] for e in caller.of("assistant.message")] == ["Hello."]
+    await caller.ws.close()
+
+
+async def test_audio_cannot_arrive_much_faster_than_a_microphone_makes_it(serve, speech):
+    _, address = await serve(ScriptedModel("m", say("Hello.")), **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    # Sixteen seconds of audio in one go. A connection that stalled may send what it held
+    # back, five seconds of it, and the rest is not a microphone.
+    await caller.mic(200)
+    await caller.played(0)  # something the server answers in order, after all of that audio
+    await asyncio.sleep(0.2)
+    assert 4.9 * 32_000 <= ear.audio_bytes <= 5 * 32_000
+    # What was used is earned back as time passes.
+    before = ear.audio_bytes
+    await asyncio.sleep(1.0)
+    await caller.mic(10)
+    await eventually(lambda: ear.audio_bytes == before + 10 * 2560)
     await caller.ws.close()

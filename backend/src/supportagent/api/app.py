@@ -45,6 +45,7 @@ from supportagent.events import (
     Ticket,
     TraceList,
 )
+from supportagent.kb.retrieval import may_read
 from supportagent.runtime import Runtime, open_runtime
 from supportagent.voice.deepgram import SpeechConfig, SpeechError
 from supportagent.voice.session import VoiceLimits, VoiceSession
@@ -72,13 +73,18 @@ _SECURITY_HEADERS = {
 }
 
 
-async def _purge_forever(rt: Runtime, ttl_hours: float) -> None:
+async def _purge_forever(rt: Runtime, hubs: Hubs, ttl_hours: float) -> None:
     """Delete conversations nobody has used for the limit, now and then while the app runs."""
     while True:
         try:
             async with rt.pool.connection() as conn:
                 gone = await worlds.purge_worlds(
-                    conn, timedelta(hours=ttl_hours), timedelta(seconds=LEASE_S)
+                    conn,
+                    # Not sooner than a day: the daily budgets are read from the stored
+                    # events, and a conversation purged earlier would take its spend along.
+                    timedelta(hours=max(ttl_hours, 24.0)),
+                    timedelta(seconds=LEASE_S),
+                    keep=hubs.live(),
                 )
                 orphaned = await worlds.forget_orphaned_threads(conn)
             if gone or orphaned:
@@ -184,7 +190,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 runtime.pool, settings.daily_budget_usd, settings.daily_speech_budget_usd
             )
             purge = (
-                asyncio.create_task(_purge_forever(runtime, settings.session_ttl_hours))
+                asyncio.create_task(_purge_forever(runtime, hubs, settings.session_ttl_hours))
                 if settings.session_ttl_hours is not None
                 else None
             )
@@ -320,8 +326,10 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         def tell(event: BaseModel) -> None:
             subscription.offer(event)
 
-        def refuse(code: str, message: str, client_id: str | None = None) -> None:
-            tell(ProtocolError(code=code, message=message, client_id=client_id))
+        def refuse(
+            code: str, message: str, client_id: str | None = None, chunk_id: str | None = None
+        ) -> None:
+            tell(ProtocolError(code=code, message=message, client_id=client_id, chunk_id=chunk_id))
 
         try:
             state = await hubs.rt.graph.aget_state({"configurable": {"thread_id": hub.session_id}})
@@ -394,10 +402,10 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                         voice = None
                 elif isinstance(message, VoicePlayhead):
                     if voice is not None:
-                        voice.playhead(message.played_ms, message.after)
+                        voice.playhead(message.played_ms, message.after, message.epoch)
                 elif isinstance(message, VoiceInterrupt):
                     if voice is not None:
-                        voice.interrupt(message.played_ms)
+                        voice.interrupt(message.played_ms, message.epoch)
                 else:
                     refuse("bad_message", "hello is only valid as the first message")
                 if hub.gone:
@@ -532,6 +540,14 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 logger.warning("voice could not start: %s", exc)
                 no("voice_unavailable", "speech is unavailable right now")
             return None  # stopped while it was starting: the stop has told the client
+        except BaseException:
+            # A fault of ours, or the server going down. The places go back all the same: a
+            # voice that never started must not hold one of the few lines for good.
+            if hub.voice is voice:
+                hub.voice = None
+            if not voice.stopped:
+                closed(voice)
+            raise
         return voice
 
     async def _on_retry(hub: SessionHub, budget: Budget, refuse: Refuse) -> None:
@@ -562,7 +578,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         read, so a passage it never returned is not handed out here either.
         """
         if not await hub.log.was_shown(message.chunk_id):
-            refuse("not_found", "no such passage in this conversation")
+            refuse("not_found", "no such passage in this conversation", chunk_id=message.chunk_id)
             return
         async with hub.rt.pool.connection() as conn:
             cur = await conn.execute(
@@ -571,7 +587,19 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             )
             row = await cur.fetchone()
         if row is None:  # the help center changed since
-            refuse("not_found", "this passage is no longer in the help center")
+            refuse(
+                "not_found",
+                "this passage is no longer in the help center",
+                chunk_id=message.chunk_id,
+            )
+            return
+        # The plan filter once more, for who the conversation is with now. After a lockout or
+        # a change of account, a passage that an earlier customer's plan could read is not
+        # handed out to whoever has the conversation next.
+        state = await hub.rt.graph.aget_state({"configurable": {"thread_id": hub.session_id}})
+        customer = state.values.get("customer")
+        if not may_read(row["tiers"], customer["tier"] if customer else None):
+            refuse("not_found", "no such passage in this conversation", chunk_id=message.chunk_id)
             return
         tell(
             PassageDetail(
