@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from supportagent.config import ModelSettings, Settings, get_settings
+from supportagent.config import ModelSettings, Settings, get_settings, same_model
 from supportagent.evals import suite
 from supportagent.evals.scenarios import SCENARIOS
 
@@ -119,7 +119,7 @@ def candidate_settings(base: Settings, spec: dict[str, Any]) -> dict[str, Settin
     for entry in spec["candidates"]:
         model = ModelSettings(**{k: v for k, v in entry.items() if k != "name"})
         grader = judge
-        if (model.model, model.base_url) == (judge.model, judge.base_url):
+        if same_model(model, judge, base.openrouter_base_url):
             if alternate is not None:
                 grader = alternate
             elif not spec.get("allow_self_grading"):

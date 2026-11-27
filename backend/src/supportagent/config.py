@@ -45,6 +45,20 @@ class ModelSettings(BaseModel):
     output_price: float | None = None
 
 
+def same_model(a: ModelSettings, b: ModelSettings, default_base_url: str) -> bool:
+    """Whether two settings name one model at one endpoint.
+
+    A setting without a base URL uses the default one, so `None` and that URL written out are
+    the same place. A model must not grade its own answers, and this is what decides whether
+    it would.
+    """
+
+    def where(spec: ModelSettings) -> str:
+        return (spec.base_url or default_base_url).rstrip("/").lower()
+
+    return a.model == b.model and where(a) == where(b)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_ignore_empty=True,

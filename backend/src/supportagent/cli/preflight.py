@@ -16,7 +16,7 @@ import httpx
 import psycopg
 
 from supportagent import db
-from supportagent.config import ModelSettings, Settings, get_settings
+from supportagent.config import ModelSettings, Settings, get_settings, same_model
 
 HOSTS = {
     "OpenRouter": "https://openrouter.ai/api/v1/models",
@@ -81,10 +81,7 @@ def model_report(settings: Settings) -> list[tuple[str, str]]:
     if settings.judge is None:
         level = "warn" if settings.allow_unchecked_answers else "FAIL"
         lines.append((level, "no grounding judge: answers would go out unchecked"))
-    elif settings.llm and (settings.judge.model, settings.judge.base_url) == (
-        settings.llm.model,
-        settings.llm.base_url,
-    ):
+    elif settings.llm and same_model(settings.judge, settings.llm, settings.openrouter_base_url):
         lines.append(("warn", "the judge is the agent's own model: fine for development only"))
     if settings.fallback is None:
         lines.append(("warn", "no fallback model: an outage of the agent model fails the turn"))

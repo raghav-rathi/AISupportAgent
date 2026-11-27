@@ -92,6 +92,12 @@ def test_a_candidate_runs_without_a_fallback_and_never_grades_itself():
 
     with pytest.raises(ValueError, match="grade itself"):
         candidate_settings(base, {"judge": GEMINI, "candidates": [{"name": "gemini", **GEMINI}]})
+    # The same endpoint written out is still the same model.
+    spelled = {"name": "gemini", **GEMINI, "base_url": base.openrouter_base_url + "/"}
+    with pytest.raises(ValueError, match="grade itself"):
+        candidate_settings(base, {"judge": GEMINI, "candidates": [spelled]})
+    elsewhere = {"name": "gemini", **GEMINI, "base_url": "http://127.0.0.1:11435/v1"}
+    assert candidate_settings(base, {"judge": GEMINI, "candidates": [elsewhere]})
     # A development run on one local model may say that it accepts this.
     alone = {"judge": GEMINI, "allow_self_grading": True, "candidates": [{"name": "g", **GEMINI}]}
     assert candidate_settings(base, alone)["g"].judge.model == "google/gemini-3.6-flash"
