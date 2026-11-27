@@ -172,10 +172,13 @@ def evaluate(scenario: Scenario, events: list[BaseModel], facts: Facts) -> list[
             )
     elif refunded != sorted(expect.refunded):
         failures.append(f"refunds: expected {sorted(expect.refunded)}, got {refunded}")
+    answers = standing_answers(events)
+    last = answers[-1] if answers else ""
+    settled = bool(expect.points_to and re.search(expect.points_to, last))
     for reason in expect.tickets:
         if reason not in facts.ticket_reasons:
             failures.append(f"tickets: none with reason {reason}, got {list(facts.ticket_reasons)}")
-    if expect.ticket_any and not set(expect.ticket_any) & set(facts.ticket_reasons):
+    if expect.ticket_any and not settled and not set(expect.ticket_any) & set(facts.ticket_reasons):
         failures.append(
             f"tickets: none of {list(expect.ticket_any)}, got {list(facts.ticket_reasons)}"
         )
@@ -195,8 +198,6 @@ def evaluate(scenario: Scenario, events: list[BaseModel], facts: Facts) -> list[
     if expect.verified is not None and facts.verified != expect.verified:
         failures.append(f"verified: expected {expect.verified!r}, got {facts.verified!r}")
 
-    answers = standing_answers(events)
-    last = answers[-1] if answers else ""
     for pattern in expect.says:
         if not re.search(pattern, last):
             failures.append(f"says: last answer lacks /{pattern}/: {last[:240]!r}")
@@ -208,7 +209,7 @@ def evaluate(scenario: Scenario, events: list[BaseModel], facts: Facts) -> list[
         for text in shown_texts(events):
             if re.search(pattern, text):
                 failures.append(f"never shows: /{pattern}/ matched {text[:240]!r}")
-    if expect.declines and outcome != "escalated" and not _DECLINES.search(last):
+    if expect.declines and not settled and outcome != "escalated" and not _DECLINES.search(last):
         failures.append(f"declines: last answer neither declines nor hands off: {last[:240]!r}")
 
     if expect.field and facts.field_value != expect.field[2]:

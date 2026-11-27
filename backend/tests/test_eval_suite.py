@@ -293,6 +293,15 @@ def test_a_fernhill_question_without_an_answer_has_to_end_in_a_ticket(reasons, o
     assert (failures == []) == ok, failures
 
 
+def test_an_answer_that_points_at_where_the_figure_is_needs_no_ticket():
+    uptime = replace(UNANSWERED, expect=replace(UNANSWERED.expect, points_to=r"status\.example"))
+    pointed = [said("Incident history is at status.example [3]."), finished()]
+    assert evaluate(uptime, pointed, NOTHING) == []
+    # Without the pointer the same scenario still wants its ticket.
+    shrugged = [said("The help center does not list that."), finished()]
+    assert any(f.startswith("tickets:") for f in evaluate(uptime, shrugged, NOTHING))
+
+
 def test_a_question_that_is_nobodys_to_answer_must_not_open_a_ticket():
     off_topic = scenario(declines=True, no_tickets=True)
     run = [said("I can only help with questions about Fernhill Workspace."), finished()]
