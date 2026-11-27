@@ -415,7 +415,7 @@ export interface VoiceState {
   state: "listening" | "hearing" | "thinking" | "speaking";
 }
 
-/** Voice is off. The conversation goes on in text. */
+/** Voice is off. The conversation goes on in text. `message` says why when the customer did not turn it off, as the end of "Voice is off: ". */
 export interface VoiceStopped {
   seq: number;
   ts: number;

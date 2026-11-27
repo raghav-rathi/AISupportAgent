@@ -447,7 +447,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         if await budget.exhausted():
             return "budget_exhausted", "the demo has used its budget for today"
         if spoken and await budget.speech_exhausted():
-            return "budget_exhausted", "voice has used its budget for today, go on in text"
+            return "budget_exhausted", "voice has used its budget for today"
         return None
 
     async def _on_voice_start(
@@ -459,18 +459,18 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
     ) -> VoiceSession | None:
         """Turn voice on for this connection, or say why not."""
         if speech is None:
-            refuse("voice_unavailable", "voice is not set up on this server")
+            refuse("voice_unavailable", "it is not set up on this server")
             return None
         if await budget.exhausted():
             refuse("budget_exhausted", "the demo has used its budget for today")
             return None
         if await budget.speech_exhausted():
-            refuse("voice_unavailable", "voice has used its budget for today, go on in text")
+            refuse("voice_unavailable", "it has used its budget for today")
             return None
         if hub.voice is not None:
-            await hub.voice.stop("replaced", "voice is now on in another window")
+            await hub.voice.stop("replaced", "it is now on in another window")
         if len(voices) >= settings.max_voice_sessions:
-            refuse("voice_unavailable", "all voice lines are busy, go on in text for now")
+            refuse("voice_unavailable", "all voice lines are busy")
             return None
 
         async def admit(text: str) -> ProtocolError | None:
@@ -492,7 +492,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         except SpeechError as exc:
             voices.discard(voice)
             logger.warning("voice could not start: %s", exc)
-            refuse("voice_unavailable", "speech is unavailable right now, go on in text")
+            refuse("voice_unavailable", "speech is unavailable right now")
             return None
         return voice
 

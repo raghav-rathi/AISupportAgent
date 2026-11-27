@@ -541,7 +541,7 @@ async def test_when_speech_is_down_the_conversation_goes_on_in_text(serve, speec
     # A second drop soon after means the service is down.
     await ear.ws.close()
     stopped = await caller.until("voice.stopped")
-    assert stopped["reason"] == "error" and "text" in stopped["message"]
+    assert stopped["reason"] == "error" and "unavailable" in stopped["message"]
     await caller.ws.close()
 
 

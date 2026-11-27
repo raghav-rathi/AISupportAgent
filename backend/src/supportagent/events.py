@@ -420,7 +420,10 @@ class VoiceStarted(_Event):
 
 
 class VoiceStopped(_Event):
-    """Voice is off. The conversation goes on in text."""
+    """Voice is off. The conversation goes on in text.
+
+    `message` says why when the customer did not turn it off, as the end of "Voice is off: ".
+    """
 
     type: Literal["voice.stopped"] = "voice.stopped"
     reason: Literal["client", "idle", "limit", "replaced", "error"]

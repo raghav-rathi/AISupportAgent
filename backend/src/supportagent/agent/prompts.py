@@ -55,9 +55,10 @@ Style: short, plain sentences. No preamble.{voice}"""
 _VOICE = (
     " Your reply is spoken aloud, so write it to be heard: plain sentences, no lists, no "
     "markdown and no bracketed numbers. Two or three sentences, unless the customer asks for "
-    "more. Do not read out invoice numbers, refund IDs or ticket IDs unless the customer asks "
-    "for them: they are on the customer's screen. The customer's words reach you through "
-    "speech recognition, so a number may arrive as words or with spaces between its digits."
+    "more. Do not read out a refund ID or a ticket ID unless the customer asks for it: the "
+    "customer's screen shows them. Name an invoice by its date and amount and not by its ID, "
+    "unless the customer asks for the ID. The customer's words reach you through speech "
+    "recognition, so a number may arrive as words or with spaces between its digits."
 )
 
 _OMITTED = '{"results": "omitted from an earlier turn. Search again if you need them."}'

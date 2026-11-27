@@ -450,7 +450,7 @@ class VoiceSession:
                 await self._on_down(exc)
             except Exception:
                 logger.exception("voice failed in session %s", self._hub.session_id)
-                await self._shutdown("error", "voice ran into a problem, go on in text")
+                await self._shutdown("error", "it ran into a problem")
 
     async def _on_greet(self, _: None) -> None:
         await self._speak(None, GREETING)
@@ -474,23 +474,21 @@ class VoiceSession:
                 await self._played_out(reply)  # the client never said so
         elif self._utterance is None and not self._hub.busy:
             if now - self._active_at >= self._limits.idle_seconds:
-                await self._shutdown("idle", "voice turned off after a while of silence")
+                await self._shutdown("idle", "nobody spoke for a while")
                 return
         else:
             self._active_at = now
         if now - self._began >= self._limits.max_seconds:
             minutes = round(self._limits.max_seconds / 60)
-            await self._shutdown(
-                "limit", f"a voice session lasts at most {minutes} minutes here, start another"
-            )
+            await self._shutdown("limit", f"a voice session lasts at most {minutes} minutes here")
         elif now - self._mic_at >= _MIC_SILENT_S:
-            await self._shutdown("error", "no audio is arriving from the microphone")
+            await self._shutdown("error", "no audio arrived from the microphone")
 
     # The speech service failing.
 
     async def _on_down(self, error: SpeechError) -> None:
         logger.warning("speech is down in session %s: %s", self._hub.session_id, error)
-        await self._shutdown("error", "speech is unavailable right now, go on in text")
+        await self._shutdown("error", "speech is unavailable right now")
 
     async def _on_listener_failed(self, failure: tuple[int, SpeechError]) -> None:
         """The recogniser's socket broke. It is opened again, once. If that fails, voice is over."""
