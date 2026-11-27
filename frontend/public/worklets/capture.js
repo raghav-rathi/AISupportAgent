@@ -12,7 +12,10 @@ const Base =
 
 const OUTPUT_RATE = 16000;
 const CHUNK_SAMPLES = 1280;
+// Filter length in input samples at 48 kHz. Higher input rates get proportionally more taps, so
+// the filter spans the same time and keeps its sharpness at 96 or 192 kHz.
 const TAPS = 32;
+const TAPS_RATIO = 3; // 48 kHz to 16 kHz
 
 function sinc(x) {
   if (x === 0) return 1;
@@ -27,7 +30,8 @@ function sinc(x) {
 class Downsampler {
   constructor(inputRate, outputRate = OUTPUT_RATE) {
     this.ratio = inputRate / outputRate;
-    this.half = TAPS / 2;
+    // 44.1 and 48 kHz keep 32 taps. Above that the count grows with the ratio.
+    this.half = Math.max(TAPS / 2, Math.ceil(((TAPS / 2) * this.ratio) / TAPS_RATIO));
     // Cutoff just under the lower Nyquist, as a fraction of the input rate times two.
     this.band = (2 * 0.45 * Math.min(inputRate, outputRate)) / inputRate;
     // The buffer starts with zeros so the first outputs see silence before the input.

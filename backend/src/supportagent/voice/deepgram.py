@@ -56,6 +56,9 @@ class SpeechConfig:
     stt_model: str = "flux-general-en"
     tts_model: str = "flux-haley-en"
     keyterms: tuple[str, ...] = ()
+    # From this confidence that the turn is over, the recogniser says so early: EagerEndOfTurn,
+    # then EndOfTurn or TurnResumed. None: it only says EndOfTurn.
+    eager_eot_threshold: float | None = None
     input_rate: int = 16_000  # what the customer's microphone is resampled to
     output_rate: int = 24_000  # what the reply is synthesised at
     connect_timeout_s: float = 6.0
@@ -73,6 +76,7 @@ class SpeechConfig:
             stt_model=settings.stt_model,
             tts_model=settings.tts_model,
             keyterms=tuple(settings.stt_keyterms),
+            eager_eot_threshold=settings.stt_eager_eot_threshold,
             stt_usd_per_minute=settings.stt_usd_per_minute,
             tts_usd_per_1k_chars=settings.tts_usd_per_1k_chars,
         )
@@ -136,6 +140,8 @@ class FluxListener:
             ("sample_rate", str(self._config.input_rate)),
             *(("keyterm", term) for term in self._config.keyterms),
         ]
+        if self._config.eager_eot_threshold is not None:
+            query.append(("eager_eot_threshold", str(self._config.eager_eot_threshold)))
         self._ws = await _open(
             f"{self._config.base_url}/v2/listen?{urlencode(query)}", self._config
         )
@@ -175,26 +181,21 @@ class FluxListener:
         await self._say({"type": "ForceEndTurn"})
 
     async def turns(self) -> AsyncIterator[Turn]:
-        """The recogniser's messages until the socket closes. Raises SpeechError if it breaks."""
+        """The recogniser's messages until the socket closes. Raises SpeechError if it breaks,
+        or sends something that cannot be read."""
         assert self._ws is not None, "open() first"
         try:
             async for raw in self._ws:
                 if isinstance(raw, bytes):
                     continue
-                message = json.loads(raw)
-                kind = message.get("type")
-                if kind == "TurnInfo":
-                    spoken = message.get("words") or []
-                    yield Turn(
-                        event=message["event"],
-                        index=int(message["turn_index"]),
-                        transcript=message.get("transcript") or "",
-                        confidence=float(message.get("end_of_turn_confidence") or 0.0),
-                        window_end=float(message.get("audio_window_end") or 0.0),
-                        first_word_start=float(spoken[0]["start"]) if spoken else None,
-                        last_word_end=float(spoken[-1]["end"]) if spoken else None,
-                        trigger=message.get("trigger"),
-                    )
+                try:
+                    message = json.loads(raw)
+                    kind = message.get("type")
+                    turn = _turn(message) if kind == "TurnInfo" else None
+                except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                    raise SpeechError("speech to text sent a message that cannot be read") from exc
+                if turn is not None:
+                    yield turn
                 elif kind == "Error":
                     raise SpeechError(f"speech to text: {message.get('code')}")
                 elif kind == "ConfigureFailure":
@@ -210,6 +211,20 @@ class FluxListener:
                 await self._ws.send(json.dumps({"type": "CloseStream"}))
             with suppress(Exception):
                 await self._ws.close()
+
+
+def _turn(message: dict) -> Turn:
+    spoken = message.get("words") or []
+    return Turn(
+        event=message["event"],
+        index=int(message["turn_index"]),
+        transcript=message.get("transcript") or "",
+        confidence=float(message.get("end_of_turn_confidence") or 0.0),
+        window_end=float(message.get("audio_window_end") or 0.0),
+        first_word_start=float(spoken[0]["start"]) if spoken else None,
+        last_word_end=float(spoken[-1]["end"]) if spoken else None,
+        trigger=message.get("trigger"),
+    )
 
 
 class FluxSpeaker:
@@ -283,6 +298,8 @@ class FluxSpeaker:
         except TimeoutError:
             logger.warning("no answer to an interrupt within 2 s")
             return None
+        except SpeechError:
+            return None  # the connection is gone, and with it the reply: nothing to ask
         finally:
             self._discarding = False
             self._answer = None
@@ -325,6 +342,12 @@ class FluxSpeaker:
                 self._fail(SpeechError("text to speech closed the connection"))
         except SpeechError as exc:
             self._fail(exc)
+        except Exception:
+            # A message we cannot read, or a mistake of ours in what handles the audio. The
+            # session must hear of it: a reader that dies in silence leaves a reply that
+            # never ends.
+            logger.exception("the voice's reader failed")
+            self._fail(SpeechError("text to speech: its messages could not be handled"))
 
     def _fail(self, error: SpeechError) -> None:
         self._settle(None)

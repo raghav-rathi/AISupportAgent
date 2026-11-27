@@ -3,8 +3,9 @@
     uv run python -m supportagent.evals.speech make DIR     synthesise the test clips into DIR
     uv run python -m supportagent.evals.speech wer DIR      domain sentences, with and without keyterms
     uv run python -m supportagent.evals.speech digits DIR   account numbers with pauses, both modes
-    uv run python -m supportagent.evals.speech pins DIR     the same clips: is the PIN masked in what
-                                                            the recogniser wrote, however it wrote it
+    uv run python -m supportagent.evals.speech pins DIR     the same clips: is every digit of the PIN
+                                                            masked in everything the recogniser wrote
+                                                            on the way, as the app would show it
     uv run python -m supportagent.evals.speech heard A.wav  what a recording says, for comparing a
                                                             cut-off reply with what was stored
 
@@ -31,10 +32,10 @@ from pathlib import Path
 import httpx
 
 from supportagent.config import get_settings
-from supportagent.redact import Redactor, spoken_digits
+from supportagent.redact import Redactor
 from supportagent.voice.deepgram import FluxListener, SpeechConfig, SpeechError
 from supportagent.voice.session import _DIGITS, _USUAL
-from supportagent.voice.text import digit_count, tidy_digits
+from supportagent.voice.text import digit_count, gives_credentials, tidy_digits
 
 _RATE = 16_000
 _FRAME = 2_560  # 80 ms
@@ -205,20 +206,31 @@ def _pcm(path: Path) -> bytes:
 async def _listen(
     pcm: bytes, config: SpeechConfig, settings: dict | None, tail_s: float = 6.0
 ) -> list[dict]:
-    """Play a clip to the recogniser in real time. Returns each turn it ended, with its time."""
+    """Play a clip to the recogniser in real time. Returns each turn it ended, with its time,
+    and under `seen` every transcript it sent on the way there, in order."""
     listener = FluxListener(config)
     await listener.open()
     if settings:
         await listener.configure(**settings)
     ended: list[dict] = []
+    seen: list[str] = []
 
     async def read() -> None:
+        nonlocal seen
         try:
             async for turn in listener.turns():
+                if turn.transcript and turn.transcript not in seen[-1:]:
+                    seen.append(turn.transcript)
                 if turn.event == "EndOfTurn":
                     ended.append(
-                        {"text": turn.transcript, "at_s": turn.window_end, "by": turn.trigger}
+                        {
+                            "text": turn.transcript,
+                            "at_s": turn.window_end,
+                            "by": turn.trigger,
+                            "seen": seen,
+                        }
                     )
+                    seen = []
         except SpeechError:
             pass
 
@@ -299,46 +311,92 @@ async def digits(folder: Path) -> None:
         print(f"{label}: {cut} of {len(names)} cut into pieces, {right} of {len(names)} exact")
 
 
-def _still_shows(pin: str, account: str, masked: str) -> bool:
-    """Whether the PIN can be read in a masked transcript: as digits, spaced out, or in words."""
-    runs = re.findall(r"\d+", spoken_digits(re.sub(r"(?<=\d)[ .,-]+(?=\d)", "", masked)))
-    return any(pin in run for run in runs if run != account)
+_DIGIT_WORDS = "zero oh one two three four five six seven eight nine".split()
+_NUMBER = re.compile(r"\d|\b(?:" + "|".join(_DIGIT_WORDS) + r")\b", re.IGNORECASE)
+
+
+def _marked(text: str, said_before: int) -> tuple[str, int]:
+    """A transcript with every digit replaced by one that says whose it is.
+
+    The clips say the account number first and the PIN after it. So the first eight digits of a
+    clip are the account's, and become 1. Every digit after them is the PIN's, and becomes 9.
+    The redactor goes by how many digits stand where and by the words around them, not by which
+    digits they are, so it treats the marked text as it would the real one. A 9 that is still
+    there afterwards is a digit of the PIN that would have been shown. `said_before` is how
+    many digits of the clip earlier turns held. Returns the text and its own count of digits.
+    """
+    count = 0
+
+    def mark(found: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        mine = said_before + count <= 8
+        if found.group().isdigit():
+            return "1" if mine else "9"
+        return "one" if mine else "nine"
+
+    return _NUMBER.sub(mark, text), count
+
+
+def _shows_pin(masked: str) -> bool:
+    return "9" in masked or bool(re.search(r"\bnine\b", masked, re.IGNORECASE))
 
 
 async def pins(folder: Path) -> list[dict]:
-    """Every transcript of the digit clips through the redactor, as an unverified visitor's words."""
+    """Everything the recogniser writes while the digit clips play, through the redactor.
+
+    Not only the finished transcripts: the page shows the words as they are recognised, so a
+    PIN that is masked once it is whole and readable for a second on the way there is not
+    masked. Each transcript goes through the same steps as in the app, with the redactor in
+    the state the app would have it in: told to expect digits from the start when the customer
+    was asked for them, and from the moment they name what they are giving when they were not.
+    """
     manifest = json.loads((folder / "manifest.json").read_text())
     names = sorted(name for name in manifest if name.startswith("digits_"))
     config = SpeechConfig.from_settings(get_settings())
     kept = []
-    for label, settings in (
-        ("digit mode", _DIGITS),
-        ("usual mode, numerals", _USUAL | {"numerals": True}),
-        ("usual mode, words", _USUAL),
+    for label, settings, asked, verified in (
+        ("asked for them, digit mode", _DIGITS, True, False),
+        ("not asked, numerals", _USUAL | {"numerals": True}, False, False),
+        ("not asked, words", _USUAL, False, False),
+        ("asked again after verifying, digit mode", _DIGITS, True, True),
     ):
         jobs = [_listen(_pcm(folder / f"{n}.wav"), config, settings) for n in names]
-        shown = total = 0
+        shown = total = clips = 0
         for name, ended in zip(names, await _in_batches(jobs), strict=True):
-            account, pin = manifest[name]["digits"][:8], manifest[name]["digits"][8:]
-            redactor = Redactor()  # a new visitor each time, not verified
+            redactor = Redactor(strict=not verified)  # a new customer each time
+            redactor.expecting, redactor.spoken = asked, True
+            said_before = 0
+            leaked = False
             for turn in ended:
-                masked = redactor.text(tidy_digits(turn["text"]), customer=True)
-                total += 1
-                leak = _still_shows(pin, account, masked)
-                shown += leak
-                kept.append(
-                    {
-                        "mode": label,
-                        "clip": name,
-                        "pin": pin,
-                        "heard": turn["text"],
-                        "masked": masked,
-                        "shows": leak,
-                    }
-                )
-                if leak:
-                    print(f"  {name}: {turn['text']!r} -> {masked!r}")
-        print(f"{label}: the PIN can be read in {shown} of {total} transcripts")
+                for text in turn["seen"]:
+                    tidy = tidy_digits(text)
+                    if gives_credentials(tidy):
+                        redactor.expecting = True  # as the voice session does, from here on
+                    marked, count = _marked(tidy, said_before)
+                    masked = redactor.text(marked, customer=True)
+                    total += 1
+                    leak = _shows_pin(masked)
+                    shown += leak
+                    leaked = leaked or leak
+                    kept.append(
+                        {
+                            "mode": label,
+                            "clip": name,
+                            "heard": text,
+                            "marked": marked,
+                            "masked": masked,
+                            "shows": leak,
+                        }
+                    )
+                    if leak:
+                        print(f"  {name}: {text!r} -> {masked!r}")
+                said_before += _marked(tidy_digits(turn["text"]), said_before)[1]
+            clips += leaked
+        print(
+            f"{label}: a digit of the PIN can be read in {shown} of {total} transcripts, "
+            f"in {clips} of {len(names)} clips"
+        )
     return kept
 
 

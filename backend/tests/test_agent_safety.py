@@ -294,15 +294,31 @@ def test_a_reply_the_customer_spoke_over_is_kept_only_as_far_as_they_heard_it():
         HumanMessage("wait", id="h2"),
     ]
     note = "(The customer interrupted me here and heard nothing after this.)"
-    # The reply was complete and confirmed. The same holds when its check never finished: the
-    # unconfirmed text goes, and what the customer heard of it stays.
-    for unchecked in (None, "a1"):
-        repaired = apply(history, repair(history, unchecked, "Refunds take"))
-        assert [type(m) for m in repaired] == [HumanMessage, AIMessage, HumanMessage]
-        assert [m.content for m in repaired] == ["how long?", f"Refunds take {note}", "wait"]
+    # The reply was complete and had passed its check: it stays, as far as it was heard.
+    repaired = apply(history, repair(history, None, "Refunds take"))
+    assert [type(m) for m in repaired] == [HumanMessage, AIMessage, HumanMessage]
+    assert [m.content for m in repaired] == ["how long?", f"Refunds take {note}", "wait"]
     unheard = apply(history, repair(history, "a1", ""))
     assert unheard[1].content == "(The customer interrupted before hearing any of my reply.)"
     assert not any("Annual" in m.content for m in unheard)
+
+
+def test_words_heard_of_an_answer_that_was_never_checked_do_not_become_the_assistants_own():
+    """The customer spoke over an answer while its grounding check ran, and the check never
+    finished. They heard its first words. The conversation says so, and says what they are:
+    unverified. Kept as a reply, they would be a claim that got past the check by being
+    interrupted."""
+    history = [
+        HumanMessage("how much can you refund?", id="h1"),
+        AIMessage("You are entitled to $5,000 back. I will send it today.", id="a1"),
+        HumanMessage("okay", id="h2"),
+    ]
+    repaired = apply(history, repair(history, "a1", "You are entitled to $5,000"))
+    assert [type(m) for m in repaired] == [HumanMessage, AIMessage, HumanMessage]
+    note = repaired[1].content
+    assert note.startswith("(") and note.endswith(")"), "all of it is a note, none a reply"
+    assert '"You are entitled to $5,000"' in note and "never verified" in note
+    assert "send it today" not in note
 
 
 def test_a_finished_conversation_needs_no_repair():

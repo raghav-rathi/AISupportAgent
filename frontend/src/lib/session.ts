@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import type { ClientMessage, FaultInject, ServerEvent } from "./protocol";
 import { planAfterClose } from "./reconnect";
 import { type AppState, initialState, reduce } from "./state";
-import { type Levels, VoiceLink } from "./voice";
+import { type Levels, VoiceLink, newId } from "./voice";
 
 const STORAGE_KEY = "fernhill.session";
 
@@ -39,13 +39,6 @@ function transmit(ws: WebSocket | null, data: string | ArrayBuffer): boolean {
   if (ws?.readyState !== WebSocket.OPEN) return false;
   ws.send(data);
   return true;
-}
-
-/** An ID for one message. The server answers the message under it. */
-function messageId(): string {
-  return typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 export interface Session {
@@ -142,7 +135,8 @@ export function useSession(): Session {
         } else if (event.seq > cursor.current.lastSeq) {
           cursor.current.lastSeq = event.seq;
         }
-        voice.handle(event);
+        // The server turning down this page's start of voice is reported by the voice link.
+        if (voice.handle(event)) return;
         dispatch({ type: "event", event });
         if (event.type === "error" && event.code === "session_expired") startOver();
       };
@@ -203,7 +197,7 @@ export function useSession(): Session {
 
   const say = useCallback(
     (text: string): boolean => {
-      const id = messageId();
+      const id = newId();
       if (!send({ type: "user.message", text, client_id: id })) return false;
       dispatch({ type: "sent", id, text });
       return true;

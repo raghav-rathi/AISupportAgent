@@ -16,9 +16,35 @@ _BULLET = re.compile(r"^\s*(?:[-•]|\d+[.)])\s+", re.MULTILINE)
 _HEADING = re.compile(r"^\s{0,3}(?:#{1,6}|>)\s*", re.MULTILINE)
 _EMPHASIS = re.compile(r"[*`]+|__")
 _WORD = re.compile(r"[a-z0-9']+")
-# The assistant asks for them, or the customer starts to give them.
-_ASKS = re.compile(r"(?i)\baccount number\b|\bPIN\b")
-_GIVES = re.compile(r"(?i)\baccount number\b|\b(?:my|the|our) pin\b|\bpin (?:is|number|code)\b")
+# The assistant asks for them: a sentence that names one and reads as a request, or says that
+# one did not match and is wanted again. A reply that only mentions a PIN, "you can reset your
+# PIN in settings", is not one.
+_NAMED = r"\b(?:account number|PIN)\b"
+_ASKS = re.compile(
+    r"(?i)\b(?:please|provide|share|give|tell|say|read|enter|need|what(?:'s| is| are))\b[^.?!]*"
+    + _NAMED
+    + r"|"
+    + _NAMED
+    + r"[^.?!]*\?|"
+    + _NAMED
+    + r"[^?]*\b(?:again|once more)\b"
+)
+# The customer starts to give them: one is named, and a digit follows or is about to.
+_GIVES = re.compile(
+    r"(?i)\b(?:account number|pin)\b(?:\s+(?:number|code))?(?:\s+(?:is|it's|its|was))?[\s,:]*(?:\d|$)"
+)
+# Nothing but numbers, three digits or more of them, with the little words people put between:
+# someone reading a number out, whether or not anyone asked for it.
+_NUMBER_WORD = r"zero|oh|one|two|three|four|five|six|seven|eight|nine"
+_READING = re.compile(
+    rf"(?i)\W*(?:(?:\d+|{_NUMBER_WORD}|and|then|it's|its|it|is|um|uh|okay|ok|sure|so)\b\W*)+"
+)
+_A_DIGIT = re.compile(rf"(?i)\d|\b(?:{_NUMBER_WORD})\b")
+# One word that is a whole answer. After words of the reply itself in one transcript, a single
+# other word is more often the recogniser's mistake than the customer.
+_SHORT_ANSWERS = frozenset(
+    {"yes", "no", "yeah", "yep", "nope", "okay", "ok", "stop", "wait", "thanks", "sure", "right"}
+)
 _READ_OUT = re.compile(r"(?<!\d)\d(?: \d)+(?!\d)")  # single digits with single spaces between
 
 
@@ -39,13 +65,15 @@ def speakable(text: str) -> str:
 def tidy_digits(transcript: str) -> str:
     """Write a number that was read out digit by digit as one number.
 
-    The recogniser returns "1 0 4 8 2 9 1 7" for an account number read aloud. Twelve digits
-    in a row are an account number and a PIN said in one breath, and come out as the two.
+    The recogniser returns "1 0 4 8 2 9 1 7" for an account number read aloud. More than eight
+    digits in a row are an account number and a PIN said in one breath, and come out as the
+    two. That holds while they are still coming: nine digits are an account number and the
+    first digit of a PIN, and written as one number that digit would be shown.
     """
 
     def join(match: re.Match[str]) -> str:
         digits = match.group().replace(" ", "")
-        return f"{digits[:8]} {digits[8:]}" if len(digits) == 12 else digits
+        return f"{digits[:8]} {digits[8:]}" if len(digits) > 8 else digits
 
     return _READ_OUT.sub(join, transcript)
 
@@ -75,11 +103,22 @@ def digit_count(transcript: str) -> int:
 
 
 def asks_for_credentials(reply: str) -> bool:
+    """Whether a reply asks the customer for the account number or the PIN."""
     return bool(_ASKS.search(reply))
 
 
+def is_speech(rest: str) -> bool:
+    """Whether what is left after the reply's own words is the customer saying something."""
+    said = words(rest)
+    return len(said) >= 2 or (len(said) == 1 and said[0] in _SHORT_ANSWERS)
+
+
 def gives_credentials(transcript: str) -> bool:
-    return bool(_GIVES.search(transcript))
+    """Whether the customer has started to give an account number or a PIN: they name one and
+    go on to say it, or they are reading out digits and nothing else."""
+    if _GIVES.search(transcript):
+        return True
+    return len(_A_DIGIT.findall(transcript)) >= 3 and _READING.fullmatch(transcript) is not None
 
 
 def words(text: str) -> list[str]:

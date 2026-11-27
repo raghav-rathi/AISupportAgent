@@ -72,6 +72,10 @@ class LLMPolicy:
     backoff_base_s: float = 0.5
     backoff_cap_s: float = 4.0
     max_wait_s: float = 5.0  # a Retry-After longer than this goes to the fallback instead
+    # For a call that asks for it: if the model has sent nothing after this long, the same
+    # request goes out a second time, and the answer is whichever of the two starts first.
+    # None: one request, however long its first token takes.
+    hedge_after_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,103 @@ class LLMResult:
     input_tokens: int | None
     output_tokens: int | None
     cost_usd: float | None
+    requests: int = 1  # 2 when a second request went out beside a slow first one
+
+
+def _at_work(chunk: AIMessageChunk) -> bool:
+    """Whether a chunk shows the model at work: text, a piece of a tool call, or reasoning.
+
+    A chunk can carry a content block with empty text, or a key whose value is None, and say
+    nothing. Counting those would stop the first-token clock on a model that is stuck.
+    """
+    return bool(
+        str(chunk.text)
+        or any(
+            piece.get("name") or piece.get("args") or piece.get("id")
+            for piece in chunk.tool_call_chunks
+        )
+        or any(chunk.additional_kwargs.values())
+    )
+
+
+async def _drop(stream: AsyncIterator[AIMessageChunk], waiting: asyncio.Future | None) -> None:
+    """Give up a stream: stop whoever waits on it, then close it."""
+    if waiting is not None:
+        waiting.cancel()
+        with suppress(BaseException):
+            await waiting
+    closer = getattr(stream, "aclose", None)
+    if closer is not None:
+        with suppress(Exception):
+            await closer()
+
+
+async def _first_of_two(
+    make: Callable[[], AsyncIterator[AIMessageChunk]],
+    delay_s: float,
+    on_second: Callable[[], None],
+) -> AsyncIterator[AIMessageChunk]:
+    """One request's stream, or that of a second one sent beside it if the first is slow.
+
+    Most calls get their first token in a quarter of a second. About one in fourteen took
+    more than 0.8 s on the hosted model, and now and then one took five. Nothing in the
+    request explains it: the same request sent again answers at the usual speed. So after
+    `delay_s` without a sign of life the request is sent a second time, and whichever of the
+    two shows the model at work first is the stream. The other is closed. A request that
+    fails before the second went out fails the call, as it would without this. Once both
+    are out, one failing leaves the other.
+    """
+    streams = [make()]
+    kept: list[list[AIMessageChunk]] = [[]]  # what each sent before it showed any sign
+    waiting: dict[asyncio.Future, int] = {asyncio.ensure_future(anext(streams[0])): 0}
+    timer: asyncio.Future | None = asyncio.ensure_future(asyncio.sleep(delay_s))
+    failed: list[BaseException] = []
+    winner: int | None = None
+    ended = False
+    try:
+        while winner is None:
+            pending = set(waiting) | ({timer} if timer is not None else set())
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if timer in done:
+                timer = None
+                on_second()
+                streams.append(make())
+                kept.append([])
+                waiting[asyncio.ensure_future(anext(streams[1]))] = 1
+            for task in done:
+                if task not in waiting:
+                    continue
+                index = waiting.pop(task)
+                try:
+                    chunk = task.result()
+                except StopAsyncIteration:
+                    winner, ended = index, True  # over without a word: the caller's to judge
+                    break
+                except Exception as exc:
+                    failed.append(exc)
+                    if timer is not None or len(failed) == len(streams):
+                        raise failed[0] from None
+                    continue
+                kept[index].append(chunk)
+                if _at_work(chunk):
+                    winner = index
+                    break
+                waiting[asyncio.ensure_future(anext(streams[index]))] = index
+        for task, index in list(waiting.items()):
+            if index != winner:
+                del waiting[task]
+                await _drop(streams[index], task)
+        for chunk in kept[winner]:
+            yield chunk
+        if not ended:
+            async for chunk in streams[winner]:
+                yield chunk
+    finally:
+        if timer is not None:
+            timer.cancel()
+        tasks = {index: task for task, index in waiting.items()}
+        for index, stream in enumerate(streams):
+            await _drop(stream, tasks.get(index))
 
 
 class RetryBudget:
@@ -173,12 +274,15 @@ class ResilientLLM:
         stream_text: bool = True,
         faults: FaultPlan | None = None,
         json_schema: dict[str, Any] | None = None,
+        hedge: bool = False,
     ) -> LLMResult:
         """Run one model call to completion. Raises LLMUnavailable when every model failed.
 
         With `stream_text` false the text is not emitted as deltas. The caller holds it, for
         example until a grounding check has passed. `json_schema` asks the model for a reply in
-        that shape and only applies to a call without tools.
+        that shape and only applies to a call without tools. `hedge` sends the request a second
+        time if its first token is slow, see `LLMPolicy.hedge_after_s`: for a call that someone
+        is waiting for with nothing to look at, which is a spoken turn's first.
         """
         call_id = uuid.uuid4().hex[:12]
         started = time.perf_counter()
@@ -211,9 +315,9 @@ class ResilientLLM:
                 role = "primary" if index == 0 else "fallback"
                 fault = faults.take(role, purpose) if faults else None
                 try:
-                    message, ttft_ms = await self._attempt(
+                    message, ttft_ms, requests = await self._attempt(
                         model, messages, tools, json_schema, call_id, started, deadline, emit,
-                        stream_text, fault,
+                        stream_text, fault, self.policy.hedge_after_s if hedge else None,
                     )  # fmt: skip
                 except _AttemptFailed as failed:
                     failure = failed.failure
@@ -256,6 +360,11 @@ class ResilientLLM:
                 usage = message.usage_metadata or {}
                 input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
                 price = getattr(model, "price", None)
+                cost = price.cost(input_tokens, output_tokens) if price else None
+                if cost is not None and requests > 1:
+                    # The request that lost was read by its provider all the same. What it
+                    # wrote before it was closed is not known, and is little.
+                    cost += price.cost(input_tokens, 0) or 0.0
                 result = LLMResult(
                     message=message,
                     call_id=call_id,
@@ -266,7 +375,8 @@ class ResilientLLM:
                     total_ms=(time.perf_counter() - started) * 1000,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    cost_usd=price.cost(input_tokens, output_tokens) if price else None,
+                    cost_usd=cost,
+                    requests=requests,
                 )
                 emit(
                     LlmFinished(
@@ -280,6 +390,7 @@ class ResilientLLM:
                         input_tokens=result.input_tokens,
                         output_tokens=result.output_tokens,
                         cost_usd=result.cost_usd,
+                        requests=result.requests,
                     )
                 )
                 if self.capture_prompts:
@@ -316,8 +427,10 @@ class ResilientLLM:
         emit: Emit,
         stream_text: bool,
         fault: Fault | None,
-    ) -> tuple[AIMessage, float | None]:
-        """One attempt on one model. Returns the response and the time to its first token.
+        hedge_after_s: float | None = None,
+    ) -> tuple[AIMessage, float | None, int]:
+        """One attempt on one model. Returns the response, the time to its first token, and
+        how many requests it took: two when a second went out beside a slow first.
 
         The time is counted from the start of the call, so it includes failed attempts and waits:
         that is how long the customer looked at an empty reply.
@@ -329,18 +442,28 @@ class ResilientLLM:
         alive = False  # the model has sent something other than an empty opening chunk
         text_went_out = False
         chunks = 0
+        requests = 1
         stream: AsyncIterator[AIMessageChunk] | None = None
+
+        def make() -> AsyncIterator[AIMessageChunk]:
+            if json_schema is None:
+                return aiter(model.stream(messages, tools))
+            return aiter(model.stream(messages, tools, json_schema=json_schema))
+
+        def second() -> None:
+            nonlocal requests
+            requests = 2
+
         try:
             limit = min(self.policy.total_timeout_s, max(0.01, deadline - attempt_started))
             async with asyncio.timeout(limit):
                 if fault and fault.after_chunks == 0:
                     await asyncio.sleep(fault.delay_s)
                     raise InjectedFault(fault.failure)
-                stream = aiter(
-                    model.stream(messages, tools)
-                    if json_schema is None
-                    else model.stream(messages, tools, json_schema=json_schema)
-                )
+                if hedge_after_s is None:
+                    stream = make()
+                else:
+                    stream = _first_of_two(make, hedge_after_s, second)
                 while True:
                     patience = (
                         self.policy.stall_timeout_s
@@ -351,18 +474,16 @@ class ResilientLLM:
                         chunk = await asyncio.wait_for(anext(stream), patience)
                     except StopAsyncIteration:
                         break
-                    # Output means text or a piece of a tool call. A chunk can carry a content
-                    # block with empty text, or a key whose value is None, and say nothing:
-                    # counting those would stop the first-token clock on a model that is stuck.
-                    if str(chunk.text) or any(
-                        piece.get("name") or piece.get("args") or piece.get("id")
-                        for piece in chunk.tool_call_chunks
-                    ):
+                    # Output means text or a piece of a tool call, see `_at_work`.
+                    if _at_work(chunk):
                         alive = True
-                        if ttft_ms is None:
+                        # Reasoning tokens are no visible output yet, and not a first token.
+                        said = str(chunk.text) or any(
+                            piece.get("name") or piece.get("args") or piece.get("id")
+                            for piece in chunk.tool_call_chunks
+                        )
+                        if said and ttft_ms is None:
                             ttft_ms = (time.perf_counter() - call_started) * 1000
-                    elif any(chunk.additional_kwargs.values()):
-                        alive = True  # reasoning tokens: no visible output yet, but not stuck
                     merged = chunk if merged is None else merged + chunk
                     text = str(chunk.text)
                     if text and stream_text:
@@ -391,4 +512,4 @@ class ResilientLLM:
             if closer is not None:
                 with suppress(Exception):
                     await closer()
-        return message, ttft_ms
+        return message, ttft_ms, requests

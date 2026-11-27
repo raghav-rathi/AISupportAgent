@@ -12,14 +12,23 @@ A Redactor masks four things:
   amount, a date or an ID is left alone, so a refund of $47.21 survives a PIN of 4721.
 - A number whose keyed hash the session has stored. A process that picks a session up after a
   reload or a restart has never seen its PINs. The hashes tell it which numbers to mask again.
-- A number next to a word such as "PIN" or "passcode", or right after an account number.
+- A number next to a word such as "PIN" or "passcode", or right after an account number. In the
+  customer's own words this holds for a single digit too: speech arrives a digit at a time,
+  and "my PIN is 4" is the first quarter of one.
 - In strict mode, any number in the customer's own text that could be a PIN: 4 to 7 digits,
   however they are separated or spelled, unless it reads as an amount, a date, an ID or a count of
   something. Strict mode is on while the session has no verified customer, which is when a PIN is
   expected and not yet known.
+- While `expecting` is on, any number of up to 7 digits in the customer's own text. Voice turns
+  it on when the customer has been asked for the account number and the PIN, or starts to give
+  them. What the recogniser has heard so far is shown as it grows, so a PIN said alone passes
+  through "4", "48" and "482" on its way to "4821", and none of those may be shown.
+- In the customer's own text, a message that is nothing but the beginning or the end of a PIN
+  the session has learned: a PIN said in two halves with a long pause between them arrives as
+  two messages.
 
-The last two rules are guesses and can miss an odd phrasing. The first cannot, and it holds from
-the moment the model asks for verification.
+The rules that go by the words around a number are guesses and can miss an odd phrasing. The
+first cannot, and it holds from the moment the model asks for verification.
 """
 
 from __future__ import annotations
@@ -124,6 +133,10 @@ _LABELLED = re.compile(
 )
 # A number at the end of text that is still streaming. It may be the start of a PIN.
 _UNFINISHED_NUMBER = re.compile(r"\d[\d \t\-.,_/:*\u2013\u2014]{0,40}$")
+# A message that is one short number and nothing else: "58.", "2 4".
+_BARE_NUMBER = re.compile(r"\W*(\d(?:[\d\s\-.,]{0,12}\d)?)\W*")
+# Nothing but numbers, as numerals or as words: "9 0", "nine zero three.", "4721".
+_ONLY_NUMBERS = re.compile(rf"\W*(?:(?:\d+|{_WORD})\b\W*)+", re.IGNORECASE)
 # Keys whose values identify something and are never free text.
 _KEPT_KEYS = frozenset(
     {"type", "id", "model", "from_model", "to_model", "source", "name", "account_number", "role"}
@@ -317,6 +330,13 @@ class Redactor:
 
     def __init__(self, *, strict: bool = True, key: bytes = b"", known: Iterable[str] = ()) -> None:
         self.strict = strict
+        # The customer has been asked for an account number and a PIN and is giving them by
+        # voice: any short number in what they say may be part of one. See the module's text.
+        self.expecting = False
+        # The customer is speaking and not typing. What they say arrives a word at a time, so
+        # while nobody is verified, something that is only a number is masked from its first
+        # digit: said alone, a PIN is "nine", then "nine zero", before it is four digits.
+        self.spoken = False
         self._key = key
         self._known: set[str] = set(known)
         self._secrets: dict[str, re.Pattern[str]] = {}
@@ -365,6 +385,8 @@ class Redactor:
             return text
         text = text.replace("\x00", "")  # Postgres cannot store it, and nothing needs it
         strict = customer and guess and self.strict
+        bare = strict and self.spoken and _ONLY_NUMBERS.fullmatch(text) is not None
+        expecting = (customer and guess and self.expecting) or bare
         numbers = _numbers(text)
         runs = [
             (m.start(), m.end(), spoken_digits(m.group()), m.group())
@@ -378,31 +400,58 @@ class Redactor:
                 if customer or not _plainly_not_a_pin(text, match.start(), match.end()):
                     spans.append(match.span())
         for start, end, digits in numbers:
-            if known_only or not 3 <= len(digits) <= 8:
+            if known_only:
+                continue
+            if len(digits) > 8:
+                # Nine to twelve digits written as one, while an account number and a PIN are
+                # expected: the account number with the PIN, or the start of it, on its end.
+                if expecting and len(digits) <= 12 and text[start:end].isdigit():
+                    spans.append((start + 8, end))
                 continue
             cue_before, cue_after = _cue_before(text, start), _cue_after(text, end)
             paired = len(digits) != 8 and bool(_AFTER_ACCOUNT.search(text[:start]))
             cued = cue_before or cue_after or paired
+            if len(digits) < 3 and not (customer and (cued or expecting)):
+                continue  # one or two digits mean something only where a PIN is being given
             if _reads_as_something_else(text, start, end, digits, cue_before=cue_before, cued=cued):
                 continue
-            if cued or (
-                strict and 4 <= len(digits) <= 7 and not _counts_something(text, start, end)
-            ):
+            guessed = (strict and len(digits) >= 4) or expecting
+            if cued or (guessed and len(digits) <= 7 and not _counts_something(text, start, end)):
                 spans.append((start, end))
         for start, end, digits, words in runs:
             count = len([w for w in _WORD_BREAK.split(words) if w])
+            cued = _cue_before(text, start) or _cue_after(text, end)
+            # "Oh" and "a one-off" are words before they are digits. Alone they are masked
+            # only where the customer's words call them a PIN, and "oh" not even then.
+            # While digits are expected, any other single one is masked too. "Oh" and "one"
+            # stay unless the words around them call them a PIN: "Oh, one moment" is what
+            # people say when asked for a number, and the recogniser writes numerals by then.
+            plain = set(_WORD_BREAK.split(words.lower())) <= {"oh", "o", "one", ""}
+            alone = (count == 1 and (digits == "0" or not (cued or bare or expecting))) or (
+                plain and not cued
+            )
             if any(secret in digits for secret in self._secrets) or (
                 not known_only
-                and len(digits) >= 3
-                and count >= 2
                 and (
-                    _cue_before(text, start)
-                    or _cue_after(text, end)
-                    or (strict and len(digits) >= 4)
+                    (len(digits) >= 3 and count >= 2 and (cued or (strict and len(digits) >= 4)))
+                    or (customer and not alone and (cued or expecting))
                 )
             ):
                 spans.append((start, end))
+        if customer and not known_only:
+            spans += self._pieces(text)
         return _mask(text, spans)
+
+    def _pieces(self, text: str) -> list[tuple[int, int]]:
+        """Where a message that is only a number holds the start or the end of a learned PIN."""
+        bare = _BARE_NUMBER.fullmatch(text)
+        if bare is None:
+            return []
+        digits = re.sub(r"\D", "", bare.group(1))
+        for secret in self._secrets:
+            if len(digits) < len(secret) and (secret.startswith(digits) or secret.endswith(digits)):
+                return [bare.span(1)]
+        return []
 
     def data(self, value: Any, *, customer: bool = False, key: str = "") -> Any:
         """A copy of nested dicts and lists with every string redacted and every `pin` masked."""

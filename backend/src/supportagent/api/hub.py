@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel
 
 from supportagent.agent.context import ToolFaults
-from supportagent.agent.tools import TOOL_NAMES
+from supportagent.agent.early import EarlyCall
+from supportagent.agent.graph import first_prompt
+from supportagent.agent.tools import TOOL_NAMES, TOOLS
 from supportagent.api.protocol import FaultInject
 from supportagent.eventlog import EventLog, SessionGone, TurnInProgress
 from supportagent.events import NOT_STREAMED, TURN_ENDED, ProtocolError, TurnFailed
@@ -135,34 +137,62 @@ class SessionHub:
     async def record(self, event: BaseModel, turn_id: str | None) -> BaseModel:
         """Number, store and send an event that no running turn emits: what voice measured.
 
-        The store gets it at once. Events of a running turn that were waiting are written along
-        with it, which changes nothing for them.
+        The store gets it at once, and it alone. Events of a running turn stay queued for the
+        turn's end, where they get their last masking pass, see `EventLog.write_apart`.
         """
-        stamped = self.log.stamp(self.redactor.event(event), turn_id)
+        stamped = self.log.stamp_apart(self.redactor.event(event), turn_id)
         for subscriber in self._subscribers:
             subscriber.offer(stamped)
         for listener in list(self._listeners):
             listener(stamped)
-        await self.log.save(self.redactor)
+        # The write goes through even if whoever asked for it is stopped while it runs. Voice
+        # being turned off in that moment is common: a reply ends, the customer hangs up.
+        # The event has gone out to the clients by now, and a store without it would differ
+        # from what they saw.
+        await asyncio.shield(self.log.write_apart(stamped, self.redactor))
         return stamped
+
+    async def start_early(self, text: str) -> EarlyCall | None:
+        """Start the first model call of the spoken turn that `text` would open.
+
+        Voice calls this when the recogniser first thinks the customer may have finished. If
+        they have, `start_turn` gets the call and the turn uses it. None when no call can be
+        made ahead: a turn is running, so the conversation it would read is not settled, or
+        simulated failures are queued, which have to show in the turn they are meant for.
+        """
+        if self.busy or self._working or self.gone or len(self.faults):
+            return None
+        state = await self.rt.graph.aget_state({"configurable": {"thread_id": self.session_id}})
+        if self.busy or self._working or self.gone:
+            return None  # a turn began while the conversation was being read
+        prompt = first_prompt(state.values, text, self.log.heard, "voice")
+        return EarlyCall(self.rt.llm, prompt, TOOLS, text)
+
+    def let_go(self, early: EarlyCall) -> None:
+        """Give up a call of `start_early` that no turn will use. What it cost is stored."""
+        early.let_go(lambda finished: self.record(finished, None))
 
     def start_turn(
         self,
         text: str | None,
         mode: Literal["text", "voice"],
         client_id: str | None = None,
+        early: EarlyCall | None = None,
     ) -> bool:
         """Start a turn in the background. `text` None resumes one that stopped early.
 
         Returns False when a turn is already running. A session handles one turn at a time.
+        `early` is the turn's first model call if `start_early` made it ahead.
         """
         if self.busy:
+            if early is not None:
+                self.let_go(early)
             return False
         self.busy = self._working = True
         if text is not None:
             self.turns += 1
         self._turn_events = []
-        self._task = asyncio.create_task(self._run(text, mode, client_id, self._task))
+        self._task = asyncio.create_task(self._run(text, mode, client_id, self._task, early))
         return True
 
     async def _run(
@@ -171,6 +201,7 @@ class SessionHub:
         mode: Literal["text", "voice"],
         client_id: str | None,
         previous: asyncio.Task[None] | None,
+        early: EarlyCall | None = None,
     ) -> None:
         started: str | None = None  # the ID of this turn, once an event of it has gone out
         ended = False  # the event that ends the turn has gone out
@@ -204,6 +235,7 @@ class SessionHub:
                 log=self.log,
                 redactor=self.redactor,
                 client_id=client_id,
+                early=early,
             )
         except TurnInProgress:
             # Another process is running a turn on this session.
@@ -236,6 +268,8 @@ class SessionHub:
                         turn_id=started or None,
                     )
                 )
+            if early is not None:
+                self.let_go(early)  # which does nothing if the turn took it
             if self._task is asyncio.current_task():
                 self.busy = self._working = False
                 # Stored events come from Postgres from here on. A save that failed keeps its

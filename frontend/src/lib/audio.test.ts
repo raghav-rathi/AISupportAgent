@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CaptureProcessor, Downsampler } from "../../public/worklets/capture.js";
 import { PlaybackProcessor } from "../../public/worklets/playback.js";
+import { type PageVisibility, type SuspendableContext, keepRunning } from "./audio";
 
 type Message = { type: string; [key: string]: unknown };
 type ChunkMessage = { type: "chunk"; pcm: ArrayBuffer; level: number };
@@ -157,8 +158,17 @@ describe("Downsampler", () => {
     expect(db(rms(out.subarray(160)) / Math.SQRT1_2)).toBeLessThan(-30);
   });
 
+  it("filters as well at 96 and 192 kHz as at 48 kHz", () => {
+    for (const rate of [96000, 192000]) {
+      const out = new Downsampler(rate, 16000).push(sine(10000, rate, rate));
+      expect(db(rms(out.subarray(160)) / Math.SQRT1_2)).toBeLessThan(-30);
+      const kept = new Downsampler(rate, 16000).push(sine(1000, rate, rate));
+      expect(Math.abs(db(rms(kept.subarray(160)) / Math.SQRT1_2))).toBeLessThan(1);
+    }
+  });
+
   it("gives the same samples for 128-sample blocks as for one call", () => {
-    for (const rate of [48000, 44100]) {
+    for (const rate of [48000, 44100, 96000]) {
       const input = noise(BLOCK * 50 + 37);
       const whole = new Downsampler(rate, 16000).push(input);
       const blocks = inBlocks(new Downsampler(rate, 16000), input);
@@ -297,5 +307,106 @@ describe("PlaybackProcessor", () => {
     expect([...played].sort((a, b) => a - b)).toEqual(played);
     expect(player.lastPlayhead()).toMatchObject({ playedMs: 100, bufferedMs: 0 });
     expect(player.drains()).toEqual([{ type: "drained", playedMs: 100 }]);
+  });
+});
+
+class FakeContext implements SuspendableContext {
+  state = "running";
+  resumes = 0;
+  resumeFails = false;
+  private listener: (() => void) | null = null;
+
+  resume(): Promise<void> {
+    this.resumes += 1;
+    return this.resumeFails ? Promise.reject(new Error("not allowed")) : Promise.resolve();
+  }
+  addEventListener(_type: "statechange", listener: () => void): void {
+    this.listener = listener;
+  }
+  removeEventListener(): void {
+    this.listener = null;
+  }
+  /** The browser moves the context to another state. */
+  become(state: string): void {
+    this.state = state;
+    this.listener?.();
+  }
+}
+
+class FakePage implements PageVisibility {
+  shown = true;
+  private onChange: (() => void) | null = null;
+
+  visible(): boolean {
+    return this.shown;
+  }
+  watch(onChange: () => void): () => void {
+    this.onChange = onChange;
+    return () => {
+      this.onChange = null;
+    };
+  }
+  show(shown: boolean): void {
+    this.shown = shown;
+    this.onChange?.();
+  }
+}
+
+describe("keepRunning", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resumes a suspended context and gives up when it stays suspended for 5 s", () => {
+    const context = new FakeContext();
+    const gaveUp = vi.fn();
+    keepRunning(context, new FakePage(), gaveUp);
+    context.become("suspended");
+    expect(context.resumes).toBe(1);
+    vi.advanceTimersByTime(4999);
+    expect(gaveUp).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(gaveUp).toHaveBeenCalledTimes(1);
+    context.become("suspended"); // it no longer watches
+    expect(context.resumes).toBe(1);
+  });
+
+  it("waits while the page is hidden, and is content once the context runs again", () => {
+    const context = new FakeContext();
+    const page = new FakePage();
+    const gaveUp = vi.fn();
+    page.shown = false;
+    keepRunning(context, page, gaveUp);
+    context.become("interrupted");
+    vi.advanceTimersByTime(60_000);
+    expect([context.resumes, gaveUp.mock.calls.length]).toEqual([0, 0]);
+    page.show(true);
+    expect(context.resumes).toBe(1);
+    context.become("running");
+    vi.advanceTimersByTime(60_000);
+    expect(gaveUp).not.toHaveBeenCalled();
+  });
+
+  it("gives up when resuming fails", async () => {
+    const context = new FakeContext();
+    context.resumeFails = true;
+    const gaveUp = vi.fn();
+    keepRunning(context, new FakePage(), gaveUp);
+    context.become("suspended");
+    await Promise.resolve();
+    expect(gaveUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing once it is stopped", () => {
+    const context = new FakeContext();
+    const gaveUp = vi.fn();
+    const stop = keepRunning(context, new FakePage(), gaveUp);
+    stop();
+    context.become("suspended");
+    vi.advanceTimersByTime(60_000);
+    expect([context.resumes, gaveUp.mock.calls.length]).toEqual([0, 0]);
   });
 });

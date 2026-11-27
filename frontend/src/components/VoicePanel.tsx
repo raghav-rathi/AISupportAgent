@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Voice } from "@/lib/state";
 import type { Levels } from "@/lib/voice";
@@ -28,9 +28,13 @@ function Meter({ label, levels, active }: { label: string; levels: Levels; activ
       const scale = window.devicePixelRatio || 1;
       const width = element.clientWidth;
       const height = element.clientHeight;
-      if (element.width !== width * scale || element.height !== height * scale) {
-        element.width = width * scale;
-        element.height = height * scale;
+      // A canvas has whole pixels. Comparing unrounded sizes at a fractional ratio would
+      // reallocate it on every frame.
+      const pixelWidth = Math.round(width * scale);
+      const pixelHeight = Math.round(height * scale);
+      if (element.width !== pixelWidth || element.height !== pixelHeight) {
+        element.width = pixelWidth;
+        element.height = pixelHeight;
       }
       context.setTransform(scale, 0, 0, scale, 0, 0);
       context.clearRect(0, 0, width, height);
@@ -57,65 +61,97 @@ function Meter({ label, levels, active }: { label: string; levels: Levels; activ
   );
 }
 
+/** What a screen reader hears about voice: that it came on, that it went off, and why. */
+function announcement(voice: Voice): string {
+  if (voice.status === "on") return "Voice is on.";
+  if (voice.status === "starting") return "";
+  return voice.notice ? `Voice is off: ${voice.notice}.` : "Voice is off.";
+}
+
 interface Props {
   voice: Voice;
   mic: Levels;
   out: Levels;
-  onInterrupt: () => void;
+  /** Stop what is running: a typed turn, or the voice reply. Null when there is nothing to stop. */
+  onStop: (() => void) | null;
   onEnd: () => void;
   onDismiss: () => void;
 }
 
 /** Voice while it is on: who is making sound, what the assistant is doing, and how to stop it. */
-export function VoicePanel({ voice, mic, out, onInterrupt, onEnd, onDismiss }: Props) {
+export function VoicePanel({ voice, mic, out, onStop, onEnd, onDismiss }: Props) {
+  // The one live region of voice. It changes when voice goes on or off, or with a new reason,
+  // and not when a notice is dismissed or the activity changes: those would talk over the reply.
+  const [said, setSaid] = useState({ status: voice.status, notice: voice.notice, text: "" });
+  if (said.status !== voice.status || said.notice !== voice.notice) {
+    const text = said.status !== voice.status || voice.notice ? announcement(voice) : said.text;
+    setSaid({ status: voice.status, notice: voice.notice, text });
+  }
+  const region = (
+    <p role="status" className="sr-only">
+      {said.text}
+    </p>
+  );
+
   if (voice.status === "off") {
-    if (!voice.notice) return null;
     return (
-      <div className="mx-auto w-full max-w-760 px-24 pb-12">
-        <div role="status" className="flex items-center gap-12 rounded-cards bg-graphite-card px-20 py-12 text-body-sm leading-[1.45]">
-          <Glyph name="alert" />
-          <p className="flex-1">Voice is off: {voice.notice}. You can go on in text.</p>
-          <Button variant="quiet" onClick={onDismiss} className="h-32 px-12">
-            Dismiss
-          </Button>
-        </div>
-      </div>
+      <>
+        {region}
+        {voice.notice ? (
+          <div className="mx-auto w-full max-w-760 px-24 pb-12">
+            <div className="flex items-center gap-12 rounded-cards bg-graphite-card px-20 py-12 text-body-sm leading-[1.45]">
+              <Glyph name="alert" />
+              <p className="flex-1">Voice is off: {voice.notice}. You can go on in text.</p>
+              <Button variant="quiet" onClick={onDismiss} className="h-32 px-12">
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </>
     );
   }
   const starting = voice.status === "starting";
-  const canStop = voice.activity === "speaking" || voice.activity === "thinking";
   return (
-    <section aria-label="Voice" className="mx-auto w-full max-w-760 px-24 pb-12">
-      <div className="flex flex-col gap-12 rounded-cards bg-graphite-card px-20 py-16">
-        <div className="flex flex-wrap items-end gap-x-20 gap-y-12">
-          <Meter label="You" levels={mic} active={voice.activity === "hearing"} />
-          <Meter label="Assistant" levels={out} active={voice.activity === "speaking"} />
-          <p role="status" className="min-w-0 flex-1 pb-4 text-body-sm font-w480">
-            {starting ? "Starting voice…" : ACTIVITY[voice.activity ?? "listening"]}
-          </p>
-          <div className="flex gap-8">
-            {canStop ? (
-              <Button variant="surface" onClick={onInterrupt}>
+    <>
+      {region}
+      <section aria-label="Voice" className="mx-auto w-full max-w-760 px-24 pb-12">
+        <div className="flex flex-col gap-12 rounded-cards bg-graphite-card px-20 py-16">
+          <div className="flex flex-wrap items-end gap-x-20 gap-y-12">
+            <Meter label="You" levels={mic} active={voice.activity === "hearing"} />
+            <Meter label="Assistant" levels={out} active={voice.activity === "speaking"} />
+            {/* Not a live region: it changes with every breath and would talk over the reply. */}
+            <p className="min-w-0 flex-1 pb-4 text-body-sm font-w480">{starting ? "Starting voice…" : ACTIVITY[voice.activity ?? "listening"]}</p>
+            <div className="flex gap-8">
+              {/* Always here while voice is on, so the keyboard focus never falls off it. It is
+                  marked disabled rather than disabled outright: a disabled button drops its focus. */}
+              <Button
+                variant="surface"
+                aria-disabled={onStop === null}
+                aria-keyshortcuts="Space Escape"
+                onClick={onStop ?? undefined}
+                className="aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
+              >
                 <Glyph name="stop" /> Stop
               </Button>
-            ) : null}
-            <Button variant="quiet" onClick={onEnd}>
-              End voice
-            </Button>
+              <Button variant="quiet" onClick={onEnd}>
+                End voice
+              </Button>
+            </div>
           </div>
+          {/* The visitor's words as the recogniser hears them. They become the message when the turn ends. */}
+          <p aria-live="off" className="min-h-[1.45em] break-words text-body-sm leading-[1.45] text-ash-text">
+            {voice.partial ? `“${voice.partial}”` : ""}
+          </p>
+          <p className="text-caption leading-[1.4] text-ash-text">
+            You are talking to an AI assistant. Your speech goes to Deepgram, which turns it into text, and the replies are spoken by a
+            synthetic voice. This demo keeps no audio. It keeps the words, as the text of this conversation.{" "}
+            {voice.bargeIn
+              ? "Speak to interrupt a reply, or use Stop, the space bar or Escape."
+              : "This browser reports no echo cancellation, so speaking over a reply does not stop it. Use Stop, the space bar or Escape."}
+          </p>
         </div>
-        {/* The visitor's words as the recogniser hears them. They become the message when the turn ends. */}
-        <p aria-live="off" className="min-h-[1.45em] break-words text-body-sm leading-[1.45] text-ash-text">
-          {voice.partial ? `“${voice.partial}”` : ""}
-        </p>
-        <p className="text-caption leading-[1.4] text-ash-text">
-          You are talking to an AI assistant. Your speech goes to Deepgram, which turns it into text, and the replies are spoken by a
-          synthetic voice. This demo keeps no audio. It keeps the words, as the text of this conversation.{" "}
-          {voice.bargeIn
-            ? "Speak to interrupt a reply, or use Stop or the space bar."
-            : "This browser reports no echo cancellation, so speaking over a reply does not stop it. Use Stop or the space bar."}
-        </p>
-      </div>
-    </section>
+      </section>
+    </>
   );
 }

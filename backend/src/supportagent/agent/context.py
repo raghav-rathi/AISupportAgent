@@ -11,6 +11,7 @@ from typing import Literal
 
 from psycopg_pool import AsyncConnectionPool
 
+from supportagent.agent.early import EarlyCall
 from supportagent.agent.judge import Judge
 from supportagent.events import Band, LlmFinished
 from supportagent.kb.retrieval import Retriever
@@ -133,3 +134,5 @@ class AgentContext:
     tool_faults: ToolFaults = field(default_factory=ToolFaults)
     usage: TurnUsage = field(default_factory=TurnUsage)
     redactor: Redactor = field(default_factory=Redactor)
+    # The turn's first model call, if voice started it before the turn. See agent/early.py.
+    early: EarlyCall | None = None

@@ -202,6 +202,18 @@ class LlmFinished(_Event):
     input_tokens: int | None
     output_tokens: int | None
     cost_usd: float | None  # None when the model has no price configured
+    # Voice starts a turn's first call while the recogniser is still deciding whether the
+    # customer has finished. This is how long before the turn the call began.
+    early_ms: float | None = None
+    # Started early for a turn that never came: the customer went on speaking. It is stored
+    # without a turn, so that the daily budget counts what it cost.
+    unused: bool = False
+    # The turn was stopped while this call ran. The provider reports no usage for it, so its
+    # cost is unknown, and the daily budget counts it at a fixed amount.
+    cancelled: bool = False
+    # 2 when the first token was slow to come and the request went out a second time beside
+    # the first. Whichever started first is the answer, and the cost counts the prompt twice.
+    requests: int = 1
 
 
 class LlmTrace(_Event):
@@ -417,6 +429,7 @@ class VoiceStarted(_Event):
     type: Literal["voice.started"] = "voice.started"
     input_rate: int  # what the server expects: mono PCM16 at this rate
     output_rate: int  # what the server sends: mono PCM16 at this rate
+    attempt: str = ""  # the `attempt` of the `voice.start` this answers
 
 
 class VoiceStopped(_Event):
@@ -428,6 +441,9 @@ class VoiceStopped(_Event):
     type: Literal["voice.stopped"] = "voice.stopped"
     reason: Literal["client", "idle", "limit", "replaced", "error"]
     message: str = ""
+    # The `attempt` of the `voice.start` that began the voice now ending. A client that has
+    # started voice again by then knows this is not about the new one.
+    attempt: str = ""
 
 
 class VoiceState(_Event):

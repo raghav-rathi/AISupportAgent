@@ -111,6 +111,7 @@ export function Conversation({ state, onSay, onAccount, onRetry, onInspect, onPa
               onInspect={() => onInspect(turn.id)}
               passages={state.passages}
               onPassage={onPassage}
+              voiceOn={state.voice.status === "on"}
             />
           ))}
           {state.pending !== null ? (

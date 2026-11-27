@@ -14,11 +14,14 @@ from pydantic import BaseModel
 
 from supportagent import clock
 from supportagent.agent.context import ToolFaults, TurnUsage
+from supportagent.agent.early import EarlyCall
 from supportagent.agent.graph import user_turn
 from supportagent.crm import world as worlds
 from supportagent.eventlog import HEARTBEAT_S, EventLog
 from supportagent.events import (
+    LlmFinished,
     LlmReset,
+    LlmStarted,
     TurnFailed,
     TurnFinished,
     TurnInterrupted,
@@ -81,9 +84,15 @@ class _Waits:
         # The call whose streamed text is on the customer's screen and not yet confirmed as the
         # answer. If the turn stops here, that text has to be taken back.
         self.open_call: str | None = None
+        # Model calls that have started and not finished, with the time each began.
+        self.running: dict[str, tuple[LlmStarted, float]] = {}
 
     def note(self, event: BaseModel) -> None:
         kind = event.type
+        if kind == "llm.started":
+            self.running[event.call_id] = (event, self._now())
+        elif kind == "llm.finished":
+            self.running.pop(event.call_id, None)
         if kind in ("tool.started", "llm.delta") and self.first_step_ms is None:
             self.first_step_ms = self._now()
         if kind == "llm.delta":
@@ -113,12 +122,14 @@ async def run_turn(
     log: EventLog | None = None,
     redactor: Redactor | None = None,
     client_id: str | None = None,
+    early: EarlyCall | None = None,
 ) -> bool:
     """Run the agent on one customer message. `text` None resumes a turn that stopped early.
 
     Every event is masked, numbered, passed to `on_event` as it happens, and stored. The model
     gets the message as typed. A caller that keeps a session open passes its `log` and `redactor`
-    so both carry over from turn to turn. `client_id` is echoed in `turn.started`.
+    so both carry over from turn to turn. `client_id` is echoed in `turn.started`. `early` is
+    the turn's first model call if voice started it ahead, see agent/early.py.
 
     If the customer spoke over the last reply, the session holds what they had heard of it by
     then. A new turn takes that and keeps that much of the reply in the conversation, and no
@@ -160,6 +171,7 @@ async def run_turn(
         tool_faults=tool_faults,
         redactor=redactor,
         usage=usage,
+        early=early,
     )
 
     def elapsed_ms() -> float:
@@ -207,6 +219,26 @@ async def run_turn(
             )
             return False
         except asyncio.CancelledError:
+            # A model call that was running has been paid for as far as it got, and its
+            # provider will report nothing. It is stored as a call of unknown cost, which
+            # the daily budget counts at a fixed amount. Without this, stopping turns
+            # would be a way to spend without the budget noticing.
+            for call, began in list(waits.running.values()):
+                publish(
+                    LlmFinished(
+                        call_id=call.call_id,
+                        purpose=call.purpose,
+                        model=call.model,
+                        attempts=call.attempt,
+                        used_fallback=False,
+                        ttft_ms=None,
+                        total_ms=elapsed_ms() - began,
+                        input_tokens=None,
+                        output_tokens=None,
+                        cost_usd=None,
+                        cancelled=True,
+                    )
+                )
             # A turn the customer spoke over is finished with: they have moved on.
             can_resume = log.heard is None and await resumable()
             await end(TurnInterrupted(total_ms=elapsed_ms(), resumable=can_resume))

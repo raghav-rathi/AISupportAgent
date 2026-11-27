@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import type { ServerEvent } from "./protocol";
-import { type AppState, heardOf, initialState, reduce, sessionUsage, shownStatus, totalCost, tracesAreStale, turnUsage } from "./state";
+import {
+  type AppState,
+  callSpan,
+  heardOf,
+  initialState,
+  reduce,
+  sessionUsage,
+  shownStatus,
+  totalCost,
+  tracesAreStale,
+  turnUsage,
+} from "./state";
 
 /** Feeds events to the reducer, numbering them as the server would. */
 class Stream {
@@ -86,6 +97,10 @@ const modelDone = (call = "c1", totalMs = 500, purpose = "agent") => ({
   input_tokens: 10,
   output_tokens: 5,
   cost_usd: 0.001,
+  early_ms: null,
+  unused: false,
+  cancelled: false,
+  requests: 1,
 });
 const tool = (id = "k1", name = "issue_refund") => ({ type: "tool.started", tool_call_id: id, name, args: {} });
 const toolDone = (id = "k1", name = "issue_refund", receipt: Record<string, string> | null = null) => ({
@@ -408,12 +423,16 @@ const spokenReply = (more: Record<string, unknown> = {}) => ({
 const direct = (event: Record<string, unknown>) => ({ seq: 0, ts: 0, turn_id: null, ...event }) as ServerEvent;
 
 describe("voice", () => {
-  it("is on only once the server says so, and a new connection starts without it", () => {
+  it("goes on and off only as the voice link says, and a new connection starts without it", () => {
     const s = new Stream().ready("s1", { voice: true });
     expect(s.state.voice).toMatchObject({ offered: true, status: "off" });
     s.state = reduce(s.state, { type: "voice", status: "starting", bargeIn: false });
     expect(s.state.voice).toMatchObject({ status: "starting", bargeIn: false });
-    s.raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 }));
+    // The server's answer alone does not turn voice on: it may answer an earlier start.
+    s.raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000, attempt: "a0" }));
+    expect(s.state.voice.status).toBe("starting");
+    s.state = reduce(s.state, { type: "voice", status: "on" });
+    expect(s.state.voice).toMatchObject({ status: "on", activity: "listening", bargeIn: false });
     s.raw(direct({ type: "voice.state", state: "hearing" })).raw(direct({ type: "stt.partial", text: "How lo" }));
     expect(s.state.voice).toMatchObject({ status: "on", activity: "hearing", partial: "How lo" });
     s.send("t1", spokenTurn());
@@ -422,16 +441,23 @@ describe("voice", () => {
     expect(s.state.voice).toMatchObject({ offered: true, status: "off", activity: null });
   });
 
-  it("says why it went off when the visitor did not turn it off", () => {
-    const s = new Stream().ready("s1", { voice: true }).raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 }));
-    s.raw(direct({ type: "voice.stopped", reason: "idle", message: "voice turned off after a while of silence" }));
-    expect(s.state.voice).toMatchObject({ status: "off", notice: "voice turned off after a while of silence" });
-    s.raw(direct({ type: "voice.started", input_rate: 16000, output_rate: 24000 })).raw(direct({ type: "voice.stopped", reason: "client", message: "" }));
-    expect(s.state.voice.notice).toBeNull();
-    // Asked for and refused: the reason is voice's own, and no message of the visitor's is in doubt.
+  it("is not turned off by the end of an earlier voice or by a refusal of something else", () => {
+    const s = new Stream().ready("s1", { voice: true });
     s.state = reduce(s.state, { type: "voice", status: "starting" });
-    s.refuse("voice_unavailable");
-    expect([s.state.voice.status, s.state.voice.notice, s.state.notice]).toEqual(["off", "no", null]);
+    s.refuse("too_long"); // a typed message, a passage or a fault injection turned down
+    expect([s.state.voice.status, s.state.notice]).toEqual(["starting", "no"]);
+    s.state = reduce(s.state, { type: "voice", status: "on" });
+    s.raw(direct({ type: "voice.stopped", reason: "client", message: "", attempt: "a0" }));
+    expect(s.state.voice.status).toBe("on");
+  });
+
+  it("says why it went off when the visitor did not turn it off, until dismissed", () => {
+    const s = new Stream().ready("s1", { voice: true });
+    s.state = reduce(s.state, { type: "voice", status: "on" });
+    s.state = reduce(s.state, { type: "voice", status: "off", notice: "the microphone was disconnected" });
+    expect(s.state.voice).toMatchObject({ status: "off", activity: null, notice: "the microphone was disconnected" });
+    s.state = reduce(s.state, { type: "dismiss" });
+    expect(s.state.voice.notice).toBeNull();
   });
 
   it("does not take a reply's audio ending for a turn that is running", () => {
@@ -462,5 +488,46 @@ describe("voice", () => {
     s.raw({ seq: 2, ts: 2, turn_id: null, type: "voice.usage", listened_s: 60, cost_usd: 0.0065 } as ServerEvent);
     expect(sessionUsage(s.state.turns, s.state.speechUsd).speechUsd).toBeCloseTo(0.0095);
     expect(s.state.busy).toBe(false);
+  });
+});
+
+describe("model calls started early", () => {
+  it("draws only the part of an early call that lay inside its turn", () => {
+    const s = new Stream().ready().send("t1", spokenTurn(), 100).send("t1", { ...modelDone("c1", 900), early_ms: 240 }, 100.66);
+    expect(callSpan(s.turn.calls[0])).toEqual({ startMs: 0, durationMs: 660 });
+    expect(s.turn.calls[0].finished?.early_ms).toBe(240); // the drawer tags the row with it
+    // Started so early that none of it lay inside the turn.
+    s.send("t1", { ...modelDone("c2", 200), early_ms: 300 }, 100.7);
+    expect(callSpan(s.turn.calls[1])).toEqual({ startMs: 0, durationMs: 0 });
+    // A call started inside the turn is drawn as before.
+    s.send("t1", modelDone("c3", 500), 102);
+    expect(callSpan(s.turn.calls[2])).toEqual({ startMs: 1500, durationMs: 500 });
+  });
+
+  it("keeps a call the Stop cut short, with no tokens and no cost reported", () => {
+    const stoppedCall = { ...modelDone(), cancelled: true, cost_usd: null, input_tokens: null, output_tokens: null };
+    const s = new Stream().ready().send("t1", started()).send("t1", model()).send("t1", stoppedCall).send("t1", interrupted());
+    expect(s.turn.calls[0].finished).toMatchObject({ cancelled: true, cost_usd: null });
+    expect(turnUsage(s.turn)).toMatchObject({ modelCalls: 1, inputTokens: 0, outputTokens: 0, costUsd: null });
+  });
+
+  it("counts the ones never used for the session, once, and the same after a reload", () => {
+    const unused = (seq: number, cost: number) =>
+      ({ seq, ts: 100 + seq, ...modelDone(`e${seq}`, 400), early_ms: 300, unused: true, cost_usd: cost, turn_id: null }) as ServerEvent;
+    const live = new Stream().ready().send("t1", started()).send("t1", finished());
+    live.raw(unused(3, 0.0004)).raw(unused(3, 0.0004)).raw(unused(4, 0.0002)); // the second is a replay
+    expect(live.state.unusedCalls.count).toBe(2);
+    expect(live.state.unusedCalls.costUsd).toBeCloseTo(0.0006);
+    expect(live.state.turns).toHaveLength(1); // they start no turn
+    const usage = sessionUsage(live.state.turns, live.state.speechUsd, live.state.unusedCalls.costUsd);
+    expect(usage.costUsd).toBeCloseTo(0.0016);
+    expect(totalCost(usage)).toBeCloseTo(0.0016);
+    // A reconnect sends the tail again.
+    live.drop().hello("s1", { last_seq: 4 }).raw(unused(4, 0.0002)).caughtUp();
+    expect(live.state.unusedCalls.count).toBe(2);
+    // A reload starts from nothing and gets every stored event.
+    const reloaded = new Stream().hello("s1", { last_seq: 4 }).send("t1", started()).send("t1", finished());
+    reloaded.raw(unused(3, 0.0004)).raw(unused(4, 0.0002)).caughtUp();
+    expect(reloaded.state.unusedCalls).toEqual(live.state.unusedCalls);
   });
 });

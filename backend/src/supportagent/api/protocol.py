@@ -88,6 +88,10 @@ class FaultInject(BaseModel):
 class VoiceStart(BaseModel):
     """Turn voice on for this connection. The server answers with `voice.started` or an `error`.
 
+    Both answers name the `attempt` they belong to, the error as its `client_id`, and so does
+    the `voice.stopped` that ends it. A client that stops and starts again quickly can tell
+    the old voice's last words from the new one's.
+
     After that the client sends mono PCM16 at 16 kHz as binary frames, 80 ms each, and gets the
     reply's audio back the same way. A session has one voice connection: starting voice on
     another one stops the first.
@@ -98,6 +102,7 @@ class VoiceStart(BaseModel):
     # reply, so speech during a reply cannot be taken as an interruption, and the customer
     # interrupts by hand.
     echo_cancellation: bool = True
+    attempt: str = Field(default="", max_length=64)
 
 
 class VoiceStop(BaseModel):
@@ -120,7 +125,12 @@ class VoicePlayhead(BaseModel):
 
 
 class VoiceInterrupt(BaseModel):
-    """The customer stopped the reply by hand. The client has dropped what it had buffered."""
+    """The customer stopped the reply by hand. The client has dropped what it had buffered.
+
+    The server always answers with a `voice.playback` flush, also when nothing was playing.
+    Until that arrives the client plays no audio it receives: those are pieces of the reply
+    that was stopped, sent before the server knew.
+    """
 
     type: Literal["voice.interrupt"]
     played_ms: float = Field(ge=0)

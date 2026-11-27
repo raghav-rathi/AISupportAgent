@@ -71,7 +71,7 @@ export interface ModelCall {
   id: string;
   purpose: "agent" | "judge";
   model: string;
-  atMs: number; // when it started, on the turn's own clock
+  atMs: number; // when it started, on the turn's own clock. A call started before the turn starts at 0.
   attempts: number;
   finished: LlmFinished | null;
 }
@@ -166,6 +166,11 @@ export interface AppState {
   voice: Voice;
   /** What speech cost that belongs to no turn: a greeting, and listening while nobody spoke. */
   speechUsd: number;
+  /**
+   * Model calls started early, for a turn the visitor seemed about to begin, that never came.
+   * Null cost when one of them reported none.
+   */
+  unusedCalls: { count: number; costUsd: number | null };
 }
 
 const noVoice: Voice = { offered: false, status: "off", activity: null, partial: "", bargeIn: true, notice: null };
@@ -191,6 +196,7 @@ export const initialState: AppState = {
   passages: {},
   voice: noVoice,
   speechUsd: 0,
+  unusedCalls: { count: 0, costUsd: 0 },
 };
 
 export type Action =
@@ -201,7 +207,9 @@ export type Action =
   | { type: "looked"; chunkId: string }
   | { type: "reset" }
   | { type: "dismiss" }
-  | { type: "voice"; status: "starting" | "off"; notice?: string | null; bargeIn?: boolean }
+  // Voice status moves only on what the voice link dispatches. It knows which start of voice an
+  // event belongs to, and the events alone do not say.
+  | { type: "voice"; status: Voice["status"]; notice?: string | null; bargeIn?: boolean }
   | { type: "voice-latency"; turnId: string; ms: number };
 
 /** Hand a message that was not accepted back to the composer. */
@@ -246,7 +254,7 @@ export function reduce(state: AppState, action: Action): AppState {
         voice: {
           ...state.voice,
           status: action.status,
-          activity: null,
+          activity: action.status === "on" ? "listening" : null,
           partial: "",
           bargeIn: action.bargeIn ?? state.voice.bargeIn,
           notice: action.notice ?? null,
@@ -314,13 +322,8 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
       voice: { ...noVoice, offered: e.voice, notice: same ? state.voice.notice : null },
     };
   }
-  if (e.type === "voice.started") {
-    return { ...state, voice: { ...state.voice, status: "on", activity: "listening", notice: null } };
-  }
-  if (e.type === "voice.stopped") {
-    const notice = e.reason === "client" ? null : e.message || "it was stopped";
-    return { ...state, voice: { ...state.voice, status: "off", activity: null, partial: "", notice } };
-  }
+  // The voice link acts on these for the start of voice they belong to, and tells the page.
+  if (e.type === "voice.started" || e.type === "voice.stopped") return state;
   if (e.type === "voice.state") return { ...state, voice: { ...state.voice, activity: e.state } };
   if (e.type === "stt.partial") return { ...state, voice: { ...state.voice, partial: e.text } };
   if (e.type === "voice.playback") return state; // for the audio, not for the page
@@ -332,12 +335,7 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     return next.pending && next.pending.epoch < next.epoch ? unsend(next) : next;
   }
   if (e.type === "error") {
-    if (e.code === "voice_unavailable") {
-      return { ...state, voice: { ...state.voice, status: "off", activity: null, partial: "", notice: e.message } };
-    }
-    // Voice that was being turned on did not come on: the server said no to something.
-    const voice: Voice = state.voice.status === "starting" ? { ...state.voice, status: "off" } : state.voice;
-    const next = { ...state, notice: e.message, voice };
+    const next = { ...state, notice: e.message };
     if (e.code === "not_found") {
       const passages = Object.fromEntries(
         Object.entries(state.passages).map(([id, passage]) => [id, passage === "loading" ? "missing" : passage]),
@@ -366,6 +364,12 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
   }
   if (e.type === "voice.usage" || (e.type === "speech.spoken" && !e.turn_id)) {
     return { ...state, speechUsd: state.speechUsd + e.cost_usd };
+  }
+  if (e.type === "llm.finished" && !e.turn_id) {
+    if (!e.unused) return state;
+    const before = state.unusedCalls;
+    const costUsd = before.costUsd == null || e.cost_usd == null ? null : before.costUsd + e.cost_usd;
+    return { ...state, unusedCalls: { count: before.count + 1, costUsd } };
   }
   const live = !state.replaying;
   if (e.type === "turn.started") {
@@ -495,7 +499,13 @@ function applyToTurn(before: Turn, e: ServerEvent): Turn {
         attempts: e.attempts,
         finished: null,
       };
-      const calls = withCall(t, e.call_id, (c) => ({ ...c, model: e.model, attempts: e.attempts, finished: e }), fresh);
+      const calls = withCall(
+        t,
+        e.call_id,
+        // A call started before its turn did is drawn from the turn's start.
+        (c) => ({ ...c, model: e.model, attempts: e.attempts, finished: e, atMs: e.early_ms != null ? 0 : c.atMs }),
+        fresh,
+      );
       return { ...t, calls };
     }
     case "tool.started": {
@@ -680,8 +690,23 @@ export function turnUsage(turn: Turn): Usage {
   };
 }
 
-/** `otherSpeechUsd` is speech that belongs to no turn. */
-export function sessionUsage(turns: Turn[], otherSpeechUsd = 0): Usage & { turns: number; medianMs: number | null } {
+/** Where a finished call sits on its turn's clock: only the part inside the turn is drawn. */
+export function callSpan(call: ModelCall): { startMs: number; durationMs: number } | null {
+  const done = call.finished;
+  if (!done) return null;
+  const durationMs = done.early_ms == null ? done.total_ms : Math.max(0, done.total_ms - done.early_ms);
+  return { startMs: call.atMs, durationMs };
+}
+
+/**
+ * `otherSpeechUsd` is speech that belongs to no turn. `unusedModelUsd` is what model calls that
+ * belong to no turn cost: they count toward the model cost.
+ */
+export function sessionUsage(
+  turns: Turn[],
+  otherSpeechUsd = 0,
+  unusedModelUsd: number | null = 0,
+): Usage & { turns: number; medianMs: number | null } {
   const each = turns.map(turnUsage);
   // A turn that failed or was stopped has a time too, and it says nothing about how long an
   // answer takes.
@@ -692,7 +717,10 @@ export function sessionUsage(turns: Turn[], otherSpeechUsd = 0): Usage & { turns
     toolCalls: each.reduce((sum, u) => sum + u.toolCalls, 0),
     inputTokens: each.reduce((sum, u) => sum + u.inputTokens, 0),
     outputTokens: each.reduce((sum, u) => sum + u.outputTokens, 0),
-    costUsd: each.some((u) => u.costUsd == null) ? null : each.reduce((sum, u) => sum + (u.costUsd ?? 0), 0),
+    costUsd:
+      unusedModelUsd == null || each.some((u) => u.costUsd == null)
+        ? null
+        : each.reduce((sum, u) => sum + (u.costUsd ?? 0), unusedModelUsd),
     speechUsd: each.reduce((sum, u) => sum + u.speechUsd, otherSpeechUsd),
     medianMs: times.length ? times[Math.floor((times.length - 1) / 2)] : null,
   };

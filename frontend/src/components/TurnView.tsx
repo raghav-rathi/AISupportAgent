@@ -199,9 +199,10 @@ interface Props {
   onInspect: () => void;
   passages: Record<string, Passage>;
   onPassage: (chunkId: string) => void; // ask the server for a passage's text
+  voiceOn: boolean; // voice is on in the page
 }
 
-export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages, onPassage }: Props) {
+export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages, onPassage, voiceOn }: Props) {
   const [openSource, setOpenSource] = useState<number | null>(null);
   const running = status === "running";
   const text = turn.answer?.text ?? turn.streaming;
@@ -214,6 +215,8 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
   const usage = turnUsage(turn);
   const receipts = turn.steps.flatMap((step) => (step.kind === "tool" && step.receipt ? [step.receipt] : []));
   const sourceId = `source-${turn.id}`;
+  // A spoken turn is heard while voice is on. Reading it out as well would talk over the voice.
+  const live = turn.mode === "voice" && voiceOn ? "off" : "polite";
 
   const toggleSource = (n: number) => {
     const hit = cited.find((candidate) => candidate.n === n);
@@ -241,7 +244,7 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
 
       <div className="flex flex-col gap-16">
         {/* Each step is a short line, so a screen reader may read them as they come. */}
-        <div aria-live="polite">
+        <div aria-live={live}>
           {turn.steps.length > 0 || thinking || checking || turn.verdict ? (
             <ol className="flex flex-col gap-12 rounded-cards bg-graphite-card px-24 py-20">
               {turn.steps.map((step) => (
@@ -269,7 +272,7 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
         ) : null}
 
         {/* The answer arrives token by token. Busy until it is whole, so it is read out once. */}
-        <div aria-live="polite" aria-busy={running && !turn.answer} className={cutShort ? "opacity-60" : undefined}>
+        <div aria-live={live} aria-busy={running && !turn.answer} className={cutShort ? "opacity-60" : undefined}>
           {text ? <RichText text={text} caret={running && !turn.answer} cites={turn.answer ? cites : undefined} /> : null}
         </div>
 

@@ -102,8 +102,8 @@ class Listening:
 class Speaking:
     """One `/v2/speak` connection."""
 
-    def __init__(self, ws: ServerConnection, query: dict[str, list[str]], pace: float | None):
-        self.ws, self.query, self.pace = ws, query, pace
+    def __init__(self, ws: ServerConnection, query: dict[str, list[str]], fake: FakeDeepgram):
+        self.ws, self.query, self.fake, self.pace = ws, query, fake, fake.pace
         self.messages: list[dict] = []  # what the app sent
         self.warnings: list[str] = []  # what this side refused
         self.replies: list[str] = []  # the text of every reply, in order, as far as it got
@@ -142,11 +142,13 @@ class Speaking:
                         self.replies.append("")
                         await self._send({"type": "SpeechStarted", "speech_id": "s"})
                     self.replies[-1] += message["text"]
+                    if self.fake.mute:
+                        continue  # the text is taken and no audio ever comes
                     for char in message["text"]:
                         self.owed += _HUSH if char == SILENCE else _TONE
                     self._wake.set()
                 elif kind == "Flush":
-                    if self.active and not self.flushed:
+                    if self.active and not self.flushed and not self.fake.mute:
                         self.flushed = True
                         self._wake.set()
                 elif kind == "Interrupt":
@@ -207,6 +209,9 @@ class Speaking:
         if not self.active:
             await self._warn("NO_AUDIO_GENERATED")
             return
+        if self.fake.refuse_interrupts:
+            await self._warn("INVALID_INTERRUPT_OFFSET")
+            return
         made_until = self.start_ms + self.made_ms
         spoken = remaining = None
         played = made_until
@@ -234,6 +239,8 @@ class FakeDeepgram:
         self.speaking: list[Speaking] = []
         self.down = False  # refuse new connections
         self.pace: float | None = None  # see Speaking._make
+        self.mute = False  # take text and make no audio, like a voice that has hung
+        self.refuse_interrupts = False  # answer every interrupt with a warning
         self.keys: list[str | None] = []  # the Authorization header of each connection
         self._server = None
         self._arrived = asyncio.Condition()
@@ -266,7 +273,7 @@ class FakeDeepgram:
             side = Listening(ws, query)
             self.listening.append(side)
         else:
-            side = Speaking(ws, query, self.pace)
+            side = Speaking(ws, query, self)
             self.speaking.append(side)
         async with self._arrived:
             self._arrived.notify_all()

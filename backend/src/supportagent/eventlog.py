@@ -108,6 +108,8 @@ class EventLog:
         # has put it into the conversation. See `keep_heard`.
         self.heard = heard
         self._unsaved: list[BaseModel] = []
+        # Events stamped by `stamp_apart` and not written yet. See `write_apart`.
+        self._apart: list[BaseModel] = []
         # One save at a time. A turn saves at its end, and voice stores events of its own while
         # a turn may be running: two saves that overlap would each drop the other's events from
         # the queue.
@@ -146,7 +148,7 @@ class EventLog:
     @property
     def unsaved(self) -> list[BaseModel]:
         """Events that have a number and are not in the store yet, in order."""
-        return list(self._unsaved)
+        return sorted([*self._unsaved, *self._apart], key=lambda event: event.seq)
 
     async def turn_count(self) -> int:
         """How many customer messages this session has stored."""
@@ -168,6 +170,32 @@ class EventLog:
             self._unsaved.append(stamped)
         return stamped
 
+    def stamp_apart(self, event: BaseModel, turn_id: str | None) -> BaseModel:
+        """Give an event its place in the stream without adding it to the turn's queue.
+
+        For events that no running turn emits: what voice measured. `write_apart` stores it.
+        """
+        self.last_seq += 1
+        stamped = event.model_copy(
+            update={"seq": self.last_seq, "ts": time.time(), "turn_id": turn_id}
+        )
+        self._apart.append(stamped)
+        return stamped
+
+    async def write_apart(self, stamped: BaseModel, redactor: Redactor | None = None) -> None:
+        """Store one event of `stamp_apart` now, and leave a running turn's events queued.
+
+        A turn's events wait for the turn's end, where they are masked once more with every
+        PIN the turn has learned by then. Voice stores events of its own while a turn runs. If
+        writing those took the turn's queue along, the customer's message would be in the
+        store before that last pass, and a PIN the first pass did not recognise would stay.
+        If the write fails the event stays here, and the next save of any kind writes it.
+        """
+        async with self._saving:
+            if stamped in self._apart:  # not written by a save that got here first
+                await self._write([stamped], redactor, None)
+                self._apart.remove(stamped)
+
     async def save(self, redactor: Redactor | None = None, *, release: str | None = None) -> None:
         """Write the events stamped since the last save, and the stream's position.
 
@@ -178,10 +206,16 @@ class EventLog:
         committed, so a failed save loses nothing and the next one writes them.
         """
         async with self._saving:
-            await self._save(redactor, release)
+            # Events of `stamp_apart` whose own write failed go along.
+            apart, turn = list(self._apart), list(self._unsaved)
+            await self._write(sorted([*apart, *turn], key=lambda e: e.seq), redactor, release)
+            del self._unsaved[: len(turn)]
+            for event in apart:
+                self._apart.remove(event)
 
-    async def _save(self, redactor: Redactor | None, release: str | None) -> None:
-        batch = list(self._unsaved)
+    async def _write(
+        self, batch: list[BaseModel], redactor: Redactor | None, release: str | None
+    ) -> None:
         rows = []
         for event in batch:
             if redactor is not None:
@@ -213,7 +247,6 @@ class EventLog:
                 "AND turn_owner IS NOT DISTINCT FROM %s) WHERE id = %s",
                 (self.last_seq, hashes, release, self.owner, self.session_id),
             )
-        del self._unsaved[: len(batch)]
 
     async def since(self, seq: int) -> list[AnyEvent]:
         """The stored events after `seq` that a client is sent, in order."""

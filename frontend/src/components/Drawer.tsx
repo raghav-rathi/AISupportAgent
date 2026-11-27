@@ -8,6 +8,7 @@ import {
   type Passage,
   type Turn,
   type TurnStatus,
+  callSpan,
   heardOf,
   sessionUsage,
   shownStatus,
@@ -64,14 +65,22 @@ interface Bar {
 function timeline(turn: Turn): Bar[] {
   const bars: Bar[] = [];
   for (const call of turn.calls) {
-    if (!call.finished) continue;
+    const span = callSpan(call);
+    const done = call.finished;
+    if (!span || !done) continue;
     const judge = call.purpose === "judge";
+    const notes = [shortModel(call.model)];
+    if (call.attempts > 1) notes.push(`${call.attempts} attempts`);
+    // A call started before the turn shows only the part inside it.
+    if (done.early_ms != null) notes.push(`started ${formatMs(done.early_ms)} early`);
+    if (done.cancelled) notes.push("stopped");
+    if (done.requests > 1) notes.push("asked twice");
     bars.push({
       key: call.id,
       label: judge ? "Grounding check" : "Model",
-      detail: shortModel(call.model) + (call.attempts > 1 ? `, ${call.attempts} attempts` : ""),
-      startMs: call.atMs,
-      durationMs: call.finished.total_ms,
+      detail: notes.join(", "),
+      startMs: span.startMs,
+      durationMs: span.durationMs,
       tone: judge ? "bg-ash-text" : "bg-ivory-text",
     });
   }
@@ -218,7 +227,7 @@ function VoiceSection({ turn }: { turn: Turn }) {
         <Metric
           label="Voice to voice, here"
           value={formatMs(turn.heardAfterMs)}
-          note={turn.heardAfterMs == null ? "measured live in this browser only" : "last loud microphone frame to first sample played"}
+          note={turn.heardAfterMs == null ? "measured live in this browser only" : "last word to first sound from the speaker, as measured here"}
         />
         <Metric
           label="Speech cost"
@@ -323,14 +332,20 @@ function Trace({ trace, call }: { trace: LlmTrace; call: ModelCall | undefined }
         <span className="font-w480">{trace.purpose === "judge" ? "Grounding check" : "Agent"}</span>
         <span className="truncate text-ash-text">{shortModel(trace.model)}</span>
         <span className="ml-auto shrink-0 text-caption tabular-nums text-ash-text">
-          {done ? `${formatCount(done.input_tokens)} in · ${formatCount(done.output_tokens)} out · ${formatMs(done.total_ms)}` : ""}
+          {done
+            ? done.cancelled
+              ? `stopped · ${formatMs(done.total_ms)}`
+              : `${formatCount(done.input_tokens)} in · ${formatCount(done.output_tokens)} out · ${formatMs(done.total_ms)}`
+            : ""}
         </span>
       </summary>
       <div className="flex flex-col gap-16 px-16 pb-16">
         {done ? (
           <div className="flex flex-wrap gap-8">
             <Tag>first token {formatMs(done.ttft_ms)}</Tag>
-            <Tag>{formatCost(done.cost_usd)}</Tag>
+            <Tag>{done.cancelled ? "cost not reported" : formatCost(done.cost_usd)}</Tag>
+            {done.early_ms != null ? <Tag>started {formatMs(done.early_ms)} early</Tag> : null}
+            {done.requests > 1 ? <Tag>asked twice, the first was slow to start</Tag> : null}
             {done.attempts > 1 ? <Tag>{done.attempts} attempts</Tag> : null}
             {done.used_fallback ? <Tag>backup model</Tag> : null}
           </div>
@@ -395,7 +410,8 @@ function Pair({ term, children }: { term: string; children: ReactNode }) {
 }
 
 function SessionPanel({ state }: { state: AppState }) {
-  const usage = sessionUsage(state.turns, state.speechUsd);
+  const usage = sessionUsage(state.turns, state.speechUsd, state.unusedCalls.costUsd);
+  const unused = state.unusedCalls;
   const customer = state.customer;
   return (
     <>
@@ -420,6 +436,16 @@ function SessionPanel({ state }: { state: AppState }) {
           {usage.speechUsd > 0 ? <Pair term="Together">{formatCost(totalCost(usage))}</Pair> : null}
         </dl>
       </Section>
+      {unused.count > 0 ? (
+        <Section title="Voice">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-16 gap-y-12 rounded-cards bg-onyx-canvas p-16 text-body-sm leading-[1.45]">
+            <Pair term="Model calls started early and not used">
+              {unused.count}, {formatCost(unused.costUsd)}
+            </Pair>
+          </dl>
+          <Quiet>Started while you were still speaking, to answer sooner. Their cost is part of the model cost above.</Quiet>
+        </Section>
+      ) : null}
       <Section title="Tickets">
         {state.tickets.length > 0 ? (
           state.tickets.map((ticket) => (

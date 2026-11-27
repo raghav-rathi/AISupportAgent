@@ -93,6 +93,10 @@ export interface LlmFinished {
   input_tokens: number | null;
   output_tokens: number | null;
   cost_usd: number | null;
+  early_ms: number | null;
+  unused: boolean;
+  cancelled: boolean;
+  requests: number;
 }
 
 /** Clients drop the text this call has streamed. Either the attempt failed after some text went out, or the text came with a tool call (`tool_call`) and so is not part of the answer, or the turn was stopped while the text was still unconfirmed (`cancelled`). */
@@ -405,6 +409,7 @@ export interface VoiceStarted {
   type: "voice.started";
   input_rate: number;
   output_rate: number;
+  attempt: string;
 }
 
 export interface VoiceState {
@@ -423,6 +428,7 @@ export interface VoiceStopped {
   type: "voice.stopped";
   reason: "client" | "idle" | "limit" | "replaced" | "error";
   message: string;
+  attempt: string;
 }
 
 /** Stored when voice stops: the microphone time no turn has accounted for yet. */
@@ -517,7 +523,7 @@ export interface UserMessage {
   client_id?: string | null;
 }
 
-/** The customer stopped the reply by hand. The client has dropped what it had buffered. */
+/** The customer stopped the reply by hand. The client has dropped what it had buffered. The server always answers with a `voice.playback` flush, also when nothing was playing. Until that arrives the client plays no audio it receives: those are pieces of the reply that was stopped, sent before the server knew. */
 export interface VoiceInterrupt {
   type: "voice.interrupt";
   played_ms: number;
@@ -531,10 +537,11 @@ export interface VoicePlayhead {
   after?: "tick" | "pause" | "flush" | "drained";
 }
 
-/** Turn voice on for this connection. The server answers with `voice.started` or an `error`. After that the client sends mono PCM16 at 16 kHz as binary frames, 80 ms each, and gets the reply's audio back the same way. A session has one voice connection: starting voice on another one stops the first. */
+/** Turn voice on for this connection. The server answers with `voice.started` or an `error`. Both answers name the `attempt` they belong to, the error as its `client_id`, and so does the `voice.stopped` that ends it. A client that stops and starts again quickly can tell the old voice's last words from the new one's. After that the client sends mono PCM16 at 16 kHz as binary frames, 80 ms each, and gets the reply's audio back the same way. A session has one voice connection: starting voice on another one stops the first. */
 export interface VoiceStart {
   type: "voice.start";
   echo_cancellation?: boolean;
+  attempt?: string;
 }
 
 export interface VoiceStop {

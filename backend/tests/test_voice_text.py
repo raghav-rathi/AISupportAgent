@@ -82,3 +82,81 @@ def test_what_the_customer_said_over_an_echo_is_what_is_left_after_the_replys_wo
         "wait, what about annual plans?"
     )
     assert without_echo("Wait a moment", REPLY) == "Wait a moment"
+
+
+# The same speech on its way: what the recogniser had written a moment before each of the
+# transcripts above was whole, and where it stopped when a pause ended the turn in mid-number.
+# Each is what the page would show at that moment. None may show a digit of the PIN, and where
+# an account number is shown it is all eight digits of it or none.
+ON_THE_WAY = [
+    # Asked for them: every short number is expected to be part of one.
+    ("1 0 4", True, "****"),
+    ("1 0 4 8 2 9 1 7", True, "10482917"),
+    ("1 0 4 8 2 9 1 7 4", True, "10482917 ****"),
+    ("1 0 4 8 2 9 1 7 4 7 2", True, "10482917 ****"),
+    ("4", True, "****"),
+    ("4 7", True, "****"),
+    ("And the PIN is 2 4.", True, "And the PIN is ****."),
+    ("5 8.", True, "****."),
+    ("The dentist three", True, "The dentist ****"),
+    # Not asked: the words say what the number is, or there is nothing but a number.
+    ("My PIN is 4", False, "My PIN is ****"),
+    ("the PIN is four", False, "the PIN is ****"),
+    ("10482917 4", False, "10482917 ****"),
+    ("9", False, "****"),
+    ("nine zero three", False, "****"),
+    # And what is no part of either stays readable.
+    ("I have 2 invoices from March", False, "I have 2 invoices from March"),
+    ("Oh. One moment.", True, "Oh. One moment."),
+]
+
+
+@pytest.mark.parametrize(("heard", "asked", "shown"), ON_THE_WAY)
+def test_no_digit_of_a_pin_is_shown_while_it_is_being_said(heard, asked, shown):
+    redactor = Redactor()  # nobody is verified
+    redactor.spoken, redactor.expecting = True, asked
+    assert redactor.text(tidy_digits(heard), customer=True) == shown
+
+
+def test_typed_numbers_are_masked_as_before_whatever_voice_does():
+    typed = Redactor()
+    assert typed.text("2", customer=True) == "2"
+    assert typed.text("nine zero", customer=True) == "nine zero"
+    assert typed.text("my PIN is 4721", customer=True) == "my PIN is ****"
+
+
+def test_the_second_half_of_a_pin_the_session_knows_is_masked_as_a_message_of_its_own():
+    redactor = Redactor(strict=False)  # verified by now, and voice is off
+    redactor.learn("2458")
+    assert redactor.text("58.", customer=True) == "****."
+    assert redactor.text("24", customer=True) == "****"
+    assert redactor.text("58 seats", customer=True) == "58 seats"
+    assert redactor.text("58.", customer=False) == "58."  # the app's own text is not a message
+
+
+def test_digit_mode_comes_on_for_a_request_and_not_for_a_mention():
+    for asking in (
+        "Please provide your 8-digit account number and your PIN to verify your identity.",
+        "I can help with that. What is your account number?",
+        "That PIN does not match. Please try again.",
+        "To verify you, I need your account number and PIN.",
+    ):
+        assert asks_for_credentials(asking), asking
+    for mentioning in (
+        "You can reset your PIN in settings.",
+        "Your account number and PIN check out. How can I help?",
+        "You are on the Pro plan. Is there anything else?",
+    ):
+        assert not asks_for_credentials(mentioning), mentioning
+
+
+def test_digit_mode_comes_on_when_the_customer_starts_to_give_a_number():
+    for giving in ("My account number is", "my PIN is 4", "1 0 4 8", "one zero four", "okay 1048"):
+        assert gives_credentials(tidy_digits(giving)), giving
+    for other in (
+        "the account number on my invoice is wrong",
+        "I forgot my PIN.",
+        "I have 3 invoices and 2 seats",
+        "one zero",
+    ):
+        assert not gives_credentials(tidy_digits(other)), other

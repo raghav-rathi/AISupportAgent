@@ -34,12 +34,14 @@ from langchain_core.messages import (
 )
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from pydantic import BaseModel
 
 from supportagent.agent.context import AgentContext
+from supportagent.agent.early import prompt_key
 from supportagent.agent.guard import guard
 from supportagent.agent.judge import JudgeError
 from supportagent.agent.prompts import for_prompt, system_prompt
@@ -103,6 +105,15 @@ _INTERRUPTED = "(The previous request was interrupted before I could reply.)"
 # The same for a reply the customer cut off by speaking over it. They heard its beginning.
 _CUT_OFF = "(The customer interrupted me here and heard nothing after this.)"
 _UNHEARD = "(The customer interrupted before hearing any of my reply.)"
+# The same for an answer that was being said while its grounding check still ran, and whose
+# check never finished. The customer heard words nobody had verified.
+_UNVERIFIED = (
+    "(I began to answer and was interrupted before the answer had been checked against the "
+    'help center. The customer heard this much of it: "{heard}" It was never verified, so I '
+    "must not rely on it or repeat it without checking.)"
+)
+# Said in place of the list of what a turn's actions did. Read aloud, that list is IDs.
+_DONE_SPOKEN = " What I have already done for you is on your screen."
 # Tools that change something. If a turn runs out of steps, the customer is told which of them ran.
 _ACTIONS = frozenset({"issue_refund", "update_account_field"})
 
@@ -153,10 +164,12 @@ def _turn_start(messages: Sequence[AnyMessage]) -> int:
     return max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=0)
 
 
-def _as_heard(heard: str) -> str:
+def _as_heard(heard: str, *, verified: bool = True) -> str:
     """A reply as far as the customer heard it, for the model to read."""
     said = heard.strip()
-    return f"{said} {_CUT_OFF}" if said else _UNHEARD
+    if not said:
+        return _UNHEARD
+    return f"{said} {_CUT_OFF}" if verified else _UNVERIFIED.format(heard=said)
 
 
 def repair(
@@ -172,6 +185,9 @@ def repair(
     `heard` is set when the customer spoke over the last reply: it is what they had heard of it
     by then. The conversation keeps that much. Whatever came after it was never said, and a
     model that read the full reply would assume the customer knows things they were not told.
+    If the reply was an answer whose grounding check never finished, what was heard of it is
+    kept as exactly that: words the customer heard and nobody verified. It does not become
+    something the assistant said.
     """
     if not messages or not isinstance(messages[-1], HumanMessage):
         return []
@@ -179,9 +195,11 @@ def repair(
     updates: list[AnyMessage] = []
     answered = {m.tool_call_id for m in earlier if isinstance(m, ToolMessage)}
     last: AnyMessage | None = None  # the message before the new one, once the updates apply
+    never_checked = False
     for message in earlier:
         if unchecked and message.id == unchecked:
             updates.append(RemoveMessage(id=message.id))
+            never_checked = True
             continue
         if isinstance(message, AIMessage) and message.tool_calls:
             calls = [call for call in message.tool_calls if call["id"] in answered]
@@ -201,12 +219,30 @@ def repair(
     if last is not None and not (isinstance(last, AIMessage) and not last.tool_calls):
         # The turn before this one ended without a reply. The note goes where the reply would be,
         # which means taking the new message out and putting it back after the note.
-        note = _INTERRUPTED if heard is None else _as_heard(heard)
+        note = _INTERRUPTED if heard is None else _as_heard(heard, verified=not never_checked)
         updates += [RemoveMessage(id=new.id), AIMessage(note), HumanMessage(new.content)]
     elif last is not None and heard is not None:
         # The reply was complete and approved, and the customer stopped listening part way.
         updates.append(last.model_copy(update={"content": _as_heard(heard)}))
     return updates
+
+
+def first_prompt(
+    values: dict[str, Any], text: str, heard: str | None, mode: str
+) -> list[AnyMessage]:
+    """The prompt of a new turn's first model call, from the conversation as it is stored.
+
+    It takes the steps the turn itself takes: the customer's message joins the conversation,
+    `begin` repairs what an unfinished turn left, and the agent node puts the system prompt
+    in front. Voice uses it to start that call before the turn, see agent/early.py. The agent
+    node compares fingerprints before it accepts such a call, so a step this function gets
+    wrong costs a wasted call and never a wrong answer.
+    """
+    messages = add_messages(values.get("messages") or [], [HumanMessage(text)])
+    repairs = repair(messages, values.get("unchecked"), heard)
+    if repairs:
+        messages = add_messages(messages, repairs)
+    return [SystemMessage(system_prompt(values.get("customer"), mode)), *for_prompt(messages)]
 
 
 async def begin(state: AgentState) -> dict[str, Any]:
@@ -244,9 +280,20 @@ async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
         else:
             emit(event)
 
-    result = await ctx.llm.complete(
-        prompt, tools=TOOLS, emit=emit_but_keep_traces, stream_text=streamed, faults=ctx.faults
-    )
+    early, ctx.early = ctx.early, None
+    if early is not None and steps == 1 and streamed and early.key == prompt_key(prompt):
+        # Voice started this very call while the customer was finishing their sentence.
+        result = await early.result(emit_but_keep_traces)
+    else:
+        result = await ctx.llm.complete(
+            prompt,
+            tools=TOOLS,
+            emit=emit_but_keep_traces,
+            stream_text=streamed,
+            faults=ctx.faults,
+            # A caller waits for a spoken turn's model with nothing to look at.
+            hedge=ctx.mode == "voice",
+        )
     message = result.message
     if message.id is None:
         message = message.model_copy(update={"id": uuid.uuid4().hex})
@@ -609,7 +656,7 @@ async def escalate(state: AgentState, runtime: Runtime[AgentContext]) -> dict[st
     # hear of it: a refund that was issued and never mentioned would be asked for again.
     done = _done_this_turn(state)
     if done:
-        text += " Done so far: " + "; ".join(done) + "."
+        text += _DONE_SPOKEN if spoken else " Done so far: " + "; ".join(done) + "."
     runtime.stream_writer(AssistantMessage(text=text, held=True, hits=[]))
     return {
         "messages": [*_settled(state, runtime.context), AIMessage(text)],

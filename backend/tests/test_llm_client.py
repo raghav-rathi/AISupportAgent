@@ -447,3 +447,60 @@ async def test_a_retry_after_that_is_no_wait_is_ignored_and_a_bare_date_is_read_
     h = Harness(ScriptedModel("only", [http_error(429, retry_after=soon)], OK))
     await h.complete()
     assert 1.0 < h.sleeps[0] <= 3.0
+
+
+HEDGED = LLMPolicy(
+    first_token_timeout_s=2.0, stall_timeout_s=2.0, total_timeout_s=5.0, hedge_after_s=0.05
+)
+
+
+async def test_a_first_token_that_is_slow_to_come_gets_a_second_request_beside_it():
+    slow = [1.0, "Slow", " answer.", usage(100, 5)]
+    quick = ["Quick", " answer.", usage(100, 5)]
+    model = ScriptedModel("m", slow, quick, price=Price(1.0, 2.0))
+    h = Harness(model, policy=HEDGED)
+    started = time.perf_counter()
+    result = await h.complete(hedge=True)
+    assert time.perf_counter() - started < 0.5  # it did not wait for the slow one
+    assert result.message.text == "Quick answer." and result.requests == 2
+    assert len(model.calls) == 2 and result.attempts == 1  # one attempt, asked twice
+    assert [e.text for e in h.events if e.type == "llm.delta"] == ["Quick", " answer."]
+    # The prompt was read twice and is paid for twice. The answer that was used, once.
+    assert result.cost_usd == pytest.approx((100 * 1.0 + 5 * 2.0 + 100 * 1.0) / 1_000_000)
+    assert h.events[-1].requests == 2
+
+
+async def test_a_call_that_starts_in_time_is_asked_once_and_so_is_one_that_did_not_ask_for_two():
+    model = ScriptedModel("m", OK)
+    h = Harness(model, policy=HEDGED)
+    result = await h.complete(hedge=True)
+    assert (result.message.text, result.requests, len(model.calls)) == ("Hello", 1, 1)
+    slow = ScriptedModel("m", [0.2, "Late", " answer.", usage(100, 5)])
+    h = Harness(slow, policy=HEDGED)
+    result = await h.complete()  # a typed turn: someone can see that it is working
+    assert (result.message.text, result.requests, len(slow.calls)) == ("Late answer.", 1, 1)
+
+
+async def test_when_one_of_two_requests_fails_the_other_is_the_answer_and_both_failing_is_a_failure():
+    slow_then_dead = [0.1, http_error(503)]
+    late_but_fine = [0.15, "Fine.", usage(100, 5)]
+    model = ScriptedModel("m", slow_then_dead, late_but_fine)
+    h = Harness(model, policy=HEDGED)
+    result = await h.complete(hedge=True)
+    assert (result.message.text, result.requests, result.attempts) == ("Fine.", 2, 1)
+
+    both = ScriptedModel(
+        "m", [0.1, http_error(503)], [0.1, http_error(503)], ["Third.", usage(1, 1)]
+    )
+    h = Harness(both, policy=HEDGED)
+    result = await h.complete(hedge=True)
+    # Both requests of the first attempt failed: that is one failed attempt, and the retry works.
+    assert (result.message.text, result.attempts) == ("Third.", 2)
+    assert h.types().count("llm.retry") == 1
+
+
+async def test_a_request_that_fails_before_the_second_goes_out_fails_as_it_always_did():
+    model = ScriptedModel("m", [http_error(503)], OK)
+    h = Harness(model, policy=HEDGED)
+    result = await h.complete(hedge=True)
+    assert (result.message.text, result.attempts, result.requests) == ("Hello", 2, 1)

@@ -6,6 +6,7 @@ Run with: uv run uvicorn --factory supportagent.api.app:create_app --host 127.0.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -17,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
 from supportagent.api.hub import Hubs, SessionHub, Subscription, TooManyClients, TooManySessions
-from supportagent.api.limits import Budget, Counter, SlidingWindow, client_address
+from supportagent.api.limits import Allowance, Budget, Counter, SlidingWindow, client_address
 from supportagent.api.protocol import (
     CLIENT_ADAPTER,
     FaultInject,
@@ -212,6 +213,11 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         max_chars=settings.max_message_chars,
     )
     voices: set[VoiceSession] = set()  # the ones that are on, in this process
+    # What one visitor may use of voice. Every start opens two connections to the speech
+    # service, and every second of an open microphone is paid for whether anyone speaks or not.
+    voice_starts = SlidingWindow(settings.max_voice_starts_per_minute, 60.0)
+    voice_lines = Counter(settings.max_voice_sessions_per_address)
+    voice_time = Allowance(settings.voice_seconds_per_address_per_day)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[_normal(origin) for origin in settings.allowed_origins],
@@ -379,7 +385,9 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
                 elif isinstance(message, VoiceStart):
                     if voice is not None:
                         await voice.stop("replaced")
-                    voice = await _on_voice_start(hub, budget, subscription, message, refuse)
+                    voice = await _on_voice_start(
+                        hub, budget, subscription, message, refuse, visitor
+                    )
                 elif isinstance(message, VoiceStop):
                     if voice is not None:
                         await voice.stop("client")
@@ -456,22 +464,43 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         subscription: Subscription,
         message: VoiceStart,
         refuse: Refuse,
+        visitor: str,
     ) -> VoiceSession | None:
-        """Turn voice on for this connection, or say why not."""
+        """Turn voice on for this connection, or say why not. The refusal names the attempt."""
+
+        def no(code: str, why: str) -> None:
+            refuse(code, why, message.attempt)
+
         if speech is None:
-            refuse("voice_unavailable", "it is not set up on this server")
-            return None
+            return no("voice_unavailable", "it is not set up on this server")
+        if not voice_starts.allow(visitor):
+            return no("voice_unavailable", "it was turned on too often, try again in a minute")
         if await budget.exhausted():
-            refuse("budget_exhausted", "the demo has used its budget for today")
-            return None
+            return no("budget_exhausted", "the demo has used its budget for today")
         if await budget.speech_exhausted():
-            refuse("voice_unavailable", "it has used its budget for today")
-            return None
+            return no("voice_unavailable", "it has used its budget for today")
+        left = voice_time.left(visitor)
+        if left <= 0:
+            return no("voice_unavailable", "this address has used its voice time for today")
         if hub.voice is not None:
             await hub.voice.stop("replaced", "it is now on in another window")
         if len(voices) >= settings.max_voice_sessions:
-            refuse("voice_unavailable", "all voice lines are busy")
+            return no("voice_unavailable", "all voice lines are busy")
+        if not voice_lines.take(visitor):
+            return no("voice_unavailable", "it is already on in other windows of yours")
+
+        async def spend(seconds: float) -> str | None:
+            """Count microphone time against the visitor's day, and look at the day's budget."""
+            voice_time.use(visitor, seconds)
+            if voice_time.left(visitor) <= 0:
+                return "this address has used its voice time for today"
+            if await budget.speech_exhausted():
+                return "voice has used its budget for today"
             return None
+
+        def closed(ended: VoiceSession) -> None:
+            voices.discard(ended)
+            voice_lines.give_back(visitor)
 
         async def admit(text: str) -> ProtocolError | None:
             blocked = await _blocked(hub, budget, text, spoken=True)
@@ -481,19 +510,28 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             hub,
             subscription,
             speech,
-            voice_limits,
+            dataclasses.replace(voice_limits, max_seconds=min(voice_limits.max_seconds, left)),
             admit=admit,
+            spend=spend,
             barge_in=message.echo_cancellation,
-            on_closed=voices.discard,
+            attempt=message.attempt,
+            on_closed=closed,
         )
-        voices.add(voice)  # the place is taken before the sockets open
+        # Both places are taken before the sockets open: the count of voices, and the
+        # conversation's one voice. Two windows that ask at the same moment would otherwise
+        # both find the conversation free, and it would get two voices.
+        voices.add(voice)
+        hub.voice = voice
         try:
             await voice.start()
         except SpeechError as exc:
-            voices.discard(voice)
-            logger.warning("voice could not start: %s", exc)
-            refuse("voice_unavailable", "speech is unavailable right now")
-            return None
+            if hub.voice is voice:
+                hub.voice = None
+            if not voice.stopped:
+                closed(voice)
+                logger.warning("voice could not start: %s", exc)
+                no("voice_unavailable", "speech is unavailable right now")
+            return None  # stopped while it was starting: the stop has told the client
         return voice
 
     async def _on_retry(hub: SessionHub, budget: Budget, refuse: Refuse) -> None:

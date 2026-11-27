@@ -22,8 +22,11 @@ interface Props {
   restored: Incoming | null; // a message the server never took: it goes back into the field
   picked: Incoming | null; // credentials of a demo account, chosen here or elsewhere on the page
   onAccount: (account: DemoAccount) => void;
-  /** The microphone, when the server offers voice: whether it is on, and how to switch it. */
-  voice: { on: boolean; ready: boolean; onToggle: () => void } | null;
+  /**
+   * The microphone, when the server offers voice: whether it is on, and how to switch it. While it
+   * is starting the toggle waits. End voice in the voice panel cancels a start.
+   */
+  voice: { on: boolean; starting: boolean; ready: boolean; onToggle: () => void } | null;
 }
 
 function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
@@ -156,7 +159,7 @@ export function Composer({ ready, busy, onSend, onStop, restored, picked, onAcco
             variant={voice.on ? "surface" : "quiet"}
             aria-pressed={voice.on}
             aria-label={voice.on ? "Turn voice off" : "Talk instead of typing"}
-            disabled={!voice.ready}
+            disabled={!voice.ready || voice.starting}
             onClick={voice.onToggle}
             className="max-sm:w-40 max-sm:px-0"
           >

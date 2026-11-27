@@ -99,6 +99,44 @@ class Counter:
             self._held.pop(key, None)
 
 
+class Allowance:
+    """How much of something each key may still use in a stretch of time. For voice seconds.
+
+    The stretch starts with a key's first use and starts again once it has passed. Counted in
+    this process, like the other limits per visitor.
+    """
+
+    def __init__(
+        self,
+        limit: float | None,
+        window_s: float = 86_400.0,
+        clock: Callable[[], float] = time.monotonic,
+        max_keys: int = _MAX_KEYS,
+    ) -> None:
+        self.limit, self.window_s, self._clock, self._max_keys = limit, window_s, clock, max_keys
+        self._used: OrderedDict[str, tuple[float, float]] = OrderedDict()  # since when, how much
+
+    def left(self, key: str) -> float:
+        if self.limit is None:
+            return float("inf")
+        since, used = self._used.get(key, (0.0, 0.0))
+        if key not in self._used or self._clock() - since >= self.window_s:
+            return self.limit
+        return max(0.0, self.limit - used)
+
+    def use(self, key: str, amount: float) -> None:
+        if self.limit is None:
+            return
+        now = self._clock()
+        since, used = self._used.get(key, (now, 0.0))
+        if now - since >= self.window_s:
+            since, used = now, 0.0
+        self._used[key] = (since, used + amount)
+        self._used.move_to_end(key)
+        if len(self._used) > self._max_keys:
+            self._used.popitem(last=False)
+
+
 def client_address(direct: str | None, from_proxy: str | None) -> str:
     """The address to count a visitor by.
 

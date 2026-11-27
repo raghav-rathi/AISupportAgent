@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from supportagent import db
 from supportagent.agent.context import AgentContext, Gate, ToolFaults, TurnUsage
+from supportagent.agent.early import EarlyCall
 from supportagent.agent.graph import build_graph
 from supportagent.agent.judge import Judge, LLMJudge
 from supportagent.config import ModelSettings, Settings
@@ -65,6 +66,7 @@ def llm_policy(settings: Settings) -> LLMPolicy:
         stall_timeout_s=settings.llm_stall_timeout_s,
         total_timeout_s=settings.llm_total_timeout_s,
         deadline_s=settings.llm_deadline_s,
+        hedge_after_s=settings.voice_hedge_after_s,
     )
 
 
@@ -119,6 +121,7 @@ class Runtime:
         tool_faults: ToolFaults | None = None,
         redactor: Redactor | None = None,
         usage: TurnUsage | None = None,
+        early: EarlyCall | None = None,
     ) -> AgentContext:
         """The context for one turn of one session."""
         return AgentContext(
@@ -133,6 +136,7 @@ class Runtime:
             tool_faults=tool_faults or ToolFaults(),
             redactor=redactor or Redactor(),
             usage=usage or TurnUsage(),
+            early=early,
         )
 
     def redactor(self, log: EventLog) -> Redactor:

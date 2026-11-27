@@ -128,8 +128,10 @@ class Settings(BaseSettings):
     # no new turn starts until old spend has aged out. None means no limit of our own.
     daily_budget_usd: float | None = Field(default=None, gt=0)
     # The same for speech, which is another provider's bill. At the limit voice does not come
-    # on and a spoken message starts no turn. Typed messages go on.
-    daily_speech_budget_usd: float | None = Field(default=None, gt=0)
+    # on, a voice session that is on ends, and a spoken message starts no turn. Typed messages
+    # go on. It has a default because a public page with a microphone and no limit is an open
+    # tab on someone's bill. The word null removes it.
+    daily_speech_budget_usd: float | None = Field(default=3.0, gt=0)
     client_address_header: str | None = None  # for example x-real-ip on Railway
     # Conversations and their CRM copies older than this are deleted, hourly. None keeps them.
     session_ttl_hours: float | None = Field(default=None, gt=0)
@@ -158,6 +160,21 @@ class Settings(BaseSettings):
     voice_max_seconds: float = Field(default=600.0, gt=0)  # one voice session
     voice_idle_seconds: float = Field(default=120.0, gt=0)  # nobody says anything
     max_voice_sessions: int = Field(default=4, gt=0)  # at one time, in this process
+    max_voice_sessions_per_address: int = Field(default=2, gt=0)  # of those, for one visitor
+    max_voice_starts_per_minute: int = Field(default=6, gt=0)  # per address
+    # Seconds of voice one address may use in 24 hours. None means no limit of this kind.
+    voice_seconds_per_address_per_day: float | None = Field(default=1800.0, gt=0)
+    # The recogniser's early word that a turn may be over. From this confidence up, the
+    # agent's first model call starts on what has been heard so far, and its result is used
+    # if the turn ends on those words. Lower starts sooner and throws more calls away:
+    # measured on 34 clips, 0.3 started a median of 0.24 s before the end of the turn and 14
+    # calls were for nothing, 0.5 started 0.08 s before it and 3 were. None switches it off.
+    stt_eager_eot_threshold: float | None = Field(default=0.3, ge=0.3, le=0.9)
+    # A spoken turn's model calls are sent a second time if no token has come after this many
+    # seconds, and the answer is whichever of the two starts first. On the hosted model the
+    # first token took 0.25 s at the median, over 0.8 s for one call in fourteen and now and
+    # then five seconds, and a caller hears that as silence. None sends every request once.
+    voice_hedge_after_s: float | None = Field(default=0.45, gt=0)
     # Deepgram's list prices, for the cost the drawer shows and the daily budget counts.
     stt_usd_per_minute: float = Field(default=0.0065, ge=0)
     tts_usd_per_1k_chars: float = Field(default=0.045, ge=0)
