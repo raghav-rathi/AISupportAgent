@@ -3,6 +3,8 @@
     uv run python -m supportagent.evals.speech make DIR     synthesise the test clips into DIR
     uv run python -m supportagent.evals.speech wer DIR      domain sentences, with and without keyterms
     uv run python -m supportagent.evals.speech digits DIR   account numbers with pauses, both modes
+    uv run python -m supportagent.evals.speech pins DIR     the same clips: is the PIN masked in what
+                                                            the recogniser wrote, however it wrote it
     uv run python -m supportagent.evals.speech heard A.wav  what a recording says, for comparing a
                                                             cut-off reply with what was stored
 
@@ -29,6 +31,7 @@ from pathlib import Path
 import httpx
 
 from supportagent.config import get_settings
+from supportagent.redact import Redactor, spoken_digits
 from supportagent.voice.deepgram import FluxListener, SpeechConfig, SpeechError
 from supportagent.voice.session import _DIGITS, _USUAL
 from supportagent.voice.text import digit_count, tidy_digits
@@ -296,6 +299,49 @@ async def digits(folder: Path) -> None:
         print(f"{label}: {cut} of {len(names)} cut into pieces, {right} of {len(names)} exact")
 
 
+def _still_shows(pin: str, account: str, masked: str) -> bool:
+    """Whether the PIN can be read in a masked transcript: as digits, spaced out, or in words."""
+    runs = re.findall(r"\d+", spoken_digits(re.sub(r"(?<=\d)[ .,-]+(?=\d)", "", masked)))
+    return any(pin in run for run in runs if run != account)
+
+
+async def pins(folder: Path) -> list[dict]:
+    """Every transcript of the digit clips through the redactor, as an unverified visitor's words."""
+    manifest = json.loads((folder / "manifest.json").read_text())
+    names = sorted(name for name in manifest if name.startswith("digits_"))
+    config = SpeechConfig.from_settings(get_settings())
+    kept = []
+    for label, settings in (
+        ("digit mode", _DIGITS),
+        ("usual mode, numerals", _USUAL | {"numerals": True}),
+        ("usual mode, words", _USUAL),
+    ):
+        jobs = [_listen(_pcm(folder / f"{n}.wav"), config, settings) for n in names]
+        shown = total = 0
+        for name, ended in zip(names, await _in_batches(jobs), strict=True):
+            account, pin = manifest[name]["digits"][:8], manifest[name]["digits"][8:]
+            redactor = Redactor()  # a new visitor each time, not verified
+            for turn in ended:
+                masked = redactor.text(tidy_digits(turn["text"]), customer=True)
+                total += 1
+                leak = _still_shows(pin, account, masked)
+                shown += leak
+                kept.append(
+                    {
+                        "mode": label,
+                        "clip": name,
+                        "pin": pin,
+                        "heard": turn["text"],
+                        "masked": masked,
+                        "shows": leak,
+                    }
+                )
+                if leak:
+                    print(f"  {name}: {turn['text']!r} -> {masked!r}")
+        print(f"{label}: the PIN can be read in {shown} of {total} transcripts")
+    return kept
+
+
 async def heard(paths: list[Path]) -> None:
     """Print what each recording says, by Deepgram's recogniser for recorded audio."""
     headers = {"Authorization": f"Token {_key()}", "Content-Type": "audio/wav"}
@@ -314,13 +360,17 @@ async def heard(paths: list[Path]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("what", choices=["make", "wer", "digits", "heard"])
+    parser.add_argument("what", choices=["make", "wer", "digits", "pins", "heard"])
     parser.add_argument("paths", nargs="+", type=Path)
     args = parser.parse_args()
     if args.what == "make":
         args.paths[0].mkdir(parents=True, exist_ok=True)
     if args.what == "heard":
         asyncio.run(heard(args.paths))
+    elif args.what == "pins":
+        kept = asyncio.run(pins(args.paths[0]))
+        if len(args.paths) > 1:  # every transcript and what became of it, as JSON
+            args.paths[1].write_text(json.dumps(kept, indent=1))
     else:
         asyncio.run({"make": make, "wer": wer, "digits": digits}[args.what](args.paths[0]))
 

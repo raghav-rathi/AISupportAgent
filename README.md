@@ -318,7 +318,7 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 - `judge` runs the grounding judge on 52 replies whose right verdict is known. Half are correct, half carry one seeded error. For the correct ones it also checks the judge's second finding: whether the reply leaves a Fernhill question open.
 - `suite` runs 55 scripted conversations against the configured model and checks which tools ran, what the database holds afterwards and what the agent said.
 - `bakeoff` runs the suite for several candidate models and picks one by a rule fixed in advance: at least 95% of scenarios, then the fastest tool chain, then the lower cost. Every candidate runs without a fallback, is graded by another model, and gets the app's default time limits whatever the environment says. The speed that is compared leaves out the grounding check, because another model runs it.
-- `speech` measures Deepgram itself: `wer` reads 20 sentences of this domain to the recogniser with and without the key terms, `digits` reads 20 account numbers and PINs with pauses in digit mode and in the usual mode, `heard` transcribes a recording. `make` synthesises the clips. It needs `DEEPGRAM_API_KEY`.
+- `speech` measures Deepgram itself: `wer` reads 20 sentences of this domain to the recogniser with and without the key terms, `digits` reads 20 account numbers and PINs with pauses in digit mode and in the usual mode, `pins` puts every transcript of those clips through the redactor, `heard` transcribes a recording. `make` synthesises the clips. It needs `DEEPGRAM_API_KEY`.
 - `cli.voice_client` is the scripted caller described under Talk to it. The voice figures below are its output.
 
 ### Results so far
@@ -327,7 +327,7 @@ Hosted models through OpenRouter. The bake-off, retrieval and gate rows are from
 
 | Check | Result |
 |---|---|
-| Tests | 482 backend and 51 frontend pass, locally and in CI |
+| Tests | 494 backend and 51 frontend pass, locally and in CI |
 | Bake-off, 55 conversations run 3 times | Gemma 4 31B passed 164 of 165 with a median tool chain of 2.0 s at $0.0005 a turn, and is the agent model. Gemini 3.6 Flash passed 156 and GPT-6 Luna 155. |
 | Scenario suite after the hardening pass, 55 conversations once | 54 passed, interval 90.4% to 99.7%. From the customer's message: first sign of work after 0.4 s, approved answer after 2.6 s at the median and 5.2 s at the 95th percentile. |
 | Grounding judge, Gemini 3.6 Flash, 52 replies run twice | 0 misses on 52 seeded errors, 0 false alarms on 52 correct replies. Of the replies that leave a question open, 8 of 8 were flagged. Of the others, 1 of 44, a "that is on another plan" reply, which code now exempts. |
@@ -356,6 +356,7 @@ On the deployed backend, on 2026-11-27, with `supportagent.cli.voice_client` run
 | What is stored of a reply that was cut off, 11 replies | The same words that were played | Never more than was played. The same words in 5, one word short in 5, two words short in 1. The audio the caller had played was transcribed and compared. |
 | Account number and PIN said with pauses of 0.7 to 2.0 s, 20 clips | None cut into pieces in digit mode | 0 of 20 cut in digit mode, and 19 of 20 with every digit right. With the usual settings 19 of 20 were cut. |
 | Word error rate on 20 sentences of this domain, 173 words | reported | 0.0% with the key terms, 0.6% without: "Fernhill" came out as "Ferdhill" once |
+| A spoken PIN in what the recogniser wrote, the same 20 clips heard three ways: in digit mode, cut into pieces as numerals, cut into pieces as words | Masked in every transcript | The PIN could be read in 0 of 132 transcripts after the redactor. Seven of them are kept as a test. |
 | One memory across modes | A typed question after a spoken identity check is answered for that customer | Yes, by the scripted caller and in a browser |
 | Browser | | Chrome with a recording as its microphone, on the public address: spoken turns, the live transcript, Stop, an interruption by speech, a simulated speech failure, and on in text |
 
