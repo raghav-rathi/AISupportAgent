@@ -665,6 +665,59 @@ async def test_a_turn_that_fails_after_some_of_its_answer_was_heard_says_so_and_
     await caller.ws.close()
 
 
+async def heard_then_failed(serve, speech, *after: list):
+    """A call whose first answer was heard in part before its turn failed without a verdict,
+    up to where the voice has said so. From there the judge approves what it is shown.
+    Returns the caller, the recogniser's side and the model."""
+    caller, ear, rt, model = await answering(serve, speech, NoVerdict(), *after)
+    await caller.played(500)
+    rt.judge.let.set()
+    assert await caller.playback() == "flush"
+    await caller.send(type="voice.playhead", played_ms=500, after="flush", epoch=1)
+    await caller.until("turn.failed")
+    await eventually(lambda: len(speech.replies) == 2)
+    await caller.hear(ms_of(ANSWER) + ms_of(TOOK_BACK_FAILED))
+    await caller.played(500 + ms_of(TOOK_BACK_FAILED), after="drained")
+    rt.judge = SlowJudge(GROUNDED)
+    rt.judge.let.set()
+    return caller, ear, model
+
+
+async def test_what_was_heard_of_a_failed_answer_is_not_written_over_a_typed_turns_answer(
+    serve, speech
+):
+    typed = "You have 14 days from the date of the invoice."
+    caller, ear, model = await heard_then_failed(serve, speech, say(typed), say("Glad to help."))
+    # The customer types the question instead. That turn reads the conversation as the failed
+    # one left it, and its answer stands.
+    await caller.say("How long do I have?")
+    await caller.until("turn.finished")
+    await ask(caller, ear, "Thanks, that is all.")
+    await caller.until("turn.finished")
+    # The spoken turn after it finds that answer whole. The words heard of the failed one
+    # used to be put in its place, and as words the assistant had said and stood by.
+    history = [str(m.content) for m in model.calls[2][0]]
+    assert history[-2:] == [typed, "Thanks, that is all."]
+    await caller.ws.close()
+
+
+async def test_what_was_heard_of_a_failed_answer_is_not_written_over_it_once_a_retry_confirms_it(
+    serve, speech
+):
+    caller, ear, model = await heard_then_failed(serve, speech, say("Glad to help."))
+    # Try again: the check runs once more, the answer stands, and this time they hear all of it.
+    await caller.send(type="turn.retry")
+    await caller.until("turn.finished")
+    await caller.hear(2 * ms_of(ANSWER) + ms_of(TOOK_BACK_FAILED))
+    await caller.played(500 + ms_of(TOOK_BACK_FAILED) + ms_of(ANSWER), after="drained")
+    assert (await caller.until("speech.spoken"))["interrupted"] is False
+    await ask(caller, ear, "Thanks, that is all.")
+    await caller.until("turn.finished")
+    history = [str(m.content) for m in model.calls[1][0]]
+    assert history[-2:] == [ANSWER, "Thanks, that is all."]
+    await caller.ws.close()
+
+
 async def test_an_answer_that_waited_behind_one_moment_and_was_never_said_is_not_kept_as_heard(
     serve, speech
 ):

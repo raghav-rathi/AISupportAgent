@@ -341,12 +341,18 @@ class SessionHub:
         self._task.cancel()
         return True
 
-    async def stop(self) -> None:
-        """Stop the running turn and wait until it has been stored and tidied up."""
+    async def stop(self, turn_id: str | None = None) -> None:
+        """Stop the running turn and wait until it has been stored and tidied up.
+
+        With `turn_id`, only that turn is stopped. If another one runs by now, it is not the
+        caller's to stop: it is left alone, and nothing is waited for.
+        """
         task = self._task
         if task is None:
             return
         if self.busy and not task.done():
+            if turn_id is not None and self.current != turn_id:
+                return
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -355,13 +361,17 @@ class SessionHub:
 
         `heard` is the part of the reply that had been played to them, which may be nothing.
         `turn_id` names the turn the reply belongs to, see `EventLog.keep_heard`.
-        A turn that is still running is cancelled, and this returns once it is stored and the
-        session is free. The next turn, spoken or typed, puts `heard` into the conversation in
-        place of the full reply, so the model does not assume the customer knows what they
-        were never told. The turn that was cut off is not offered for picking up again.
+        If that turn is still running it is cancelled, and this returns once it is stored and
+        the session is free. A turn that has started since is not touched. Voice hears of a
+        turn's end a moment after the session is free again, and by then a typed message may
+        have started the next one: a note about the reply before must not stop it.
+
+        The next turn, spoken or typed, puts `heard` into the conversation in place of the
+        full reply, so the model does not assume the customer knows what they were never
+        told. The turn that was cut off is not offered for picking up again.
         """
         await self.log.keep_heard(heard, turn_id)
-        await self.stop()
+        await self.stop(turn_id)
 
     async def attach(self, last_seq: int) -> tuple[list[BaseModel], Subscription, int]:
         """Subscribe a client. Returns what it missed, its subscription, and the stream's position.

@@ -7,6 +7,10 @@ activity detector and no end-of-turn timer of our own.
 `FluxSpeaker` is text to speech on `/v2/speak`: text in, audio out. On an interruption it says
 which words had been played, which is what goes into the conversation in place of the full reply.
 
+Both sockets are opened with `mip_opt_out=true`, which keeps a request out of Deepgram's model
+improvement program. By its documentation the audio and text of such a request are retained
+only for as long as it takes to process them. The page says so before the microphone opens.
+
 What the service does was read in its documentation and then tried against the live service,
 because three things matter here and the documentation is thin or wrong on them:
 
@@ -138,6 +142,7 @@ class FluxListener:
             ("model", self._config.stt_model),
             ("encoding", "linear16"),
             ("sample_rate", str(self._config.input_rate)),
+            ("mip_opt_out", "true"),
             *(("keyterm", term) for term in self._config.keyterms),
         ]
         if self._config.eager_eot_threshold is not None:
@@ -255,6 +260,7 @@ class FluxSpeaker:
             "model": self._config.tts_model,
             "encoding": "linear16",
             "sample_rate": str(self._config.output_rate),
+            "mip_opt_out": "true",
         }
         self._ws = await _open(f"{self._config.base_url}/v2/speak?{urlencode(query)}", self._config)
         self._reader = asyncio.create_task(self._read())

@@ -19,7 +19,8 @@ speaks the agent's answer. Four rules decide what it does.
    grounding check is still running, the voice stops and the check runs on. What they said waits
    the second that takes. If the check fails, they hear the correction before anything else.
 4. Numbers get time. While the customer gives an account number or a PIN the recogniser waits
-   out their pauses, and the turn ends when the digits are in.
+   out their pauses, and the turn ends when the digits are in and what was heard of them has
+   stopped changing.
 
 All of it runs in one loop that takes one thing at a time: a message from the recogniser, an
 event of the agent's turn, a report from the client's player, a tick of the clock. Audio does not
@@ -119,7 +120,7 @@ _HUSH_CHUNKS = 2
 _HUSH_ARMED_AFTER = 6  # pieces of microphone audio heard during playback before the level counts
 _HUSH_MISSES = 2  # pauses that were for nothing before the level is no longer trusted
 _DIGITS_WANTED = 12  # an account number and a PIN
-_DIGITS_SETTLED_S = 0.6  # no new digit for this long: they are all in
+_DIGITS_SETTLED_S = 0.6  # nothing new in what was heard for this long: the number is in
 _MIC_SILENT_S = 8.0  # no audio from the client for this long: the microphone is gone
 _AHEAD_S = 5.0  # audio may arrive this much faster than time passes, and no more
 _FRAME_BYTES = (320, 32_000)  # one piece of microphone audio: 10 ms to 1 s
@@ -337,6 +338,7 @@ class VoiceSession:
         self._tasks: list[asyncio.Task[None]] = []
         self._hearing: asyncio.Task[None] | None = None
         self._closing: set[asyncio.Task[None]] = set()  # connections being closed
+        self._flooded: asyncio.Task[None] | None = None  # the shutdown after the inbox ran over
         self._lines: set[_Line] = set()  # connections that have a reply and are not closed
         self._listeners = 0  # goes up when the recogniser's socket is opened again
         self._listener = FluxListener(config)
@@ -376,7 +378,8 @@ class VoiceSession:
         self._waits_out = False  # in digit mode: the recogniser is told never to end the turn
         self._owed_digits = 0  # replies to go that keep digit mode on without asking again
         self._digits_seen = 0
-        self._digits_at = 0.0
+        self._digits_heard: list[str] = []  # the words of the turn while it holds a number
+        self._digits_at = 0.0  # when those last changed
         self._ending = False  # we have asked the recogniser to end the turn
         self._early: EarlyCall | None = None  # the model call started on the turn so far
         self._said: _Said | None = None
@@ -580,10 +583,15 @@ class VoiceSession:
             self._inbox.put_nowait((kind, payload))
         except asyncio.QueueFull:
             # Nothing of ours fills it. A client that sends reports by the thousand does.
-            logger.warning("voice in session %s was flooded", self._hub.session_id)
-            task = asyncio.create_task(self._shutdown("error", "it ran into a problem"))
-            self._closing.add(task)
-            task.add_done_callback(self._closing.discard)
+            # The shutdown is kept apart from `_closing`. It waits for everything in there,
+            # and among them it waited for itself: voice never said it had stopped, and its
+            # line was never given back.
+            if self._flooded is None:
+                logger.warning("voice in session %s was flooded", self._hub.session_id)
+                self._flooded = asyncio.create_task(
+                    self._shutdown("error", "it ran into a problem")
+                )
+                self._flooded.add_done_callback(_retrieve)
 
     async def feed(self, audio: bytes) -> None:
         """Microphone audio from the client: mono PCM16 at the input rate."""
@@ -1061,6 +1069,7 @@ class VoiceSession:
         self._forget_early()
         self._utterance, self._active_at = turn.index, now
         self._digits_seen, self._digits_at, self._ending = 0, now, False
+        self._digits_heard = []
         self._echo_of = self._over_echo = None
         self._worded = False
         self._warm()  # whatever they say, a reply will follow it
@@ -1163,8 +1172,14 @@ class VoiceSession:
         digits = wording.digit_count(said)
         if digits:
             self._forget_early()  # a number may not be finished
-        if digits != self._digits_seen:
-            self._digits_seen, self._digits_at = digits, now
+        heard = wording.reading(said)
+        if heard != self._digits_heard:
+            # Anything new says they are still at it: one more digit, a digit the recogniser
+            # has put right, a word after the number. Going by the count of digits alone, the
+            # turn was ended 0.6 s after the twelfth, also in the middle of a correction.
+            # How the number is spaced and pointed is nothing new, see `reading`.
+            self._digits_heard, self._digits_at = heard, now
+        self._digits_seen = digits
         # A sentence without a digit in it is the recogniser's to end, the way it ends any
         # other: it looks at every piece of audio, and this loop only at what it reports four
         # times a second. Measured live, turns ended half a second sooner that way. The moment
@@ -1393,6 +1408,11 @@ class VoiceSession:
             await self._on_refusal(event)
             return
         if kind == "turn.started":
+            # What was heard of a failed turn's unchecked answer waits for the next spoken
+            # turn, which takes it before it starts, see `_begin`. A turn that starts while
+            # it still waits was typed, and has read the conversation without it. Put in
+            # after that turn, the note would be written over that turn's answer.
+            self._unverified = None
             if event.mode == "voice":
                 self._voice_turns.add(turn_id)
                 self._turn_id, self._drafts = turn_id, {}
@@ -1470,6 +1490,10 @@ class VoiceSession:
             await self._turn_over()
         elif kind == "turn.finished":
             self._took_back.pop(turn_id, None)
+            if self._unverified is not None and self._unverified[0] == turn_id:
+                # The failed turn was picked up again and has ended with an answer that
+                # stood, or with what took its place. Nothing of it is left unverified.
+                self._unverified = None
             self._speech_end = None
             await self._turn_over()
 

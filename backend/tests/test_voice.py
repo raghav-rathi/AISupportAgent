@@ -291,6 +291,72 @@ async def test_an_account_number_gets_time_and_no_digit_of_the_pin_is_ever_shown
     await caller.ws.close()
 
 
+async def test_a_number_is_not_cut_off_while_what_is_heard_of_it_still_changes(serve, speech):
+    model = ScriptedModel(
+        "m", say("I can help. What are your account number and PIN?"), say("Thanks.")
+    )
+    _, address = await serve(model, **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, "I need a refund")
+    await caller.until("turn.finished")
+    await caller.hear(ms_of(speech.replies[-1]))
+    await caller.played(caller.audio_ms, after="drained")
+    await caller.until("speech.spoken")
+
+    # All twelve digits are there at once, the last of them misheard. The recogniser puts it
+    # right and the customer goes on speaking: for a second the count of digits stays at twelve
+    # while what is heard keeps changing.
+    await caller.mic(25)
+    digits = "1 0 4 8 2 9 1 7 4 7 2"
+    await ear.say("StartOfTurn", f"{digits} 9")
+    for more in ("1", "1 that", "1 that is", "1 that is my", "1 that is my PIN"):
+        await asyncio.sleep(0.2)
+        await ear.say("Update", f"{digits} {more}")
+    assert {"type": "ForceEndTurn"} not in ear.messages
+    # Then nothing new comes, and the app ends the turn itself on the words as they stand.
+    turn = await caller.until("turn.started")
+    assert {"type": "ForceEndTurn"} in ear.messages
+    assert "4721" not in turn["text"]
+    await caller.until("turn.finished")
+    assert model.calls[1][0][-1].content == "10482917 4721 that is my PIN"
+    await caller.ws.close()
+
+
+async def test_a_number_is_ended_while_the_recogniser_only_changes_how_it_writes_it(serve, speech):
+    model = ScriptedModel(
+        "m", say("I can help. What are your account number and PIN?"), say("Thanks.")
+    )
+    _, address = await serve(model, **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, "I need a refund")
+    await caller.until("turn.finished")
+    await caller.hear(ms_of(speech.replies[-1]))
+    await caller.played(caller.audio_ms, after="drained")
+    await caller.until("speech.spoken")
+
+    # What the live recogniser does once the last digit is in: for a second or more it goes
+    # back and forth between two ways of writing the same number.
+    await caller.mic(25)
+    ways = ("1 0 4 8 2 9 1 7 4 7. 2 1", "1 0 4 8 2 9 1 7 4 7 2 1")
+    await ear.say("StartOfTurn", ways[0])
+    ended_after = None
+    for update in range(1, 11):
+        await asyncio.sleep(0.2)
+        if {"type": "ForceEndTurn"} in ear.messages:
+            ended_after = update
+            break
+        await ear.say("Update", ways[update % 2])
+    # The turn is ended while the writing still changes, and not when it has come to rest.
+    assert ended_after is not None
+    await caller.until("turn.started")
+    await caller.until("turn.finished")
+    await caller.ws.close()
+
+
 async def test_asked_for_a_number_the_customer_may_say_something_else_first(serve, speech):
     model = ScriptedModel(
         "m", say("What are your account number and PIN?"), say("Take your time."), say("Thanks.")

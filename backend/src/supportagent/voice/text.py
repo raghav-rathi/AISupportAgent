@@ -187,6 +187,23 @@ def digit_count(transcript: str) -> int:
     return sum(ch.isdigit() for ch in _SIZE_OF_A_NUMBER.sub("", transcript))
 
 
+def reading(transcript: str) -> list[str]:
+    """The words of a transcript, with a number in one piece however it is written.
+
+    For telling whether the customer has said anything new. Once the last digit of a number
+    is in, the live recogniser goes on changing how it writes it for a second or so: "7 4. 9
+    9", then "7 4 9 9", then the first again. Those read the same. A digit it has put right
+    does not, and neither does a word that follows the number.
+    """
+    out: list[str] = []
+    for word in words(transcript):
+        if word.isdigit() and out and out[-1].isdigit():
+            out[-1] += word
+        else:
+            out.append(word)
+    return out
+
+
 def asks_for_credentials(reply: str) -> bool:
     """Whether a reply asks the customer for the account number or the PIN."""
     return bool(_ASKS.search(reply))

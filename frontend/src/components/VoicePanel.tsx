@@ -19,7 +19,8 @@ const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 
 const DISCLOSURE =
   "You are talking to an AI assistant. Your speech goes to Deepgram, which turns it into text, and the replies are spoken by a " +
-  "synthetic voice. This demo keeps no audio. It keeps the words, as the text of this conversation.";
+  "synthetic voice. Deepgram is asked not to keep your audio once it has processed it. This demo keeps no audio. It keeps the " +
+  "words, as the text of this conversation.";
 
 function useReducedMotion(): boolean {
   return useSyncExternalStore(

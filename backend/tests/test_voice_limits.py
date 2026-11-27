@@ -5,6 +5,7 @@ and the masking of what the customer says before and after the app knows their P
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 
 from agent_harness import DANIEL, MAYA, shows
 from fakes import ScriptedModel, call, say, usage
@@ -56,6 +57,37 @@ async def test_a_conversation_has_one_voice_and_the_server_a_limit_of_them(serve
     assert (await second.until("voice.stopped"))["reason"] == "client"
     await other.call()
     for client in (first, second, other):
+        await client.ws.close()
+
+
+async def test_two_windows_that_take_the_voice_over_at_once_leave_the_conversation_one_voice(
+    serve, speech
+):
+    _, address = await serve(
+        ScriptedModel("m", say("Hello.")),
+        **voice(speech, max_voice_sessions=4, max_voice_sessions_per_address=4),
+    )
+    first = await Caller.open(address)
+    await first.call()
+    session_id = first.ready["session_id"]
+    second = await Caller.open(address, session_id=session_id)
+    third = await Caller.open(address, session_id=session_id)
+    # Both ask while the first window has the voice. One waits for that voice to stop, and
+    # the other finds its place free in the meantime.
+    await second.send(type="voice.start")
+    await third.send(type="voice.start")
+    assert (await first.until("voice.stopped"))["reason"] == "replaced"
+
+    async def settle(caller: Caller) -> bool:
+        """Take what arrives until nothing has for a while. Returns whether voice is on."""
+        with suppress(TimeoutError):
+            while True:
+                await asyncio.wait_for(caller._frame(), 0.5)
+        told = [e["type"] for e in caller.events if e["type"] in ("voice.started", "voice.stopped")]
+        return told[-1:] == ["voice.started"]
+
+    assert sorted(await asyncio.gather(settle(second), settle(third))) == [False, True]
+    for client in (first, second, third):
         await client.ws.close()
 
 
@@ -248,4 +280,34 @@ async def test_audio_cannot_arrive_much_faster_than_a_microphone_makes_it(serve,
     await asyncio.sleep(1.0)
     await caller.mic(10)
     await eventually(lambda: ear.audio_bytes == before + 10 * 2560)
+    await caller.ws.close()
+
+
+async def test_both_speech_sockets_ask_the_service_not_to_keep_what_it_is_sent(serve, speech):
+    """The notice before the microphone says so. Deepgram's parameter for it is `mip_opt_out`."""
+    _, address = await serve(ScriptedModel("m", say("Hello.")), **voice(speech))
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    assert ear.query["mip_opt_out"] == ["true"]
+    assert speech.speaking[0].query["mip_opt_out"] == ["true"]
+    await caller.ws.close()
+
+
+async def test_a_voice_whose_inbox_runs_over_ends_and_gives_its_line_back(serve, speech):
+    rt, address = await serve(
+        ScriptedModel("m", say("Hello.")), **voice(speech, max_voice_sessions=1)
+    )
+    caller = await Caller.open(address)
+    await caller.call()
+    await speech.ear()
+    line = rt.app.state.hubs._hubs[caller.ready["session_id"]].voice
+    # More than its loop will hold, all before the loop gets to run. What fills it does not
+    # matter here: a client that sends reports by the thousand would do the same.
+    for _ in range(2_500):
+        line.fail("flooded")
+    assert (await caller.until("voice.stopped"))["reason"] == "error"
+    # The shutdown used to wait for itself. Voice never said it had stopped, and the one
+    # line there is here was never free again.
+    await caller.call()
     await caller.ws.close()

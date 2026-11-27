@@ -842,6 +842,25 @@ async def test_what_is_recorded_while_a_turn_ends_reaches_clients_after_the_turn
     await client.ws.close()
 
 
+async def test_a_note_about_an_earlier_reply_does_not_stop_the_turn_that_runs_now(serve):
+    """Voice hears of a turn's end a moment after the session is free again. A typed message
+    may have started the next turn by then, and what voice notes about the reply before must
+    not cancel it."""
+    slow = ScriptedModel("m", ["Hel", 0.3, "lo there.", usage(10, 3)])
+    rt, address = await serve(slow)
+    client = await Client.open(address)
+    await client.say("Hi")
+    await client.until("llm.delta")
+    hub = rt.app.state.hubs._hubs[client.ready["session_id"]]
+    await hub.interrupt_turn("Refunds take", "an-earlier-turn")
+    assert hub.log.heard is None  # nor is the note kept: its reply is no longer the last
+    ended = await client.next()
+    while ended["type"] not in ("turn.finished", "turn.interrupted", "turn.failed"):
+        ended = await client.next()
+    assert ended["type"] == "turn.finished"
+    await client.ws.close()
+
+
 async def test_a_passage_an_earlier_customers_plan_could_read_is_not_handed_to_whoever_comes_next(
     serve,
 ):

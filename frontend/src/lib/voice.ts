@@ -82,8 +82,8 @@ export class VoiceLink {
   private epoch = 0; // the number of the server's last flush that was handled here
   // A pause or resume that came ahead of the flush before it, kept until that flush arrives.
   private early: { action: "pause" | "resume"; epoch: number } | null = null;
-  private muted = false; // audio of the stopped reply may still arrive: drop it until the server's flush
-  private interrupted: number | null = null; // the epoch the Stop was sent with, once it has been
+  private muted = false; // audio of the stopped reply may still arrive: drop it until the next flush
+  private interrupted: number | null = null; // the flush Stop was last pressed under
   private cancelUnmute: (() => void) | null = null;
   private tickedAt = 0;
   // For the time from the visitor's last word to the first sound of the reply, as heard here.
@@ -176,9 +176,10 @@ export class VoiceLink {
   /** Stop the reply that is playing or on its way. */
   interrupt(): void {
     if (!this.audio || !this.live || this.muted) return;
-    // Until the server's flush says it has stopped sending, what arrives is the stopped reply.
+    // What arrives until the next flush is the reply that was stopped. That flush is the server's
+    // answer to this Stop, or one it had sent for a reason of its own a moment before.
     this.muted = true;
-    this.interrupted = null;
+    this.interrupted = this.epoch;
     this.cancelUnmute = schedule(FLUSH_TIMEOUT_MS, () => {
       this.muted = false;
     });
@@ -215,6 +216,10 @@ export class VoiceLink {
         if (this.current(event.attempt)) this.end(event.reason === "client" ? null : event.message || "it was stopped");
         break;
       case "voice.playback":
+        // Before the server has answered this start, a command can only be an earlier voice's,
+        // still on its way. That voice counted its flushes from zero too, and taking its number
+        // would make this one's own first flushes look old.
+        if (!this.live) break;
         if (event.action === "flush") this.flush(audio, event.id);
         else if (event.id === this.epoch) this.command(audio, event.action);
         // A pause or resume can overtake the flush the server sent before it. It waits for that
@@ -253,7 +258,8 @@ export class VoiceLink {
   private flush(audio: VoiceEngine, epoch: number): void {
     if (epoch <= this.epoch) return; // handled already
     this.epoch = epoch;
-    // Only a flush made after the server heard of the Stop ends the reply that was stopped.
+    // Stop was pressed under an earlier flush than this one. The reply it stopped is over,
+    // whether the server cut it for the Stop or had cut it already.
     if (this.muted && this.interrupted !== null && epoch > this.interrupted) {
       this.muted = false;
       this.cancelUnmute?.();
@@ -350,9 +356,9 @@ export class VoiceLink {
     }
     if (!this.live) return;
     if (after === "stop") {
-      // The server answers with a flush numbered above this one. Until then nothing plays.
-      this.interrupted = this.epoch;
-      this.send({ type: "voice.interrupt", played_ms: playedMs, epoch: this.epoch });
+      // Named by the flush Stop was pressed under, as the worklet had it. If the server has
+      // flushed since, the reply is cut already, and it stops nothing else for this.
+      this.send({ type: "voice.interrupt", played_ms: playedMs, epoch });
       return;
     }
     if (after === "tick" || after === "resume") {

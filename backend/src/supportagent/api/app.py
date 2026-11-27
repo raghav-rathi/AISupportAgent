@@ -490,8 +490,14 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         left = voice_time.left(visitor)
         if left <= 0:
             return no("voice_unavailable", "this address has used its voice time for today")
-        if hub.voice is not None:
-            await hub.voice.stop("replaced", "it is now on in another window")
+        # Whoever has the conversation's voice gives it up first. Looked at again after each
+        # wait: a voice that is being stopped has left its place already, and another window
+        # that asked in that moment may have taken it. Taken over without a second look, that
+        # one stayed on, and the conversation had two voices.
+        while (other := hub.voice) is not None:
+            await other.stop("replaced", "it is now on in another window")
+            if hub.voice is other:
+                hub.voice = None  # it has stopped, whatever its shutdown left standing
         if len(voices) >= settings.max_voice_sessions:
             return no("voice_unavailable", "all voice lines are busy")
         if not voice_lines.take(visitor):

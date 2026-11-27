@@ -255,6 +255,19 @@ describe("which events belong to this voice", () => {
     v.link.handle(started("a2"));
     expect(v.statuses().at(-1)).toBe("on");
   });
+
+  it("takes no playback command until its own start is answered", async () => {
+    const v = await live();
+    v.link.handle(playback("flush", 4));
+    v.link.stop();
+    await v.link.start(); // attempt a2, with a player of its own
+    v.link.handle(playback("flush", 5)); // the earlier voice's last, still on its way
+    v.link.handle(playback("pause", 5));
+    expect(v.audios[1].calls).toEqual([]);
+    v.link.handle(started("a2"));
+    v.link.handle(playback("flush", 1)); // the new voice counts from zero
+    expect(v.audios[1].calls).toEqual(["rates 16000 24000", "flush 1"]);
+  });
 });
 
 describe("Stop", () => {
@@ -276,22 +289,22 @@ describe("Stop", () => {
     expect(v.audio.played).toHaveLength(2);
   });
 
-  it("stays silent through a flush the server sent before it heard of the Stop", async () => {
+  it("plays what follows a flush the server sent before it heard of the Stop, and names the flush Stop was pressed under", async () => {
     const v = await live();
-    v.link.interrupt();
-    v.link.handle(playback("flush", 1)); // crossed the Stop on the way
     v.link.play(frame());
-    v.audio.on.onPlayhead(800, 0, "stop", 0);
+    v.link.interrupt(); // pressed under flush 0
+    v.link.play(frame()); // of the stopped reply, still on its way
+    expect(v.audio.played).toHaveLength(1);
+    v.link.handle(playback("flush", 1)); // the server had cut that reply itself
+    v.audio.on.onPlayhead(800, 0, "stop", 0); // the worklet took the Stop before that flush
     v.audio.on.onPlayhead(800, 0, "flush", 1);
+    // The server reads from the number that the reply is cut already, and stops nothing else.
     expect(v.socket.messages().slice(-2)).toEqual([
-      { type: "voice.interrupt", played_ms: 800, epoch: 1 },
+      { type: "voice.interrupt", played_ms: 800, epoch: 0 },
       { type: "voice.playhead", played_ms: 800, buffered_ms: 0, after: "flush", epoch: 1 },
     ]);
-    v.link.play(frame());
-    expect(v.audio.played).toHaveLength(0);
-    v.link.handle(playback("flush", 2));
-    v.link.play(frame());
-    expect(v.audio.played).toHaveLength(1);
+    v.link.play(frame()); // the reply after it, which nobody stopped
+    expect(v.audio.played).toHaveLength(2);
   });
 
   it("plays again after two seconds when the server's flush does not come", async () => {

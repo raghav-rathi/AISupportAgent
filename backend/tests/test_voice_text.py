@@ -10,6 +10,7 @@ from supportagent.voice.text import (
     digit_count,
     gives_credentials,
     is_short_echo,
+    reading,
     sounds_like_echo,
     speakable,
     tidy_digits,
@@ -218,6 +219,20 @@ def test_a_digit_that_sizes_a_number_is_not_one_of_its_digits():
     assert digit_count("My 8 digit account is 10482917 and 4 digit PIN is 24") == 10
     assert digit_count("my 8-digit account number is") == 0
     assert digit_count("1 0 4 8") == 4
+
+
+def test_how_a_number_is_written_does_not_change_how_a_transcript_reads():
+    # What Flux wrote in a row for one caller on 2026-11-27, once the last digit was in.
+    wrote = [
+        "Sure, it is 8 7 4 5. 7 4 4 6. And the PIN is 7 4. 9 9",
+        "Sure, it is 8 7 4 5. 7 4 4 6. And the PIN is 7 4 9 9",
+        "Sure, it is 8 7 4 5. 7 4 4 6. And the PIN is 7 4. 9 9",
+        "Sure, it is 8 7 4 5. 7 4 4 6. And the PIN is 7 4 9 9.",
+    ]
+    assert len({tuple(reading(tidy_digits(text))) for text in wrote}) == 1
+    # A digit put right reads differently, and so does a word after the number.
+    assert reading("10482917 4721") != reading("10482917 4729")
+    assert reading("10482917 4729 that") != reading("10482917 4729")
 
 
 def test_markup_a_voice_cannot_say_is_taken_out_and_list_items_stay_apart():
