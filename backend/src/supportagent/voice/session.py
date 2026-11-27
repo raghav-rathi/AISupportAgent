@@ -714,6 +714,9 @@ class VoiceSession:
                 if reply is not None:
                     await self._cut(reply, keep=False)
             return
+        if kind == "turn.finished" and self._audible() is None:
+            # A short reply can have been played to its end before its turn was over.
+            self._rest()
         if turn_id is None or turn_id not in self._voice_turns or turn_id in self._cut_turns:
             return
         if kind == "llm.delta":

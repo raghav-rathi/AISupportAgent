@@ -156,6 +156,26 @@ async def test_a_spoken_question_is_answered_aloud_and_a_typed_one_is_not(serve,
     await caller.ws.close()
 
 
+async def test_a_reply_that_is_over_before_its_check_leaves_voice_listening(serve, speech):
+    rt, address = await serve(ScriptedModel("m", say("Hello.")), **voice(speech))
+    rt.judge = SlowJudge(GROUNDED)
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, "Hi")
+    await rt.judge.asked.wait()
+    # Six characters of audio are played to their end while the judge still reads.
+    await caller.hear(ms_of("Hello."))
+    await caller.played(ms_of("Hello."), after="drained")
+    await caller.until("speech.spoken")
+    rt.judge.let.set()
+    await caller.until("turn.finished")
+    assert caller.of("voice.state")[-1]["state"] == "thinking"  # as it was while the check ran
+    assert (await caller.until("voice.state"))["state"] == "listening"
+    assert speech.replies == ["Hello."]  # and the confirmed message is not said a second time
+    await caller.ws.close()
+
+
 async def test_text_the_model_writes_on_the_way_to_a_tool_is_never_said(serve, speech):
     model = ScriptedModel(
         "m",

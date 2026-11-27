@@ -688,6 +688,14 @@ def _on_one_line(text: str) -> str:
 
 # What the grounding judge is told about the assistant itself. Without it a true statement
 # such as "I can change the billing email but not the plan" has nothing to stand on.
-CAPABILITIES = "What the assistant's tools can do. It can do nothing else to an account.\n" + (
-    "\n".join(f"- {t.name}: {_on_one_line(t.description)}" for t in TOOLS)
-)
+# The first two sentences are there because the list alone was not enough: asked by voice what
+# it can help with, the assistant said "questions about Fernhill Workspace plans, billing and
+# policies, and account updates and refunds once you are verified", and the judge took that
+# back about every other time.
+CAPABILITIES = (
+    "The assistant is the support assistant for Fernhill Workspace. It answers questions about "
+    "Fernhill's plans, pricing, billing, refunds, policies and product from the help center. "
+    "For a customer it has verified, it can read the account, refund an invoice, update contact "
+    "details and hand the case to a person.\n"
+    "What the assistant's tools can do. It can do nothing else to an account.\n"
+) + ("\n".join(f"- {t.name}: {_on_one_line(t.description)}" for t in TOOLS))

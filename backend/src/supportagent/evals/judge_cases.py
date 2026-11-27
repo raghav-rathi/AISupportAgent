@@ -217,6 +217,28 @@ CASES: tuple[JudgeCase, ...] = (
         "I can help with that. Could you give me your 8-digit account number and your PIN?",
         True,
     ),
+    # Seen live, by voice: the judge took this reply back in about every other run.
+    JudgeCase(
+        "what-it-can-help-with",
+        "what the assistant can do",
+        "What can you help me with?",
+        (),
+        "I can help you with questions about Fernhill Workspace plans, billing, and policies. I can "
+        "also assist with account updates and refund requests.",
+        True,
+        earlier=("Hi. I need help with a refund.", "Hello. Can you hear me?"),
+    ),
+    # The same answer with something in it that no tool can do.
+    JudgeCase(
+        "what-it-cannot-do",
+        "invented ability",
+        "What can you help me with?",
+        (),
+        "I can help you with questions about Fernhill Workspace plans, billing, and policies. I can "
+        "also cancel your subscription or move you to another plan right here.",
+        False,
+        earlier=("Hi. I need help with a refund.", "Hello. Can you hear me?"),
+    ),
     # Seen live: the judge once called both sentences after the first unsupported.
     JudgeCase(
         "needs-verification-first",

@@ -18,7 +18,7 @@ def chunks():
 
 def test_the_cases_are_balanced_and_every_piece_of_evidence_exists(chunks):
     assert len({case.id for case in CASES}) == len(CASES)
-    assert sum(case.grounded for case in CASES) == sum(not case.grounded for case in CASES) == 26
+    assert sum(case.grounded for case in CASES) == sum(not case.grounded for case in CASES) == 27
     # Only a reply that stands can leave a question open.
     assert all(case.grounded for case in CASES if case.unresolved)
     assert sum(case.unresolved for case in CASES) == 4
