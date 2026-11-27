@@ -7,7 +7,7 @@ import { Button, Caption, Spinner } from "./ui";
 
 /** Openers that show one behaviour each. The accounts are invented and public. */
 const STARTERS = [
-  { label: "Ask about refunds", text: "How long do I have to ask for a refund on the Pro monthly plan?" },
+  { label: "Ask about plans", text: "What plans do you offer, and what do they cost?" },
   {
     label: "Check the policy, then refund",
     text: "My account number is 10482917 and my PIN is 4721. What is the refund window on my plan? If my latest invoice is inside it, please refund it. It was billed by mistake.",

@@ -6,7 +6,7 @@ The project follows a brief that asks for streaming chat, live voice, multi-step
 
 ## Status
 
-Phase 2 of 4. The backend and the chat UI exist and work together on hosted models. The UI runs locally and is not deployed yet. There is no voice mode.
+Phase 2 of 4, deployed. Try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models. There is no voice mode yet.
 
 | What the brief asks for | State today |
 |---|---|
@@ -19,7 +19,7 @@ Phase 2 of 4. The backend and the chat UI exist and work together on hosted mode
 | Tool start and finish streamed to the UI | Done. |
 | Fallback states for timeouts, rate limits and tool failures | Done. The UI shows a retry, a switch to the backup model, a failed turn with Try again, a stopped turn with Resume, and a dropped connection. A panel can inject each failure on demand. |
 | One memory across text and voice | A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. Voice does not exist yet. |
-| Deployed | Not yet. The plan is Vercel for the frontend, Railway for the backend and Postgres. |
+| Deployed | Yes. The frontend is on Vercel, the backend and Postgres with pgvector on Railway. |
 
 ## How a turn runs
 
@@ -197,7 +197,7 @@ CLIENT_ADDRESS_HEADER=x-real-ip   # the header in which the host's proxy reports
 SESSION_TTL_HOURS=48
 ```
 
-This was checked from a clean clone on Linux with only environment variables and the production dependencies: the database was migrated and loaded, `/health` answered, a page from the allowed origin got a session, and a page from another origin and a client without one were refused. It has not run on a hosting platform yet.
+The repo's `Dockerfile` does the same in an image, and that image is what runs on Railway. There, `/health` answers, a page from the allowed origin gets a session, a client without an origin is refused, and two visitors from two addresses each get their own count of new conversations, whatever headers they send.
 
 ### Demo accounts
 
@@ -314,7 +314,7 @@ scripts/         dev database and dev server
 ## What comes next
 
 1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
-2. Phase 2 has its UI. Still open in it: the first deploy.
+2. Phase 2 is deployed. Open from it: deploys are started by hand, not by a push.
 3. Phase 3: voice through the same session, with Deepgram Flux for speech to text and text to speech.
 4. Phase 4: hardening and the write-up.
 
