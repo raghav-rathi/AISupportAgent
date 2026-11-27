@@ -66,7 +66,9 @@ async def test_no_pin_leaves_in_a_search_query(pool, retriever, world):
     assert not any("4721" in query or "*" in query for query in recording.queries), (
         recording.queries
     )
-    assert "xyzzy" in recording.queries[1] and "10482917" in recording.queries[1]
+    # The second wording is the question alone: the sentence that gave the credentials only
+    # blurs a search.
+    assert recording.queries[1] == "Tell me about xyzzy."
     assert "4721" not in of(events, "retrieval.result")[0].query
 
 

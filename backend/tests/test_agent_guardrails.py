@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from supportagent.agent.graph import evidence_texts
 from supportagent.agent.judge import JudgeError, Verdict, parse_verdict
+from supportagent.agent.tickets import question_only
 from supportagent.agent.tools import CAPABILITIES
 from supportagent.llm.errors import Failure, LLMUnavailable
 
@@ -137,6 +138,85 @@ async def test_an_answer_given_without_any_search_is_checked_too(pool, retriever
     assert evidence[1].startswith("Verification state: not verified")
     assert of(events, "answer.retracted")
     assert (await session.state())["outcome"] == "escalated"
+
+
+UPTIME = "The help center does not list the uptime for last month."
+OPEN = Verdict(grounded=True, unresolved=True)
+
+
+async def test_an_answer_that_leaves_a_fernhill_question_open_gets_a_ticket_from_the_turn(
+    pool, retriever, world
+):
+    # The model was asked to open a ticket for a question the help center does not answer, and
+    # did not. The judge says the reply leaves the question open, and the turn opens the ticket.
+    model = ScriptedModel("m", say(UPTIME))
+    session = Session(pool, retriever, world, model, judge=ScriptedJudge(OPEN))
+    events = await session.turn(
+        "My account number is 53920164 and my PIN is 2458. What was your uptime last month?"
+    )
+    ticket = of(events, "escalation.created")[0].ticket
+    assert (ticket.reason, ticket.priority) == ("unanswered_question", "normal")
+    assert ticket.summary == "The help center has no answer to: What was your uptime last month?"
+    final = of(events, "assistant.message")
+    assert len(final) == 1 and final[0].text.startswith(UPTIME) and ticket.id in final[0].text
+    assert not of(events, "answer.retracted")
+    state = await session.state()
+    assert state["outcome"] == "answered"
+    assert [t["id"] for t in state["tickets"]] == [ticket.id]
+    assert state["messages"][-1].content == final[0].text  # the model reads what was said
+    assert await scalar(pool, "SELECT count(*) FROM tickets WHERE world_id = %s", world) == 1
+
+
+async def test_a_turn_that_already_opened_a_ticket_does_not_get_a_second_one(
+    pool, retriever, world
+):
+    model = ScriptedModel(
+        "m",
+        call(
+            "create_escalation_ticket",
+            reason="unanswered_question",
+            summary="Asked for last month's uptime figure",
+            priority="normal",
+        ),
+        say(UPTIME + " A specialist will follow up."),
+    )
+    session = Session(pool, retriever, world, model, judge=ScriptedJudge(OPEN))
+    events = await session.turn("What was your uptime last month?")
+    assert len(of(events, "escalation.created")) == 1
+    assert of(events, "assistant.message")[-1].text == UPTIME + " A specialist will follow up."
+    assert await scalar(pool, "SELECT count(*) FROM tickets WHERE world_id = %s", world) == 1
+
+
+async def test_an_answer_that_settles_the_question_opens_no_ticket(pool, retriever, world):
+    model = ScriptedModel("m", say("I can only help with Fernhill."))
+    session = Session(pool, retriever, world, model, judge=ScriptedJudge(GROUNDED))
+    events = await session.turn("What's the weather in Boston tomorrow?")
+    assert not of(events, "escalation.created")
+    assert of(events, "assistant.message")[-1].text == "I can only help with Fernhill."
+
+
+@pytest.mark.parametrize(
+    ("masked", "question"),
+    [
+        (
+            "My account number is 10482917 and my PIN is ****. Do you have a SOC 2 report?",
+            "Do you have a SOC 2 report?",
+        ),
+        (
+            "Account 10482917.\nPIN ****\nWhy was I charged twice? It was in March.",
+            "Why was I charged twice? It was in March.",
+        ),
+        # One sentence holds both, or nothing else was said: the message stays whole.
+        (
+            "Account 10482917, PIN ****, why was I charged twice?",
+            "Account 10482917, PIN ****, why was I charged twice?",
+        ),
+        ("10482917 and ****", "10482917 and ****"),
+        ("We have 12 seats. Can we add 3?", "We have 12 seats. Can we add 3?"),
+    ],
+)
+def test_the_question_is_taken_without_the_sentences_that_only_give_credentials(masked, question):
+    assert question_only(masked) == question
 
 
 async def test_an_answer_that_cannot_be_checked_is_taken_back_and_checked_on_retry(
@@ -335,6 +415,12 @@ def test_a_verdict_is_read_out_of_surrounding_text():
         parse_verdict("I think it is fine.")
     with pytest.raises(JudgeError):
         parse_verdict('{"grounded": "maybe"}')
+
+
+def test_a_verdict_says_when_the_reply_leaves_a_question_open():
+    said = parse_verdict('{"grounded": true, "unsupported": [], "unresolved": true}')
+    assert said == Verdict(grounded=True, unresolved=True)
+    assert not parse_verdict('{"grounded": true, "unsupported": []}').unresolved
 
 
 def test_a_verdict_that_lists_unsupported_statements_is_not_grounded_whatever_it_says():

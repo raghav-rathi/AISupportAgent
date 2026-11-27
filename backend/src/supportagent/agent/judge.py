@@ -39,6 +39,13 @@ from supportagent.llm.faults import FaultPlan
 # answer to a question about Apple's App Store, hence the sentence after that. And it failed "I can
 # only change the billing email, the contact name, ..." because nothing said what the assistant
 # can do, hence the list of tools in the evidence and the sentence about it.
+#
+# The last paragraph is not about grounding. A question about Fernhill that the help center does
+# not answer has to reach a person. The agent's prompt asks for a ticket then, and on the hosted
+# model one such reply in seven went out without one: "The help center does not list the uptime
+# for last month", which is grounded and leaves the customer with nobody to follow up. The judge
+# reads every reply anyway, so it says when a reply is of that kind, and the turn opens the
+# ticket itself.
 _PROMPT = """You check a customer support reply against evidence.
 
 The message has four parts: the date, the evidence, what the customer wrote, and the reply to \
@@ -64,8 +71,9 @@ specialist will follow up. Evidence supports a statement only about the thing th
 about: Fernhill's own rules say nothing about another company's product, store or policy.
 
 A statement that says the same thing in other words is supported. So is a date given as "today" \
-or "yesterday" when the evidence has the matching calendar date. Saying that the evidence does \
-not mention something is supported when it does not.
+or "yesterday" when the evidence has the matching calendar date. The evidence holds everything \
+a search of the help center found, so saying that the help center does not list, mention or \
+cover something is supported when no piece of evidence does.
 
 These need no evidence: greetings, questions to the customer, repeating what the customer asked \
 for, saying what the assistant needs from the customer or will do next (for example that it has \
@@ -73,8 +81,21 @@ to verify their identity first), an offer to pass the case to a person, saying t
 assistant cannot help or cannot confirm something, and saying that it only handles Fernhill \
 topics.
 
+Apart from grounding, report whether the reply says that the help center lacks something. \
+"unresolved" is true when the reply says that the help center does not list, mention, cover or \
+state something the customer asked about Fernhill's product, plans, billing or policies, or that \
+the assistant cannot find or confirm it. It stays true when the reply goes on to give other \
+facts, points to another page, or answers another part of the question: what was asked and not \
+found still needs a person. An offer to pass the question on changes nothing either. \
+"unresolved" is false when the reply reports a ticket for the question. It is false when nothing \
+is said to be missing: the reply answers, and a "no" or a refusal that the evidence states is an \
+answer; it asks the customer for something, such as their account number; it says which plan \
+covers the topic; it says what the assistant itself can or cannot do; or it turns away a \
+question that has nothing to do with Fernhill.
+
 Answer with JSON only, in this shape:
-{"grounded": true or false, "unsupported": ["each statement the evidence does not support"]}"""
+{"grounded": true or false, "unsupported": ["each statement the evidence does not support"], \
+"unresolved": true or false}"""
 
 VERDICT_SCHEMA = {
     "name": "verdict",
@@ -84,8 +105,9 @@ VERDICT_SCHEMA = {
         "properties": {
             "grounded": {"type": "boolean"},
             "unsupported": {"type": "array", "items": {"type": "string"}},
+            "unresolved": {"type": "boolean"},
         },
-        "required": ["grounded", "unsupported"],
+        "required": ["grounded", "unsupported", "unresolved"],
         "additionalProperties": False,
     },
 }
@@ -97,6 +119,9 @@ _FORGED_LABEL = re.compile(r"(?i)\[\s*evidence\b[^\]\n]{0,400}\]")
 class Verdict(BaseModel):
     grounded: bool
     unsupported: list[str] = []
+    # The reply says the help center has no answer to a question about Fernhill, and reports no
+    # ticket for it. Not a fault of the reply: a reason to open the ticket.
+    unresolved: bool = False
 
 
 class JudgeError(Exception):
@@ -131,7 +156,9 @@ def parse_verdict(text: str) -> Verdict:
             start = text.find("{", start + 1)
             continue
         return Verdict(
-            grounded=verdict.grounded and not verdict.unsupported, unsupported=verdict.unsupported
+            grounded=verdict.grounded and not verdict.unsupported,
+            unsupported=verdict.unsupported,
+            unresolved=verdict.unresolved,
         )
     raise JudgeError(f"no verdict in judge reply: {text[:120]!r}")
 

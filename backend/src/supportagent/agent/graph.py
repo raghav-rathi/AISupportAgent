@@ -43,8 +43,8 @@ from supportagent.agent.context import AgentContext
 from supportagent.agent.guard import guard
 from supportagent.agent.judge import JudgeError
 from supportagent.agent.prompts import for_prompt, system_prompt
-from supportagent.agent.state import AgentState, Escalation
-from supportagent.agent.tickets import open_ticket, recent_customer_texts
+from supportagent.agent.state import AgentState, Customer, Escalation
+from supportagent.agent.tickets import open_ticket, question_only, recent_customer_texts
 from supportagent.agent.tools import CAPABILITIES, TOOLS, was_forgotten
 from supportagent.crm import policy
 from supportagent.events import (
@@ -73,6 +73,8 @@ _ESCALATION_TEXT = {
     "step_limit": "This needs more steps than I can take here, so I've passed it to a specialist "
     "as ticket {ticket}. They will follow up.",
 }
+# Added to an answer that stands and that says the help center has no answer to something.
+_FOLLOW_UP = "I've passed this to a specialist as ticket {ticket}. They will follow up."
 # For an answer taken back in a turn that had already opened a ticket.
 _ALREADY_WITH_A_PERSON = (
     "I need to take that back. I couldn't confirm it against the Fernhill help center. "
@@ -281,12 +283,17 @@ def _as_evidence(message: ToolMessage) -> str:
     return f"tool: {message.name}\n" + json.dumps({"error": code, "note": "This call did not run."})
 
 
-def _who(state: AgentState) -> str:
-    """Who the assistant is talking to, as far as it has been established."""
-    customer = state.get("customer")
+def who(customer: Customer | None, failed_verifications: int = 0) -> str:
+    """Who the assistant is talking to, as far as it has been established.
+
+    The judge needs it for more than account questions. A passage written for one plan supports
+    "you have 14 days" only for a customer on that plan: measured on the hosted judge, the same
+    correct reply about the Pro refund limit was called unsupported in about one run in three
+    when nothing said which plan the customer was on, and in none of fifteen when this line did.
+    """
     if customer:
         return "Verified customer: " + json.dumps(customer)
-    if state.get("failed_verifications", 0) >= policy.MAX_VERIFICATION_ATTEMPTS:
+    if failed_verifications >= policy.MAX_VERIFICATION_ATTEMPTS:
         return (
             "Verification state: locked. Identity verification failed too often in this "
             "conversation, and the assistant cannot read or change any account in it."
@@ -337,7 +344,8 @@ def evidence_texts(state: AgentState) -> list[str]:
             kept.append((index, text))
             earlier += 1
             earlier_size += len(text)
-    return [CAPABILITIES, _who(state), *(text for _, text in sorted(kept))]
+    said = who(state.get("customer"), state.get("failed_verifications", 0))
+    return [CAPABILITIES, said, *(text for _, text in sorted(kept))]
 
 
 def _without_reply(trace: LlmTrace) -> LlmTrace:
@@ -468,8 +476,43 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
     trace_answer(approved=verdict.grounded)
     if not verdict.grounded:
         return take_back("; ".join(verdict.unsupported) or "unsupported statements")
+    if verdict.unresolved and _needs_a_person(state):
+        # The answer stands, and it tells the customer that the help center has no answer to
+        # something they asked about Fernhill. Such a question goes to a person. The prompt asks
+        # the model to open the ticket, and when it did not, the ticket is opened here: nobody
+        # is left with "we have no answer" and no one to follow up.
+        ticket = await open_ticket(
+            ctx,
+            state,
+            reason="unanswered_question",
+            priority="normal",
+            summary=f"The help center has no answer to: {question_only(asked[-1]) if asked else ''}",
+        )
+        emit(EscalationCreated(ticket=ticket))
+        text = f"{text} {_FOLLOW_UP.format(ticket=ticket.id)}"
+        emit(final.model_copy(update={"text": text}))
+        stored = answer.model_copy(update={"content": ctx.redactor.text(text)})
+        return {
+            **done,
+            "messages": [*_settled(state, ctx, drop=answer.id), stored],
+            "tickets": [ticket.model_dump()],
+        }
     emit(final)
     return {**done, "messages": _settled(state, ctx)}
+
+
+def _needs_a_person(state: AgentState) -> bool:
+    """Whether a reply that leaves a question open should get a ticket from the turn itself.
+
+    Not when the turn already opened one. And not when a search of this turn said that the
+    topic belongs to another plan, or that the customer has to verify first: the reply then
+    says so by design, and the judge now and then reads "not part of your plan" as a gap in the
+    help center.
+    """
+    if (state.get("tickets") or [])[state.get("tickets_before", 0) :]:
+        return False
+    bands = {record["band"] for record in state.get("evidence") or []}
+    return not bands & {"restricted", "verify"}
 
 
 def after_check(state: AgentState) -> Literal["escalate", "__end__"]:

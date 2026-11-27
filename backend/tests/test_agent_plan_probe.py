@@ -7,8 +7,20 @@ from __future__ import annotations
 
 import json
 
-from agent_harness import ALWAYS_ANSWER, ELENA, MAYA, REFUND_QUESTION, Session, of, scalar, steps
+from agent_harness import (
+    ALWAYS_ANSWER,
+    ELENA,
+    MAYA,
+    REFUND_QUESTION,
+    ScriptedJudge,
+    Session,
+    of,
+    scalar,
+    steps,
+)
 from fakes import ScriptedModel, call, say
+
+from supportagent.agent.judge import Verdict
 
 P1_QUESTION = "How fast do you respond when we report a P1 outage?"
 SIGN_IN_QUESTION = "How do we set up Google sign-in for our company domain?"
@@ -75,7 +87,10 @@ async def test_a_verified_customer_is_told_when_the_topic_belongs_to_another_pla
         call("search_knowledge_base", query=SOC2_QUESTION),
         say("That is covered for the Enterprise plan and is not part of your Pro plan."),
     )
-    session = Session(pool, retriever, world, model)
+    # Even a judge that reads "not part of your plan" as a gap in the help center gets no
+    # ticket opened: the search itself said that the topic belongs to another plan.
+    judge = ScriptedJudge(Verdict(grounded=True, unresolved=True))
+    session = Session(pool, retriever, world, model, judge=judge)
     events = await session.turn(f"Account 10482917, PIN 4721. {SOC2_QUESTION}")
 
     assert of(events, "retrieval.result")[0].band == "restricted"

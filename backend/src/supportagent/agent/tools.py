@@ -23,7 +23,7 @@ from langgraph.types import Command
 from supportagent import clock
 from supportagent.agent.context import AgentContext
 from supportagent.agent.state import AgentState, Customer, Escalation, Evidence
-from supportagent.agent.tickets import last_customer_text, open_ticket
+from supportagent.agent.tickets import last_customer_text, open_ticket, question_only
 from supportagent.crm import policy, repo
 from supportagent.events import (
     Band,
@@ -349,8 +349,11 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
     tier = customer["tier"] if customer else None
     # Both wordings are masked before they go anywhere. A hosted embedder or reranker is a third
     # party, and the customer's message may still hold the PIN they typed next to the question.
+    # The customer's own words are searched without the sentences that only give credentials.
     question = _searchable(
-        ctx.redactor.text(last_customer_text(state.get("messages", [])), customer=True)
+        question_only(
+            ctx.redactor.text(last_customer_text(state.get("messages", [])), customer=True)
+        )
     )
     query = _searchable(ctx.redactor.text(query, customer=True))
     # The model's wording first. If it does not find an answer, the customer's own words get

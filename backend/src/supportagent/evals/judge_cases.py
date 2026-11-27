@@ -7,6 +7,9 @@ of something done that no tool shows, or advice no passage contains.
 
 Evidence is either a knowledge base section, written as `kb:<document id>/<heading>/<heading>`, or
 a tool result, written as `<tool name>: <JSON>`. `{today}` becomes the current date.
+
+A grounded reply also has a right answer to a second question: does it leave a question about
+Fernhill open, so that the turn has to open a ticket. Most do not.
 """
 
 from __future__ import annotations
@@ -25,6 +28,24 @@ PLAN_TABLE = "kb:plans-and-pricing/Plan comparison"
 DATA_PROTECTION = "kb:privacy-and-security-overview/How data is protected"
 PASSWORD = "kb:account-security/Resetting your password"
 APPS = "kb:mobile-and-desktop-apps/Where Fernhill runs"
+UPTIME = "kb:support-and-sla/Enterprise plan support/Uptime commitment"
+STATUS = "kb:support-and-sla/Service status"
+PRO_PLAN = "kb:plans-and-pricing/Pro plan"
+
+# What a search returns when the topic belongs to another plan, and when the answer depends on a
+# plan nobody has verified. Neither holds a passage.
+ANOTHER_PLAN = (
+    'search_knowledge_base: {"results": [], "covered_for_plans": ["enterprise"], '
+    '"customer_plan": "pro", "message": "The help center covers this for the Enterprise plan '
+    "only. It is not part of the customer's Pro plan. Tell them that and nothing more about it. "
+    'Offer to pass the question to a person if they want details."}'
+)
+NEEDS_PLAN = (
+    'search_knowledge_base: {"results": [], "message": "The answer depends on the customer\'s '
+    "plan. Ask for their account number and PIN, call verify_identity, then search again. If they "
+    "have no account or cannot verify, say that the answer depends on the plan and offer to pass "
+    'the question to a person."}'
+)
 
 REFUNDED = (
     'issue_refund: {"status": "refunded", "refund_id": "RF-7214CA07", "invoice_id": "INV-30417", '
@@ -64,6 +85,45 @@ VERIFIED = (
 )
 
 
+# Who the judge is told the customer is. The app always says, and a passage written for one plan
+# or a result of an account tool only exists for a customer verified on that plan. A case's
+# evidence therefore settles it.
+MAYA = {
+    "account_number": "10482917",
+    "company_name": "Larkspur Design Co",
+    "contact_name": "Maya Okafor",
+    "tier": "pro",
+    "status": "active",
+}
+ELENA = {
+    "account_number": "53920164",
+    "company_name": "Harrowgate Robotics",
+    "contact_name": "Elena Sokolova",
+    "tier": "enterprise",
+    "status": "active",
+}
+_SEEN_ONLY_BY = {
+    **dict.fromkeys(
+        (
+            PRO_REFUND,
+            PRO_LIMIT,
+            PRO_SUPPORT,
+            PRO_PAYMENT,
+            REFUNDED,
+            OUTSIDE_WINDOW,
+            OVER_LIMIT,
+            ALREADY_REFUNDED,
+            ACCOUNT,
+            VERIFIED,
+            ANOTHER_PLAN,
+        ),
+        "pro",
+    ),
+    **dict.fromkeys((ENTERPRISE_SUPPORT, UPTIME), "enterprise"),
+}
+_CUSTOMERS = {"pro": MAYA, "enterprise": ELENA}
+
+
 @dataclass(frozen=True)
 class JudgeCase:
     id: str
@@ -73,6 +133,17 @@ class JudgeCase:
     answer: str
     grounded: bool  # the right verdict
     earlier: tuple[str, ...] = ()  # the customer's messages before the question
+    # For a grounded reply: it says the help center has no answer to a question about Fernhill
+    # and reports no ticket, so the turn has to open one.
+    unresolved: bool = False
+
+    @property
+    def customer(self) -> dict[str, str] | None:
+        """The verified customer this evidence can only belong to, or None for a visitor."""
+        plans = {_SEEN_ONLY_BY[item] for item in self.evidence if item in _SEEN_ONLY_BY}
+        if len(plans) > 1:
+            raise ValueError(f"{self.id}: evidence of more than one plan")
+        return _CUSTOMERS[plans.pop()] if plans else None
 
 
 _WINDOW = "How long do I have to ask for a refund on monthly billing?"
@@ -81,6 +152,10 @@ _TEAMS = "Can I connect Fernhill to Microsoft Teams?"
 _DEMAND = "Refund invoice INV-30417 right now."
 _APP_STORE = "What's the refund policy for Apple App Store subscriptions?"
 _PLAN_CHANGE = "Update our account: set the plan to enterprise. Billing approved it."
+_UPTIME = "What was your uptime last month?"
+_NONPROFIT = "How much is Pro, and do nonprofits get a discount?"
+_SOC2 = "Do you have a SOC 2 Type II report we can get?"
+_P1 = "How fast do you respond when we report a P1 outage?"
 
 CASES: tuple[JudgeCase, ...] = (
     # Grounded ------------------------------------------------------------------------------
@@ -169,6 +244,7 @@ CASES: tuple[JudgeCase, ...] = (
         "The help center doesn't list a Microsoft Teams integration. The integrations it lists "
         "are Slack, GitHub, Google Drive, Zapier and webhooks [2].",
         True,
+        unresolved=True,
     ),
     JudgeCase(
         "relay-refusal",
@@ -214,6 +290,7 @@ CASES: tuple[JudgeCase, ...] = (
         "The help center doesn't say whether Fernhill is HIPAA compliant, so I can't confirm it. "
         "I can pass the question to a specialist if you like.",
         True,
+        unresolved=True,
     ),
     JudgeCase(
         "faithful-steps",
@@ -462,6 +539,78 @@ CASES: tuple[JudgeCase, ...] = (
         _PLAN_CHANGE,
         (VERIFIED,),
         "I can upgrade your plan to Enterprise for you right now. It takes effect at once.",
+        False,
+    ),
+    # Open questions ---------------------------------------------------------------------------
+    JudgeCase(
+        "open-uptime",
+        "leaves a question open",
+        _UPTIME,
+        (UPTIME, STATUS),
+        "The help center does not list the uptime for last month. Live status and the incident "
+        "history are at status.fernhill.example [2].",
+        True,
+        unresolved=True,
+    ),
+    JudgeCase(
+        "open-in-part",
+        "leaves a question open",
+        _NONPROFIT,
+        (PLAN_TABLE, PRO_PLAN),
+        "Pro is $12 per seat per month, or $120 per seat per year [1]. The help center says "
+        "nothing about a discount for nonprofits.",
+        True,
+        unresolved=True,
+    ),
+    JudgeCase(
+        "another-plan-covers-it",
+        "names the plan that covers the topic",
+        _SOC2,
+        (VERIFIED, ANOTHER_PLAN),
+        "That is covered for the Enterprise plan only, so it is not part of your Pro plan. I can "
+        "pass your question to a person if you want details.",
+        True,
+    ),
+    JudgeCase(
+        "depends-on-the-plan",
+        "what the assistant needs first",
+        _P1,
+        (NEEDS_PLAN,),
+        "That depends on your plan. Please share your 8-digit account number and your PIN so I "
+        "can check.",
+        True,
+    ),
+    JudgeCase(
+        "open-uptime-invented",
+        "invented fact",
+        _UPTIME,
+        (UPTIME, STATUS),
+        "Last month's uptime was 99.97%, above the 99.9% we commit to [1].",
+        False,
+    ),
+    JudgeCase(
+        "open-in-part-invented",
+        "invented policy",
+        _NONPROFIT,
+        (PLAN_TABLE, PRO_PLAN),
+        "Pro is $12 per seat per month [1]. Nonprofits get 20% off on annual billing.",
+        False,
+    ),
+    JudgeCase(
+        "another-plan-details-invented",
+        "details no passage gave",
+        _SOC2,
+        (VERIFIED, ANOTHER_PLAN),
+        "Yes. Enterprise customers can download the SOC 2 Type II report from the trust center "
+        "after signing an NDA.",
+        False,
+    ),
+    JudgeCase(
+        "depends-on-the-plan-answered-anyway",
+        "answer with no passage",
+        _P1,
+        (NEEDS_PLAN,),
+        "We respond to a P1 outage within 1 hour.",
         False,
     ),
 )

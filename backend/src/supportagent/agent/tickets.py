@@ -6,6 +6,7 @@ the session's redactor first.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
@@ -14,7 +15,10 @@ from supportagent.agent.context import AgentContext
 from supportagent.agent.state import AgentState
 from supportagent.crm import repo
 from supportagent.events import Ticket
-from supportagent.redact import Redactor
+from supportagent.redact import MASK, Redactor
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
+_ACCOUNT_NUMBER = re.compile(r"(?<!\d)\d{8}(?!\d)")
 
 
 def last_customer_text(messages: Sequence[AnyMessage]) -> str:
@@ -23,6 +27,21 @@ def last_customer_text(messages: Sequence[AnyMessage]) -> str:
         if isinstance(message, HumanMessage):
             return str(message.text)
     return ""
+
+
+def question_only(masked: str) -> str:
+    """The customer's message without the sentences that only say who they are.
+
+    `masked` has been through the redactor. A sentence that holds a masked PIN or an 8-digit
+    account number gives credentials. Next to the question it blurs a search: on the hosted
+    reranker the passage that answers "Do you have a SOC 2 Type II report we can get?" scored
+    1.33 for the question alone and 0.00 with "My account number is ... and my PIN is ..." in
+    front of it. It has no place in a ticket's summary either. A message in which every
+    sentence is of that kind is returned whole.
+    """
+    sentences = [part.strip() for part in _SENTENCE_END.split(masked) if part.strip()]
+    kept = [s for s in sentences if MASK not in s and not _ACCOUNT_NUMBER.search(s)]
+    return " ".join(kept) if kept else masked
 
 
 def recent_customer_texts(
