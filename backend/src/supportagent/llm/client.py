@@ -274,7 +274,7 @@ class ResilientLLM:
         stream_text: bool = True,
         faults: FaultPlan | None = None,
         json_schema: dict[str, Any] | None = None,
-        hedge: bool = False,
+        hedge: bool | float = False,
     ) -> LLMResult:
         """Run one model call to completion. Raises LLMUnavailable when every model failed.
 
@@ -282,8 +282,11 @@ class ResilientLLM:
         example until a grounding check has passed. `json_schema` asks the model for a reply in
         that shape and only applies to a call without tools. `hedge` sends the request a second
         time if its first token is slow, see `LLMPolicy.hedge_after_s`: for a call that someone
-        is waiting for with nothing to look at, which is a spoken turn's first.
+        is waiting for with nothing to look at, which is a spoken turn's first. A number in
+        place of True is how many seconds to wait before that, for a call whose usual time
+        to its first token is another one's.
         """
+        second_after = self.policy.hedge_after_s if hedge is True else (hedge or None)
         call_id = uuid.uuid4().hex[:12]
         started = time.perf_counter()
         deadline = started + self.policy.deadline_s
@@ -317,7 +320,7 @@ class ResilientLLM:
                 try:
                     message, ttft_ms, requests = await self._attempt(
                         model, messages, tools, json_schema, call_id, started, deadline, emit,
-                        stream_text, fault, self.policy.hedge_after_s if hedge else None,
+                        stream_text, fault, second_after,
                     )  # fmt: skip
                 except _AttemptFailed as failed:
                     failure = failed.failure

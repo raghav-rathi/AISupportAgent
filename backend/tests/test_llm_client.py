@@ -539,3 +539,17 @@ async def test_a_request_that_fails_before_the_second_goes_out_fails_as_it_alway
     h = Harness(model, policy=HEDGED)
     result = await h.complete(hedge=True)
     assert (result.message.text, result.attempts, result.requests) == ("Hello", 2, 1)
+
+
+async def test_a_call_can_name_its_own_wait_before_it_is_asked_a_second_time():
+    # The judge's usual time to a first token is not the agent's. Its caller says how long.
+    slow = [1.0, "Slow", usage(100, 5)]
+    quick = ["Quick", usage(100, 5)]
+    plain = LLMPolicy(first_token_timeout_s=2.0, stall_timeout_s=2.0, total_timeout_s=5.0)
+    model = ScriptedModel("m", slow, quick)
+    result = await Harness(model, policy=plain).complete(hedge=0.05)
+    assert (result.message.text, result.requests, len(model.calls)) == ("Quick", 2, 2)
+    # Asked for by the policy's own wait, such a client sends one request: it has none.
+    model = ScriptedModel("m", [0.1, "Late", usage(100, 5)])
+    result = await Harness(model, policy=plain).complete(hedge=True)
+    assert (result.message.text, result.requests) == ("Late", 1)

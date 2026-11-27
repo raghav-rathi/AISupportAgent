@@ -459,3 +459,15 @@ def test_a_passage_is_read_by_the_plan_it_is_written_for_and_by_anyone_only_if_f
     assert may_read(["free", "pro", "enterprise"], None)
     assert not may_read(["pro", "enterprise"], None)
     assert may_read(["pro", "enterprise"], "pro") and not may_read(["enterprise"], "pro")
+
+
+async def test_only_a_spoken_turns_check_may_be_asked_a_second_time(pool, retriever, world):
+    judge = ScriptedJudge(GROUNDED)
+    typed = Session(pool, retriever, world, ScriptedModel("m", say("Hello.")), judge=judge)
+    await typed.turn("Hi")
+    spoken = Session(
+        pool, retriever, world, ScriptedModel("m", say("Hello.")), judge=judge, mode="voice"
+    )
+    await spoken.turn("Hi")
+    # A caller waits for a spoken turn's verdict with nothing to look at.
+    assert judge.second_after == [None, 1.2]

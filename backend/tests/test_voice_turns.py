@@ -7,8 +7,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from agent_harness import GROUNDED, REFUND_QUESTION, UNGROUNDED
-from fakes import ScriptedModel, say, usage
+from agent_harness import ALWAYS_ANSWER, GROUNDED, REFUND_QUESTION, UNGROUNDED
+from fakes import ScriptedModel, call, say, usage
 from test_ws import serve as serve  # the fixture: the app on a free port
 from voice_harness import (
     CUT_OFF,
@@ -25,7 +25,7 @@ from voice_harness import (
 from voice_harness import speech as speech  # the fixture: the fake speech service
 
 from supportagent.agent.judge import JudgeError
-from supportagent.voice.session import TOOK_BACK_FAILED
+from supportagent.voice.session import ONE_MOMENT, TOOK_BACK_FAILED
 
 ANSWER = "You have 14 days to ask for your money back."
 
@@ -662,4 +662,40 @@ async def test_a_turn_that_fails_after_some_of_its_answer_was_heard_says_so_and_
     assert history[-1] == "So how long do I have?"
     assert 'The customer heard this much of it: "You have 1"' in history[-2]
     assert "never verified" in history[-2] and ANSWER not in history
+    await caller.ws.close()
+
+
+async def test_an_answer_that_waited_behind_one_moment_and_was_never_said_is_not_kept_as_heard(
+    serve, speech
+):
+    model = ScriptedModel(
+        "m",
+        call("search_knowledge_base", query=REFUND_QUESTION),
+        say(f"{ANSWER} [1]"),
+        say("Go ahead."),
+    )
+    rt, address = await serve(model, **voice(speech))
+    rt.gate = ALWAYS_ANSWER
+    caller = await Caller.open(address)
+    await caller.call()
+    ear = await speech.ear()
+    await ask(caller, ear, REFUND_QUESTION)
+    # The turn is over while "one moment" still plays, and its answer waits behind that.
+    await caller.until("turn.finished")
+    one_moment = ONE_MOMENT["search_knowledge_base"]
+    await caller.hear(ms_of(one_moment))
+    await caller.played(400)
+    await caller.mic(6)
+    await ear.say("StartOfTurn", "Wait")
+    assert await caller.playback() == "pause"
+    await caller.played(500, after="pause")
+    assert await caller.playback() == "flush"
+    await caller.send(type="voice.playhead", played_ms=500, after="flush", epoch=1)
+    await ear.say("EndOfTurn", "Wait, I have another question.")
+    await caller.until("turn.finished")
+    # The answer was never said, and the model must not take it for something they know.
+    assert ANSWER not in speech.replies
+    history = [str(m.content) for m in model.calls[2][0]]
+    assert history[-1] == "Wait, I have another question."
+    assert history[-2] == "(The customer interrupted before hearing any of my reply.)"
     await caller.ws.close()

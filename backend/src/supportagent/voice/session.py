@@ -93,13 +93,15 @@ TOOK_BACK_FAILED = (
 # Said when a spoken turn starts its first tool. The answer is a second or more away, and it
 # will not be said before its check has passed. These words say what is being done and
 # nothing else, so there is nothing in them to check.
+# Short, because the answer waits until they have been heard out: a second and a half of
+# audio at most.
 ONE_MOMENT = {
-    "verify_identity": "One moment while I check your details.",
-    "get_account": "Let me pull up your account.",
+    "verify_identity": "Checking your details.",
+    "get_account": "Checking your account.",
     "search_knowledge_base": "Let me check that for you.",
-    "issue_refund": "One moment while I process that.",
-    "update_account_field": "One moment while I update that.",
-    "create_escalation_ticket": "One moment.",
+    "issue_refund": "One moment, please.",
+    "update_account_field": "One moment, please.",
+    "create_escalation_ticket": "One moment, please.",
 }
 
 _TICK_S = 0.1
@@ -1346,6 +1348,11 @@ class VoiceSession:
             heard = await self._cut(reply, played_ms, note=keep if over else None) or ""
         else:
             self._let_play()
+        for waiting in queued - {None, turn_id, running}:
+            # An answer that waited behind what was just cut, "one moment" for one, and whose
+            # turn is over. It will not be said now. The conversation keeps of it what had
+            # been heard, which is nothing unless an earlier piece of it was.
+            await self._hub.log.keep_heard(self._heard_text.get(waiting, ""), waiting)
         if running is None:
             if pressed and self._hub.busy:
                 self._hub.cancel()  # a typed message's turn, stopped the way its own Stop would

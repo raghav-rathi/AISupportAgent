@@ -36,8 +36,12 @@ class ScriptedJudge:
 
     def __init__(self, *verdicts):
         self.verdicts, self.calls = list(verdicts), []
+        self.second_after = []  # for each call, after how many seconds it may be asked twice
 
-    async def check(self, *, question, answer, evidence, emit, faults=None, earlier=()):
+    async def check(
+        self, *, question, answer, evidence, emit, faults=None, earlier=(), second_after_s=None
+    ):
+        self.second_after.append(second_after_s)
         self.calls.append(
             {"question": question, "answer": answer, "evidence": evidence, "earlier": list(earlier)}
         )

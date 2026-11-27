@@ -138,6 +138,7 @@ class Judge(Protocol):
         emit: Emit,
         faults: FaultPlan | None = None,
         earlier: Sequence[str] = (),
+        second_after_s: float | None = None,
     ) -> Verdict: ...
 
 
@@ -215,8 +216,13 @@ class LLMJudge:
         emit: Emit,
         faults: FaultPlan | None = None,
         earlier: Sequence[str] = (),
+        second_after_s: float | None = None,
     ) -> Verdict:
-        """Raises LLMUnavailable when no model answered and JudgeError when none gave a verdict."""
+        """Raises LLMUnavailable when no model answered and JudgeError when none gave a verdict.
+
+        `second_after_s` sends the request a second time when nothing has come back by then,
+        for a verdict that a caller is waiting for in silence.
+        """
         messages = request_messages(
             question=question, answer=answer, evidence=evidence, earlier=earlier
         )
@@ -228,6 +234,7 @@ class LLMJudge:
                 stream_text=False,
                 faults=faults,
                 json_schema=VERDICT_SCHEMA,
+                hedge=second_after_s or False,
             )
             try:
                 return parse_verdict(str(result.message.text))

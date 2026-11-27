@@ -138,6 +138,9 @@ _ACTIONS = frozenset({"issue_refund", "update_account_field"})
 _EVIDENCE_RESULTS = 12
 _EVIDENCE_CHARS = 16_000
 _TURN_EVIDENCE_CHARS = 48_000
+# The judge's first token took 0.8 s at the median and under 1.2 s for 19 calls in 20, over
+# 227 calls. One that has sent nothing by then is asked a second time.
+_JUDGE_AGAIN_AFTER_S = 1.2
 # What a prompt trace shows in place of text that was never approved for the customer.
 _WITHHELD = "[withheld: this answer did not pass its grounding check]"
 _DROPPED = "[dropped: text the model sent along with a tool call]"
@@ -562,6 +565,8 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
             emit(event)
 
     started = time.perf_counter()
+    # In a spoken turn the customer may be waiting for this verdict in silence.
+    waited_for = {"second_after_s": _JUDGE_AGAIN_AFTER_S} if spoken else {}
     try:
         verdict = await ctx.judge.check(
             question=asked[-1] if asked else "",
@@ -570,6 +575,7 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
             evidence=evidence_texts(state),
             emit=emit_but_keep_traces,
             faults=ctx.faults,
+            **waited_for,
         )
     except (LLMUnavailable, JudgeError) as exc:
         # No verdict, so no answer: what streamed comes off the screen and the turn fails in a
