@@ -107,6 +107,10 @@ export function Conversation({ state, onSay, onAccount, onRetry, onInspect, onPa
     const element = scroller.current;
     if (element && pinned.current && !empty) element.scrollTop = element.scrollHeight;
   });
+  // A new conversation starts at the top of the welcome, wherever the last one was left.
+  useEffect(() => {
+    if (empty && scroller.current) scroller.current.scrollTop = 0;
+  }, [empty]);
 
 
   // Turns and what the service desk said, in the order they happened. A reply from a person
