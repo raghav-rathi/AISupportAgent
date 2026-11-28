@@ -247,8 +247,8 @@ Cost is computed where it arises. Model calls are tokens times the configured pr
 
 ## Deployment and continuous integration
 
-- Frontend on Vercel, a static build. The only setting is the backend's address, read at build time. A content security policy names that address as the only place the page may connect to.
-- Backend on Railway, from the repo's `Dockerfile`. The image runs as a user that owns nothing but the model cache. Starting applies the migrations and loads the help center under an advisory lock, so two containers that start together do the work once. `/health` answers once the database is reachable and the embedding model is loaded.
+- Frontend on Vercel, a static build that Vercel makes from the `frontend` folder on every push to `main`. The only setting is the backend's address, read at build time. A content security policy names that address as the only place the page may connect to.
+- Backend on Railway, from the repo's `Dockerfile`, deployed by hand. The image runs as a user that owns nothing but the model cache. Starting applies the migrations and loads the help center under an advisory lock, so two containers that start together do the work once. `/health` answers once the database is reachable and the embedding model is loaded.
 - Postgres on Railway, the `pgvector/pgvector:pg17` image with a volume.
 - CI on every push, three jobs: backend lint and tests against a pgvector service, frontend type check, lint, tests and build, and a start of the image in 1 GB that checks it is healthy, not root and serves no API docs.
 

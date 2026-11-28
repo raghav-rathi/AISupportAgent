@@ -489,7 +489,7 @@ Dockerfile       the backend image
 3. Phase 3, voice: done, and audited three times. Open from it: the project owner's own session on loudspeakers and on headphones.
 4. Phase 4, hardening and the write-up: done. Fixed from an end-to-end review: a search that ran on the customer's credentials, two figures in the drawer that timed different sounds, a ticket with another customer's lines, and a message field that could stay disabled. Fixed from a run of the public address in a browser: a PIN attempt that the backup model wasted for a verified customer, a table shown as text and its last row lost to a sentence added after it, a source card that kept loading, and a wrong line for an identity check after a change of account. Left out by choice: an access code in front of the demo, an uptime check from outside, and another run of the voice gate.
 
-Deploys are started by hand. CI runs on every push.
+The page is built and deployed by Vercel from this repo on every push to `main`. The backend is deployed to Railway by hand. CI runs on every push.
 
 ## Known gaps
 
