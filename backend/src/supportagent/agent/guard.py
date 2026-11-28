@@ -78,12 +78,20 @@ def _what_was_wrong(exc: ToolInvocationError) -> str:
     return "; ".join(problems)[:500] or "the arguments are not valid"
 
 
-def _artifact(result: ToolMessage | Command) -> dict[str, Any]:
-    """The outcome, the summary and any receipt a tool attached to its message."""
+def _artifact(result: ToolMessage | Command, call_id: str) -> dict[str, Any]:
+    """The outcome, the summary and any receipt a tool attached to its message.
+
+    A tool's update can hold other tool messages too: copies of earlier results that it
+    replaces, as verify_identity does when the customer changes. The call's own is the one
+    that answers it.
+    """
     message: Any = result
     if isinstance(result, Command):
-        messages = (result.update or {}).get("messages") or [None]
-        message = next((m for m in messages if isinstance(m, ToolMessage)), None)
+        messages = (result.update or {}).get("messages") or []
+        message = next(
+            (m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == call_id),
+            None,
+        )
     return getattr(message, "artifact", None) or {}
 
 
@@ -161,7 +169,7 @@ async def guard(
                     "message": f"{name} could not run because of an internal error. {_GIVE_UP}",
                 },
             )
-        artifact = _artifact(result)
+        artifact = _artifact(result, call_id)
         finished(
             artifact.get("outcome", "ok"), artifact.get("summary", ""), artifact.get("receipt")
         )

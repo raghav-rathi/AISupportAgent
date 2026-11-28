@@ -429,7 +429,10 @@ async def test_verifying_as_another_customer_drops_what_the_tools_said_about_the
     )
     session = Session(pool, retriever, world, model)
     await session.turn("Account 53920164, PIN 2458. How many seats do we have?")
-    await session.turn("Switch to account 10482917, PIN 4721.")
+    events = await session.turn("Switch to account 10482917, PIN 4721.")
+    # The step that is shown says who was verified. It is the call's own result that counts,
+    # not one of the earlier results the call replaced.
+    assert of(events, "tool.finished")[0].summary.startswith("Verified Larkspur Design Co")
     state = await session.state()
     assert state["customer"]["account_number"] == "10482917"
     results = [m for m in state["messages"] if isinstance(m, ToolMessage)]
