@@ -5,29 +5,27 @@ How the support agent is built, and why it is built that way. The [README](READM
 ## The system in one picture
 
 ```mermaid
-flowchart LR
+flowchart TB
+    VC["Vercel: the static page"] -.->|"serves"| UI
     subgraph BR["Browser"]
         UI["Next.js page: one reducer over the event stream"]
         AW["Audio worklets: capture at 16 kHz, playback at 24 kHz"]
         AW <--> UI
     end
-    VC["Vercel: the static page"] -.->|"serves"| UI
     UI <-->|"one WebSocket: JSON events and binary audio"| API
     subgraph RW["Railway: one container"]
         API["FastAPI socket handler: origin check, limits, budgets"]
         HUB["Session hub: one per live conversation"]
         RUN["Turn runner: lease and event log"]
         AG["LangGraph loop: begin, agent, tools, check, escalate"]
-        VS["Voice session"]
-        EM["Embedding model, ONNX, in process"]
+        VS["Voice session: turn-taking and interruption"]
         API --> HUB
         HUB --> RUN
         RUN --> AG
         HUB <--> VS
-        AG --> EM
     end
-    AG <-->|"SQL"| PG[("Postgres 17 with pgvector: help center, mock CRM, checkpoints, event log")]
-    RUN <--> PG
+    RUN <-->|"events, lease"| PG[("Postgres 17 with pgvector: help center, mock CRM, checkpoints, event log")]
+    AG <-->|"SQL"| PG
     AG -->|"agent, backup, judge, reranker"| ORT["OpenRouter"]
     VS <-->|"two WebSockets"| DG["Deepgram: Flux speech to text, Flux TTS"]
 ```
