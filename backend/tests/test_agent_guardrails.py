@@ -160,6 +160,8 @@ async def test_an_answer_that_leaves_a_fernhill_question_open_gets_a_ticket_from
     assert ticket.summary == "The help center has no answer to: What was your uptime last month?"
     final = of(events, "assistant.message")
     assert len(final) == 1 and final[0].text.startswith(UPTIME) and ticket.id in final[0].text
+    # The added sentence is a paragraph of its own: an answer may end in a list or a table.
+    assert final[0].text.split("\n\n")[-1].startswith("I've passed this to a specialist")
     assert not of(events, "answer.retracted")
     state = await session.state()
     # A ticket was opened, so the turn ends the way it does when the model opens one itself.

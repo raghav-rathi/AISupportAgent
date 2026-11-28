@@ -127,10 +127,10 @@ function tableRows(lines: string[]): string[][] {
     );
 }
 
-export function RichText({ text, caret = false, cites }: { text: string; caret?: boolean; cites?: Cites }) {
+export function RichText({ text, caret = false, cites, small = false }: { text: string; caret?: boolean; cites?: Cites; small?: boolean }) {
   const all = blocks(text);
   return (
-    <div className="flex flex-col gap-12 break-words text-body">
+    <div className={`flex flex-col gap-12 break-words ${small ? "text-body-sm leading-[1.5]" : "text-body"}`}>
       {all.map((block, b) => {
         const tail =
           caret && b === all.length - 1 ? (

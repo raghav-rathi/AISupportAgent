@@ -185,6 +185,34 @@ async def verify_identity(account_number: str, pin: str, runtime: Runtime) -> Co
         )
 
     account = re.sub(r"\D", "", account_number)
+    if not account or not digits_of(pin):
+        # A call without an account number or without a PIN checks nothing. It is no guess and
+        # costs no attempt. A model makes such a call now and then for a customer who is
+        # verified already, with the PIN as the conversation holds it by then, which is a mask.
+        # Counted as wrong PINs, three of those calls locked a verified customer out.
+        verified = state.get("customer")
+        if verified:
+            return _reply(
+                runtime,
+                {
+                    "verified": True,
+                    "message": "The customer is verified already in this conversation. Do not "
+                    "ask for the account number or the PIN again. Use get_account to read "
+                    "their account.",
+                },
+                summary=f"Already verified: {verified['company_name']}",
+                replace=scrubbed,
+            )
+        return _reply(
+            runtime,
+            {
+                "verified": False,
+                "message": "No account number and PIN were given. Ask the customer for both.",
+            },
+            outcome="refused",
+            summary="Nothing to check: account number or PIN missing",
+            replace=scrubbed,
+        )
     async with ctx.pool.connection() as conn:
         record = await repo.verify_pin(conn, ctx.world_id, account, digits_of(pin))
 

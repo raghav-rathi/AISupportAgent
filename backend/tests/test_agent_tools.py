@@ -194,6 +194,37 @@ async def test_three_wrong_pins_lock_verification_and_open_a_ticket(pool, retrie
     assert json.loads(model.calls[4][0][-1].content)["locked"] is True
 
 
+async def test_a_call_without_a_pin_checks_nothing_and_costs_no_attempt(pool, retriever, world):
+    # Seen on the backup model: for a customer who was verified it called the tool again, with
+    # the PIN as the conversation held it by then, a mask, and no account number. Counted as a
+    # wrong PIN, three such calls locked a verified customer out.
+    masked = {"account_number": "", "pin": "****"}
+    model = ScriptedModel(
+        "m",
+        call("verify_identity", **masked),
+        say("What are your account number and PIN?"),
+        call("verify_identity", **MAYA),
+        call("verify_identity", **masked),
+        call("verify_identity", **masked),
+        call("verify_identity", **masked),
+        call("get_account"),
+        say("You are on the Pro plan."),
+    )
+    session = Session(pool, retriever, world, model)
+    events = await session.turn("Which plan am I on?")
+    assert steps(events) == [("verify_identity", "refused")]
+    assert (await session.state()).get("failed_verifications", 0) == 0
+
+    events = await session.turn("Account 10482917, PIN 4721.")
+    assert [outcome for _, outcome in steps(events)] == ["ok"] * 5
+    assert of(events, "escalation.created") == []
+    state = await session.state()
+    assert state["customer"]["account_number"] == "10482917"
+    assert state.get("failed_verifications", 0) == 0
+    told = json.loads(model.calls[4][0][-1].content)
+    assert told["verified"] is True and "get_account" in told["message"]
+
+
 async def test_a_second_refund_request_in_a_fresh_tool_call_pays_nothing(pool, retriever, world):
     model = ScriptedModel(
         "m",

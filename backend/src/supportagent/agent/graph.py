@@ -628,7 +628,9 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
         )
         emit(EscalationCreated(ticket=ticket))
         follow_up = _FOLLOW_UP_SPOKEN if spoken else _FOLLOW_UP.format(ticket=ticket.id)
-        text = f"{text} {follow_up}"
+        # On a screen the sentence is a paragraph of its own. Joined to the line before it, it
+        # became part of a list item, or of a table's last row, which then was no row any more.
+        text = f"{text} {follow_up}" if spoken else f"{text}\n\n{follow_up}"
         emit(final.model_copy(update={"text": text}))
         stored = answer.model_copy(update={"content": ctx.redactor.text(text)})
         return {

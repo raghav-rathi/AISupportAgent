@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { BAND_LABELS, FAILURE_LABELS, PLAN_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
 import type { RetrievalHit, Ticket } from "@/lib/protocol";
@@ -167,7 +167,9 @@ function SourceCard({ id, hit, passage, onClose }: { id: string; hit: RetrievalH
       ) : passage === "missing" ? (
         <p className="text-body-sm leading-[1.45] text-ash-text">This passage is no longer available.</p>
       ) : (
-        <p className="max-h-320 overflow-y-auto whitespace-pre-wrap break-words text-body-sm leading-[1.5]">{passage.content}</p>
+        <div className="max-h-320 overflow-y-auto">
+          <RichText text={passage.content} small />
+        </div>
       )}
       <p className="text-caption leading-[1.4] text-ash-text">
         The help center passage the assistant was given. Written for {hit.tiers.map((tier) => PLAN_LABELS[tier]).join(", ")}.
@@ -224,6 +226,12 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
     setOpenSource((open) => (open === n ? null : n));
     if (typeof passages[hit.chunk_id] !== "object") onPassage(hit.chunk_id);
   };
+  // The page drops the passages it holds when another customer is verified: who may read one is
+  // the server's decision for whoever is verified now. A card that is open asks again.
+  const dropped = shown && passages[shown.chunk_id] === undefined ? shown.chunk_id : null;
+  useEffect(() => {
+    if (dropped) onPassage(dropped);
+  }, [dropped, onPassage]);
   const cites: Cites = { valid: new Set(cited.map((hit) => hit.n)), open: openSource, onCite: toggleSource };
   const ended = status !== "running" && hasTrace(turn);
   // A spoken reply the visitor cut off: what they heard of it, which is all the assistant will
