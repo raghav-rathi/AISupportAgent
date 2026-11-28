@@ -83,3 +83,16 @@ def test_account_and_invoice_state_gate_the_refund(overrides, code, escalate):
 def test_a_suspended_account_is_refused_even_inside_window_and_limit():
     decision = decide(1, account_status="suspended", amount_cents=100)
     assert not decision.allowed
+
+
+def test_the_billing_team_lifts_the_two_limits_that_send_a_case_to_it_and_no_other():
+    # Above the support limit, and on a suspended account: both are refused with "needs the
+    # billing team", and a person there may approve them.
+    assert decide(amount_cents=144_000).code == "over_limit"
+    assert decide(amount_cents=144_000, by_billing=True).allowed
+    assert decide(account_status="suspended", by_billing=True).allowed
+    # Nobody refunds outside the window, twice, or with a balance unpaid.
+    assert decide(age_days=40, by_billing=True).code == "outside_window"
+    assert decide(invoice_status="refunded", by_billing=True).code == "already_refunded"
+    assert decide(account_status="past_due", by_billing=True).code == "account_past_due"
+    assert decide(tier="free", by_billing=True).code == "free_plan"

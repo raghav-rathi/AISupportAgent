@@ -31,6 +31,20 @@ export interface AssistantMessage {
   hits: RetrievalHit[];
 }
 
+/** What a person at the service desk did to one of this conversation's tickets. Only what the customer may know: a reply to them, who has picked the ticket up, a change of its status, a refund that was approved. A note for colleagues and a change of priority never get here. It belongs to no turn, is stored like any event of the conversation, and so is still there after a reload. */
+export interface CaseUpdated {
+  seq: number;
+  ts: number;
+  turn_id: string | null;
+  type: "case.updated";
+  ticket_id: string;
+  status: "open" | "pending" | "resolved";
+  assignee: string | null;
+  kind: "reply" | "status" | "assigned" | "refund";
+  author: string;
+  body: string;
+}
+
 export interface CustomerSummary {
   account_number: string;
   company_name: string;
@@ -466,6 +480,7 @@ export type ServerEvent =
   | AnswerRetracted
   | AssistantMessage
   | EscalationCreated
+  | CaseUpdated
   | SessionState
   | TurnFinished
   | TurnFailed
@@ -489,11 +504,12 @@ export interface FaultInject {
   times?: number;
 }
 
-/** The first message on every connection. Without `session_id` the server starts a new session. With one, it resumes that session and sends the events after `last_seq`. The ID is the only key to a session, so treat it as a secret. */
+/** The first message on every connection. Without `session_id` the server starts a new session. With one, it resumes that session and sends the events after `last_seq`. The ID is the only key to a session, so treat it as a secret. `workspace` is a key the browser makes up once and keeps. A conversation joins the workspace its first connection names and stays in it, and the service desk of that workspace is where its tickets show. Without one the conversation has no desk. */
 export interface Hello {
   type: "hello";
   session_id?: string | null;
   last_seq?: number;
+  workspace?: string | null;
 }
 
 /** Ask for the text of a help center passage. The server answers with `passage.detail`, and only for a passage that a search of this conversation handed to the model. */
@@ -565,3 +581,221 @@ export type ClientMessage =
   | VoiceStop
   | VoicePlayhead
   | VoiceInterrupt;
+
+export interface AccountChange {
+  field: string;
+  old_value: string;
+  new_value: string;
+  at: number;
+}
+
+export interface AccountInvoice {
+  id: string;
+  amount_cents: number;
+  description: string;
+  issued_on: string;
+  status: "paid" | "open" | "refunded";
+}
+
+export interface AccountRefund {
+  id: string;
+  invoice_id: string;
+  amount_cents: number;
+  reason: string;
+  refunded_on: string;
+}
+
+/** The customer behind a ticket, as the mock CRM of its conversation has them. */
+export interface AccountView {
+  account_number: string;
+  company: string;
+  contact: string;
+  email: string;
+  phone: string;
+  billing_email: string;
+  tier: "free" | "pro" | "enterprise";
+  billing_cycle: "monthly" | "annual" | null;
+  status: "active" | "past_due" | "suspended" | "cancelled";
+  seats: number;
+  customer_since: string;
+  renews_on: string | null;
+  invoices: AccountInvoice[];
+  refunds: AccountRefund[];
+  changes: AccountChange[];
+}
+
+/** One thing that happened to a ticket. `public` is what the customer may read. */
+export interface Activity {
+  id: number;
+  kind: "created" | "assigned" | "status" | "priority" | "note" | "reply" | "refund";
+  author: string;
+  public: boolean;
+  body: string;
+  at: number;
+  meta: Record<string, string>;
+}
+
+export interface DeskDetail {
+  type: "desk.detail";
+  ticket: DeskTicket;
+  activity: Activity[];
+  receipt: Receipt | null;
+  before: string[];
+  after: Line[];
+  account: AccountView | null;
+}
+
+export interface DeskError {
+  type: "desk.error";
+  code: "bad_message" | "not_found" | "not_allowed" | "too_long" | "rate_limited" | "busy" | "refused";
+  message: string;
+  key: string | null;
+}
+
+export interface DeskReady {
+  type: "desk.ready";
+  agent: string;
+  tickets: DeskTicket[];
+  stats: DeskStats;
+}
+
+/** The workspace in numbers. */
+export interface DeskStats {
+  open: number;
+  pending: number;
+  resolved: number;
+  unassigned: number;
+  conversations: number;
+  turns: number;
+  handed_off: number;
+  first_reply_s: number | null;
+}
+
+/** One ticket as the inbox lists it. */
+export interface DeskTicket {
+  key: string;
+  id: string;
+  status: "open" | "pending" | "resolved";
+  priority: "low" | "normal" | "high" | "urgent";
+  reason: "low_confidence" | "ungrounded_answer" | "refund_over_limit" | "account_suspended" | "verification_failed" | "billing_dispute" | "security" | "privacy_request" | "customer_request" | "unanswered_question" | "step_limit" | "other";
+  summary: string;
+  channel: "text" | "voice";
+  assignee: string | null;
+  account_number: string | null;
+  company: string | null;
+  contact: string | null;
+  tier: "free" | "pro" | "enterprise" | null;
+  created_at: number;
+  updated_at: number;
+  replies: number;
+}
+
+/** A ticket is new or has changed. Sent to every desk of the workspace. */
+export interface DeskTicketChanged {
+  type: "desk.ticket";
+  ticket: DeskTicket;
+  stats: DeskStats;
+}
+
+/** One thing said in the conversation since the hand-off. */
+export interface Line {
+  role: "customer" | "assistant";
+  text: string;
+  mode: "text" | "voice";
+  at: number;
+}
+
+/** What the assistant did in the turn that opened the ticket, and why it stopped there. Built from the stored events of that turn, so it says what happened and not what a model says happened. Nothing here is written by a model except `told`. */
+export interface Receipt {
+  asked: string;
+  channel: "text" | "voice";
+  why: string;
+  steps: ReceiptStep[];
+  searches: ReceiptSearch[];
+  check: "grounded" | "ungrounded" | "skipped" | null;
+  unsupported: string[];
+  told: string;
+  heard: string | null;
+}
+
+export interface ReceiptSearch {
+  query: string;
+  band: "answer" | "check" | "verify" | "restricted" | "escalate";
+  best: string | null;
+  score: number | null;
+}
+
+export interface ReceiptStep {
+  name: string;
+  outcome: "ok" | "refused" | "failed";
+  summary: string;
+}
+
+export type DeskEvent =
+  | DeskReady
+  | DeskTicketChanged
+  | DeskDetail
+  | DeskError;
+
+/** Give the ticket to someone, or to nobody with `assignee` null. */
+export interface DeskAssign {
+  type: "desk.assign";
+  key: string;
+  assignee?: string | null;
+}
+
+/** The first message. `workspace` is the key the browser keeps. `agent` is a display name. */
+export interface DeskHello {
+  type: "desk.hello";
+  workspace: string;
+  agent?: string;
+}
+
+/** A note for colleagues. The customer never sees it. */
+export interface DeskNote {
+  type: "desk.note";
+  key: string;
+  body: string;
+}
+
+export interface DeskOpen {
+  type: "desk.open";
+  key: string;
+}
+
+/** Approve a refund as the billing team: above the support limit, or on a suspended account. */
+export interface DeskRefund {
+  type: "desk.refund";
+  key: string;
+  invoice_id: string;
+}
+
+/** A reply to the customer. It appears in the conversation the ticket came from. */
+export interface DeskReply {
+  type: "desk.reply";
+  key: string;
+  body: string;
+  status?: "open" | "pending" | "resolved" | null;
+}
+
+export interface DeskSetPriority {
+  type: "desk.priority";
+  key: string;
+  priority: "low" | "normal" | "high" | "urgent";
+}
+
+export interface DeskSetStatus {
+  type: "desk.status";
+  key: string;
+  status: "open" | "pending" | "resolved";
+}
+
+export type DeskMessage =
+  | DeskHello
+  | DeskOpen
+  | DeskAssign
+  | DeskSetStatus
+  | DeskSetPriority
+  | DeskNote
+  | DeskReply
+  | DeskRefund;

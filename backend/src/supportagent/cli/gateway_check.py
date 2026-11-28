@@ -106,7 +106,7 @@ def _usage(model: ChatModel, message: Any, first_ms: float | None, total_ms: flo
 
 
 async def check_chat(name: str, model: ChatModel, timeout_s: float = 60.0) -> Row:
-    """The agent's own kind of call: the system prompt, the six tools, a message that needs one."""
+    """The agent's own kind of call: the system prompt, the seven tools, a message that needs one."""
     messages = [SystemMessage(system_prompt(None, "text")), HumanMessage(_CREDENTIALS)]
     try:
         message, first_ms, total_ms = await _reply(model, messages, TOOLS, None, timeout_s)

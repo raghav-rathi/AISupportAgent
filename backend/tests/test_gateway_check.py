@@ -26,10 +26,10 @@ async def test_a_model_that_calls_the_tool_passes_and_reports_what_it_used():
     row = await check_chat("candidate", model)
     assert (row.ok, row.kind, row.name) == (True, "chat", "candidate")
     assert "500 in and 15 out" in row.detail and "$0.00053" in row.detail
-    # The call is the agent's own: its system prompt and all six tools.
+    # The call is the agent's own: its system prompt and all seven tools.
     messages, tools = model.calls[0]
     assert "support assistant for Fernhill" in messages[0].content
-    assert len(tools) == 6
+    assert len(tools) == 7
 
 
 async def test_a_model_that_answers_in_text_or_leaks_its_reasoning_fails():

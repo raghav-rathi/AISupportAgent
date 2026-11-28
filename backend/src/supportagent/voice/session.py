@@ -103,6 +103,7 @@ ONE_MOMENT = {
     "issue_refund": "One moment, please.",
     "update_account_field": "One moment, please.",
     "create_escalation_ticket": "One moment, please.",
+    "get_ticket_status": "Checking your ticket.",
 }
 
 _TICK_S = 0.1

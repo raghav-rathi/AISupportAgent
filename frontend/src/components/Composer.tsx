@@ -73,21 +73,21 @@ function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((was) => !was)}
-        className="flex h-32 items-center gap-8 rounded-nav px-12 text-caption font-w480 text-ash-text hover:bg-obsidian-button hover:text-ivory-text"
+        className="label-mono flex h-28 items-center gap-8 rounded-md px-8 text-stone hover:bg-hairline/70 hover:text-obsidian"
       >
         <Glyph name="person" /> Demo accounts
       </button>
       {open ? (
-        // It floats over the conversation, whose cards share its colour. The border and a ring of
-        // the page's own colour set it apart, and on a short screen it scrolls instead of running off.
+        // It floats over the conversation. Its hairline ring sets it apart, and on a short screen
+        // it scrolls instead of running off.
         <div
           ref={menu}
           role="menu"
           aria-label="Demo accounts"
           onKeyDown={onMenuKey}
-          className="absolute bottom-full left-0 z-30 mb-8 flex max-h-[calc(100dvh-96px)] w-[min(420px,calc(100vw-48px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-cards border border-slate-border bg-graphite-card p-12 ring-4 ring-onyx-canvas"
+          className="absolute bottom-full left-0 z-30 mb-8 flex max-h-[calc(100dvh-96px)] w-[min(420px,calc(100vw-48px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-md bg-pure-white p-8 shadow-card"
         >
-          <Caption className="px-12 py-8">Puts the account number and PIN into your message</Caption>
+          <Caption className="px-8 py-4">Puts the account number and PIN into your message</Caption>
           {ACCOUNTS.map((account) => (
             <button
               key={account.number}
@@ -97,13 +97,13 @@ function AccountMenu({ onPick }: { onPick: (account: DemoAccount) => void }) {
                 onPick(account);
                 setOpen(false);
               }}
-              className="flex flex-wrap items-baseline gap-x-12 gap-y-4 rounded-lg px-12 py-8 text-left text-body-sm leading-[1.45] hover:bg-obsidian-button"
+              className="flex flex-wrap items-baseline gap-x-12 gap-y-4 rounded-md px-8 py-8 text-left text-body-sm text-obsidian hover:bg-hairline/70"
             >
-              <span className="font-w480">{account.name}</span>
-              <span className="font-mono tabular-nums text-ash-text">
+              <span className="font-medium">{account.name}</span>
+              <span className="font-mono text-caption tabular-nums text-stone">
                 {account.number} · PIN {account.pin}
               </span>
-              <span className="basis-full text-caption leading-[1.4] text-ash-text">{account.note}</span>
+              <span className="basis-full text-caption text-stone">{account.note}</span>
             </button>
           ))}
         </div>
@@ -163,7 +163,7 @@ export function Composer({ ready, busy, onSend, onStop, restored, picked, onAcco
           event.preventDefault();
           submit();
         }}
-        className="flex items-end gap-8 rounded-inputs border border-mist-border/60 py-8 pl-20 pr-8 focus-within:border-mist-border"
+        className="flex items-end gap-8 rounded-md bg-pure-white py-8 pl-16 pr-8 shadow-card focus-within:shadow-focus"
       >
         <textarea
           ref={field}
@@ -180,23 +180,23 @@ export function Composer({ ready, busy, onSend, onStop, restored, picked, onAcco
               submit();
             }
           }}
-          className="max-h-168 min-h-40 flex-1 resize-none bg-transparent py-8 text-body placeholder:text-ash-text focus:outline-none"
+          className="max-h-168 min-h-36 flex-1 resize-none bg-transparent py-6 text-body text-obsidian outline-none placeholder:text-smoke"
         />
         {voice ? (
           <Button
-            variant={voice.on ? "surface" : "quiet"}
+            variant={voice.on ? "surface" : "ghost"}
             aria-pressed={voice.on}
             aria-label={voice.on ? "Turn voice off" : "Talk instead of typing"}
             disabled={!voice.ready || voice.starting}
             onClick={voice.onToggle}
-            className="max-sm:w-40 max-sm:px-0"
+            className="max-sm:w-36 max-sm:px-0"
           >
             <Glyph name="mic" />
             <span className="max-sm:hidden">{voice.on ? "Voice on" : "Voice"}</span>
           </Button>
         ) : null}
         {busy ? (
-          <Button variant="surface" onClick={onStop}>
+          <Button variant="ghost" onClick={onStop}>
             <Glyph name="stop" /> Stop
           </Button>
         ) : (
@@ -207,7 +207,7 @@ export function Composer({ ready, busy, onSend, onStop, restored, picked, onAcco
       </form>
       <div className="mt-8 flex flex-wrap items-center justify-between gap-x-16 gap-y-4">
         <AccountMenu onPick={onAccount} />
-        <p className="text-caption font-w480 leading-[1.4] text-ash-text">A demo for an invented company. Do not enter real personal data.</p>
+        <p className="text-caption text-stone">A demo for an invented company. Do not enter real personal data.</p>
       </div>
     </div>
   );

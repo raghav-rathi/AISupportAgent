@@ -194,6 +194,7 @@ async def open_ticket(
                 state.get("messages", []), ctx.redactor, current_turn_only=not attribute
             ),
             tool_call_id=tool_call_id,
+            channel=ctx.mode,
         )
     return Ticket(
         id=ticket_id,

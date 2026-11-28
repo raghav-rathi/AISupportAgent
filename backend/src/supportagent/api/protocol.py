@@ -16,11 +16,16 @@ class Hello(BaseModel):
 
     Without `session_id` the server starts a new session. With one, it resumes that session and
     sends the events after `last_seq`. The ID is the only key to a session, so treat it as a secret.
+
+    `workspace` is a key the browser makes up once and keeps. A conversation joins the workspace
+    its first connection names and stays in it, and the service desk of that workspace is where
+    its tickets show. Without one the conversation has no desk.
     """
 
     type: Literal["hello"]
     session_id: str | None = Field(default=None, max_length=64)
     last_seq: int = Field(default=0, ge=0)
+    workspace: str | None = Field(default=None, min_length=16, max_length=64)
 
 
 class UserMessage(BaseModel):

@@ -1,25 +1,25 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-import { BAND_LABELS, FAILURE_LABELS, PLAN_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
-import type { RetrievalHit, Ticket } from "@/lib/protocol";
+import { BAND_LABELS, CASE_LABELS, FAILURE_LABELS, PLAN_LABELS, TICKET_REASONS, TOOL_LABELS, formatCost, formatCount, formatMs, shortModel } from "@/lib/labels";
+import type { CaseUpdated, RetrievalHit, Ticket } from "@/lib/protocol";
 import { type Passage, type Step, type ToolStep, type Turn, type TurnStatus, hasTrace, heardOf, totalCost, turnUsage } from "@/lib/state";
 
 import { type Cites, RichText, citedNumbers } from "./RichText";
-import { Button, Caption, Glyph, type GlyphName, Spinner, Tag } from "./ui";
+import { Button, Caption, Card, Glyph, type GlyphName, Spinner, Tag } from "./ui";
 
 /** One line of what the agent is doing or has done. */
 function Row({ icon, title, detail, meta, children }: { icon: ReactNode; title: string; detail?: string | null; meta?: string; children?: ReactNode }) {
   return (
-    <li className="flex items-start gap-12">
-      <span className="mt-2">{icon}</span>
-      <div className="flex min-w-0 flex-1 flex-col gap-4">
-        <p className="text-body-sm leading-[1.45]">
+    <li className="flex items-start gap-8 font-mono text-caption">
+      <span className="flex h-20 w-16 shrink-0 items-center">{icon}</span>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <p className="text-obsidian">
           {title}
-          {detail ? <span className="text-ash-text"> · {detail}</span> : null}
+          {detail ? <span className="text-stone"> · {detail}</span> : null}
         </p>
         {children}
       </div>
-      {meta ? <span className="mt-4 shrink-0 text-caption tabular-nums text-ash-text">{meta}</span> : null}
+      {meta ? <span className="ml-8 shrink-0 tabular-nums text-smoke">{meta}</span> : null}
     </li>
   );
 }
@@ -36,19 +36,19 @@ function ToolRow({ step }: { step: ToolStep }) {
     return <Row icon={<Spinner />} title={`${label.running}…`} detail={detail} />;
   }
   if (step.status === "stopped") {
-    return <Row icon={<Glyph name="stop" className="text-ash-text" />} title={label.done} detail="did not finish" />;
+    return <Row icon={<Glyph name="stop" className="text-stone" />} title={label.done} detail="did not finish" />;
   }
   const band = step.retrieval ? BAND_LABELS[step.retrieval.band] : null;
   return (
     <Row
-      icon={<Glyph name={OUTCOME_GLYPH[step.status]} className={step.status === "ok" ? "" : "text-ash-text"} />}
+      icon={<Glyph name={OUTCOME_GLYPH[step.status]} className={step.status === "ok" ? "text-terminal-green" : "text-stone"} />}
       title={label.done}
       detail={step.summary}
       meta={formatMs(step.durationMs)}
     >
-      {band ? <p className="text-caption leading-[1.4] text-ash-text">{band}</p> : null}
+      {band ? <p className="text-label text-smoke">{band}</p> : null}
       {step.attempt > 1 ? (
-        <p className="text-caption leading-[1.4] text-ash-text">
+        <p className="text-label text-smoke">
           {step.status === "ok" ? `Worked on attempt ${step.attempt}` : `Gave up after ${step.attempt} attempts`}
           {step.error ? `. An earlier attempt failed: ${step.error}` : ""}
         </p>
@@ -63,7 +63,7 @@ function StepRow({ step }: { step: Step }) {
     const wait = step.waitMs >= 100 ? ` in ${formatMs(step.waitMs)}` : "";
     return (
       <Row
-        icon={<Glyph name="clock" />}
+        icon={<Glyph name="clock" className="text-stone" />}
         title={`The model ${FAILURE_LABELS[step.reason]}. Trying again${wait}`}
         detail={`attempt ${step.attempt} of ${step.maxAttempts}`}
       />
@@ -71,7 +71,7 @@ function StepRow({ step }: { step: Step }) {
   }
   return (
     <Row
-      icon={<Glyph name="swap" />}
+      icon={<Glyph name="swap" className="text-stone" />}
       title={`Switched to the backup model ${shortModel(step.toModel)}`}
       detail={`${shortModel(step.fromModel)} ${FAILURE_LABELS[step.reason]}`}
     />
@@ -86,7 +86,7 @@ function VerdictRow({ turn }: { turn: Turn }) {
     return <Row icon={<Glyph name="shield" />} title="Answer checked against the help center" detail={how} meta={formatMs(verdict.ms)} />;
   }
   if (verdict.verdict === "skipped") {
-    return <Row icon={<Glyph name="minus" className="text-ash-text" />} title="The grounding check did not run" />;
+    return <Row icon={<Glyph name="minus" className="text-stone" />} title="The grounding check did not run" />;
   }
   // The statements themselves stay in the observability drawer. Here they would put in front of
   // the customer the very claims the check refused to let through.
@@ -95,7 +95,11 @@ function VerdictRow({ turn }: { turn: Turn }) {
   return <Row icon={<Glyph name="cross" />} title={`The check found ${what} the help center does not support`} meta={formatMs(verdict.ms)} />;
 }
 
-function TicketCard({ ticket }: { ticket: Ticket }) {
+/**
+ * The ticket as the customer holds it. `latest` is the last thing the service desk told them
+ * about it, and with it the card says where the ticket stands now and who has it.
+ */
+function TicketCard({ ticket, latest, onDesk }: { ticket: Ticket; latest: CaseUpdated | null; onDesk: () => void }) {
   const [copied, setCopied] = useState(false);
   const summary = `Ticket ${ticket.id} (${TICKET_REASONS[ticket.reason]}, ${ticket.priority} priority)\n${ticket.summary}`;
   const copy = async () => {
@@ -107,21 +111,34 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
     }
   };
   return (
-    <div className="flex flex-col gap-12 rounded-cards bg-graphite-card p-24">
-      <div className="flex items-center gap-8 text-ash-text">
+    <Card className="flex flex-col gap-12 p-16">
+      <div className="flex flex-wrap items-center gap-8 text-stone">
         <Glyph name="person" />
         <Caption>Handed to a person</Caption>
+        <Tag tone={latest?.status === "resolved" ? "good" : "plain"} className="ml-auto">
+          {latest?.status === "resolved" ? <Glyph name="check" className="mr-4" /> : null}
+          {CASE_LABELS[latest?.status ?? "open"]}
+        </Tag>
       </div>
-      <p className="font-arcadiadisplay text-subheading font-w480">{ticket.id}</p>
+      <p className="font-mono text-body font-medium text-obsidian">{ticket.id}</p>
       <div className="flex flex-wrap gap-8">
         <Tag>{TICKET_REASONS[ticket.reason]}</Tag>
         <Tag>{ticket.priority} priority</Tag>
       </div>
-      <p className="whitespace-pre-wrap break-words text-body-sm leading-[1.45] text-ash-text">{ticket.summary}</p>
-      <Button variant="surface" onClick={copy} className="self-start">
-        {copied ? "Copied" : "Copy case summary"}
-      </Button>
-    </div>
+      <p className="whitespace-pre-wrap break-words text-body-sm text-charcoal">{ticket.summary}</p>
+      <p className="font-mono text-label text-stone">
+        {latest?.assignee ? `${latest.assignee} has this ticket.` : "Waiting for someone at the service desk to pick it up."} Replies show up
+        in this conversation.
+      </p>
+      <div className="flex flex-wrap gap-8">
+        <Button variant="ghost" size="sm" onClick={onDesk}>
+          <Glyph name="inbox" /> Open in the service desk
+        </Button>
+        <Button variant="quiet" size="sm" onClick={copy}>
+          {copied ? "Copied" : "Copy case summary"}
+        </Button>
+      </div>
+    </Card>
   );
 }
 
@@ -129,67 +146,71 @@ function TicketCard({ ticket }: { ticket: Ticket }) {
 function Receipt({ receipt }: { receipt: Record<string, string> }) {
   if (receipt.kind !== "refund") return null;
   return (
-    <div className="flex flex-col gap-12 rounded-cards bg-graphite-card p-24">
-      <div className="flex items-center gap-8 text-ash-text">
-        <Glyph name="check" />
+    <Card className="flex flex-col gap-12 p-16">
+      <div className="flex items-center gap-8 text-stone">
+        <Glyph name="check" className="text-terminal-green" />
         <Caption>Refund issued</Caption>
       </div>
-      <p className="font-arcadiadisplay text-subheading font-w480 tabular-nums">{receipt.amount}</p>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-16 gap-y-8 text-body-sm leading-[1.45]">
-        <dt className="text-ash-text">Invoice</dt>
-        <dd className="font-mono tabular-nums">{receipt.invoice_id}</dd>
-        <dt className="text-ash-text">Refund</dt>
-        <dd className="font-mono tabular-nums">{receipt.refund_id}</dd>
-        <dt className="text-ash-text">Date</dt>
-        <dd className="tabular-nums">{receipt.date}</dd>
+      <p className="text-heading tabular-nums text-obsidian">{receipt.amount}</p>
+      <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-16 gap-y-4 text-body-sm">
+        <dt className="label-mono text-stone">Invoice</dt>
+        <dd className="font-mono tabular-nums text-obsidian">{receipt.invoice_id}</dd>
+        <dt className="label-mono text-stone">Refund</dt>
+        <dd className="font-mono tabular-nums text-obsidian">{receipt.refund_id}</dd>
+        <dt className="label-mono text-stone">Date</dt>
+        <dd className="font-mono tabular-nums text-obsidian">{receipt.date}</dd>
       </dl>
-      <p className="text-caption leading-[1.4] text-ash-text">From the refund itself, as the billing tool recorded it.</p>
-    </div>
+      <p className="text-caption text-stone">From the refund itself, as the billing tool recorded it.</p>
+    </Card>
   );
 }
 
 function SourceCard({ id, hit, passage, onClose }: { id: string; hit: RetrievalHit; passage: Passage | undefined; onClose: () => void }) {
   return (
-    <div id={id} className="flex flex-col gap-12 rounded-cards bg-graphite-card p-24">
+    <Card id={id} className="flex flex-col gap-12 p-16">
       <div className="flex items-start justify-between gap-12">
         <div className="flex min-w-0 flex-col gap-4">
           <Caption>Source {hit.n}</Caption>
-          <p className="font-w480 leading-[1.35]">{hit.source}</p>
+          <p className="text-body font-medium text-obsidian">{hit.source}</p>
         </div>
-        <Button variant="quiet" onClick={onClose} aria-label="Close source" className="w-40 px-0">
+        <Button variant="quiet" size="sm" onClick={onClose} aria-label="Close source" className="w-28 px-0">
           <Glyph name="cross" />
         </Button>
       </div>
       {passage === undefined || passage === "loading" ? (
-        <p className="flex items-center gap-12 text-body-sm text-ash-text">
+        <p className="flex items-center gap-8 text-body-sm text-stone">
           <Spinner /> Loading the passage…
         </p>
       ) : passage === "missing" ? (
-        <p className="text-body-sm leading-[1.45] text-ash-text">This passage is no longer available.</p>
+        <p className="text-body-sm text-stone">This passage is no longer available.</p>
       ) : (
         <div className="max-h-320 overflow-y-auto">
           <RichText text={passage.content} small />
         </div>
       )}
-      <p className="text-caption leading-[1.4] text-ash-text">
+      <p className="text-caption text-stone">
         The help center passage the assistant was given. Written for {hit.tiers.map((tier) => PLAN_LABELS[tier]).join(", ")}.
       </p>
-    </div>
+    </Card>
   );
 }
 
 function Stopped({ title, body, action, onAction }: { title: string; body: string; action: string | null; onAction: () => void }) {
   return (
-    <div className="flex flex-col items-start gap-16 rounded-cards bg-graphite-card p-24">
-      <div className="flex items-start gap-12">
+    <Card className="flex flex-col items-start gap-12 p-16">
+      <div className="flex items-start gap-8">
         <Glyph name="alert" className="mt-4" />
         <div className="flex flex-col gap-4">
-          <p className="font-w480">{title}</p>
-          <p className="text-body-sm leading-[1.45] text-ash-text">{body}</p>
+          <p className="text-body font-medium text-obsidian">{title}</p>
+          <p className="text-body-sm text-charcoal">{body}</p>
         </div>
       </div>
-      {action ? <Button onClick={onAction}>{action}</Button> : null}
-    </div>
+      {action ? (
+        <Button variant={action === "Try again" ? "primary" : "ghost"} onClick={onAction}>
+          {action}
+        </Button>
+      ) : null}
+    </Card>
   );
 }
 
@@ -202,9 +223,11 @@ interface Props {
   passages: Record<string, Passage>;
   onPassage: (chunkId: string) => void; // ask the server for a passage's text
   voiceOn: boolean; // voice is on in the page
+  updates: CaseUpdated[]; // what the service desk has told this conversation, oldest first
+  onDesk: (ticketId: string) => void; // show a ticket at the service desk
 }
 
-export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages, onPassage, voiceOn }: Props) {
+export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages, onPassage, voiceOn, updates, onDesk }: Props) {
   const [openSource, setOpenSource] = useState<number | null>(null);
   const running = status === "running";
   const text = turn.answer?.text ?? turn.streaming;
@@ -244,9 +267,9 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
   return (
     <article className="flex flex-col gap-20">
       <div className="flex flex-col items-end gap-4">
-        <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-cards bg-obsidian-button px-20 py-12">{turn.userText}</p>
+        <p className="max-w-[85%] whitespace-pre-wrap break-words rounded-md bg-hairline px-16 py-8 text-obsidian">{turn.userText}</p>
         {turn.mode === "voice" ? (
-          <p className="flex items-center gap-4 text-caption font-w480 text-ash-text">
+          <p className="label-mono flex items-center gap-4 text-stone">
             <Glyph name="mic" /> Spoken
           </p>
         ) : null}
@@ -256,7 +279,7 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
         {/* Each step is a short line, so a screen reader may read them as they come. */}
         <div aria-live={live}>
           {turn.steps.length > 0 || thinking || checking || turn.verdict ? (
-            <ol className="flex flex-col gap-12 rounded-cards bg-graphite-card px-24 py-20">
+            <ol className="flex flex-col gap-8 rounded-md bg-pure-white px-16 py-12 shadow-card">
               {turn.steps.map((step) => (
                 <StepRow key={step.id} step={step} />
               ))}
@@ -268,14 +291,14 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
         </div>
 
         {turn.retracted ? (
-          <p className="flex items-start gap-12 text-body-sm leading-[1.45] text-ash-text">
+          <p className="flex items-start gap-8 text-body-sm text-charcoal">
             <Glyph name="alert" className="mt-2" />
             The first answer was withdrawn. It could not be confirmed against the help center.
           </p>
         ) : null}
 
         {cutShort ? (
-          <p className="flex items-start gap-12 text-body-sm leading-[1.45] text-ash-text">
+          <p className="flex items-start gap-8 text-body-sm text-charcoal">
             <Glyph name="stop" className="mt-2" />
             {heard ? `This reply was cut off. You heard: “${heard}”` : "This reply was cut off before any of it was said."}
           </p>
@@ -296,8 +319,8 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
                 aria-expanded={openSource === hit.n}
                 aria-controls={shown?.n === hit.n ? sourceId : undefined}
                 onClick={() => toggleSource(hit.n)}
-                className={`inline-flex min-h-32 items-center rounded-tags px-12 py-4 text-left text-caption font-w480 leading-[1.3] hover:text-ivory-text ${
-                  openSource === hit.n ? "bg-ivory-text text-onyx-canvas hover:text-onyx-canvas" : "bg-obsidian-button text-ash-text"
+                className={`inline-flex min-h-28 items-center rounded-md px-8 py-4 text-left text-caption shadow-hairline ${
+                  openSource === hit.n ? "bg-obsidian text-pure-white" : "bg-pure-white text-charcoal hover:bg-paper-white hover:text-obsidian"
                 }`}
               >
                 {hit.n} · {hit.source}
@@ -312,7 +335,12 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
         ))}
 
         {turn.tickets.map((ticket) => (
-          <TicketCard key={ticket.id} ticket={ticket} />
+          <TicketCard
+            key={ticket.id}
+            ticket={ticket}
+            latest={updates.findLast((update) => update.ticket_id === ticket.id) ?? null}
+            onDesk={() => onDesk(ticket.id)}
+          />
         ))}
 
         {status === "failed" ? (
@@ -359,8 +387,9 @@ export function TurnView({ turn, status, canRetry, onRetry, onInspect, passages,
         ) : null}
 
         {ended ? (
-          <button type="button" onClick={onInspect} className="-my-8 self-start rounded-md py-8 text-caption leading-[1.4] text-ash-text hover:text-ivory-text">
-            {formatMs(turn.totalMs)} · {formatCount(usage.inputTokens + usage.outputTokens)} tokens · {formatCost(totalCost(usage))} · View trace
+          <button type="button" onClick={onInspect} className="-my-8 self-start rounded-md py-8 font-mono text-label text-stone hover:text-obsidian">
+            {formatMs(turn.totalMs)} · {formatCount(usage.inputTokens + usage.outputTokens)} tokens · {formatCost(totalCost(usage))} ·{" "}
+            <span className="underline decoration-ash underline-offset-2">View trace</span>
           </button>
         ) : null}
       </div>

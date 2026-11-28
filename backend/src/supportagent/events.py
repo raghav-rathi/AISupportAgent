@@ -50,6 +50,8 @@ EscalationReason = Literal[
 Priority = Literal["low", "normal", "high", "urgent"]
 Tier = Literal["free", "pro", "enterprise"]
 AccountStatus = Literal["active", "past_due", "suspended", "cancelled"]
+# A ticket at the service desk. open: with the support team. pending: waiting on the customer.
+TicketStatus = Literal["open", "pending", "resolved"]
 
 
 class Ticket(BaseModel):
@@ -340,6 +342,24 @@ class EscalationCreated(_Event):
     ticket: Ticket
 
 
+class CaseUpdated(_Event):
+    """What a person at the service desk did to one of this conversation's tickets.
+
+    Only what the customer may know: a reply to them, who has picked the ticket up, a change of
+    its status, a refund that was approved. A note for colleagues and a change of priority
+    never get here. It belongs to no turn, is stored like any event of the conversation, and
+    so is still there after a reload.
+    """
+
+    type: Literal["case.updated"] = "case.updated"
+    ticket_id: str
+    status: TicketStatus  # as it stands after this
+    assignee: str | None  # who has the ticket after this
+    kind: Literal["reply", "status", "assigned", "refund"]
+    author: str  # the person who did it
+    body: str = ""  # the reply, or what was approved. Empty for a change of status or owner.
+
+
 class SessionState(_Event):
     type: Literal["session.state"] = "session.state"
     customer: CustomerSummary | None
@@ -521,6 +541,7 @@ AnyEvent = Annotated[
     | AnswerRetracted
     | AssistantMessage
     | EscalationCreated
+    | CaseUpdated
     | SessionState
     | TurnFinished
     | TurnFailed

@@ -1,12 +1,12 @@
 # AI support agent
 
-A customer support agent for Fernhill, an invented B2B SaaS company. It answers from a help center, checks who it is talking to before it touches an account, and can refund an invoice, change a contact field or hand the case to a person. It streams every step to the client as a typed event.
+A customer support agent for Fernhill, an invented B2B SaaS company. It answers from a help center, checks who it is talking to before it touches an account, and can refund an invoice, change a contact field or hand the case to a person. It streams every step to the client as a typed event. What it hands over lands on a service desk in the same page, where a person picks the ticket up, sees what the assistant tried, and answers into the customer's conversation.
 
 The project follows a brief that asks for streaming chat, live voice, multi-step tool chains, confidence guardrails and real-time observability. It was built in four phases. [ARCHITECTURE.md](ARCHITECTURE.md) says how it is put together and why.
 
 ## Status
 
-All four phases are done and deployed. Try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models, and speech runs on Deepgram. The last phase fixed the findings of an end-to-end review that a demo can run into, ran the public address end to end in a browser, typed and spoken, fixed what that run showed, ran every eval set again on the final code and wrote the architecture down. The voice phase before it was audited three times: by its author with four independent reviews, by two outside teams who wrote scripts that reproduce what they found, and by a reviewer who went over the voice paths once more. The code here has the fixes for all of them. What was measured is under [Results](#results) and [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet: that session is the project owner's.
+All four phases are done and deployed, and a service desk was added after them. Try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models, and speech runs on Deepgram. The last phase fixed the findings of an end-to-end review that a demo can run into, ran the public address end to end in a browser, typed and spoken, fixed what that run showed, ran every eval set again on the final code and wrote the architecture down. The voice phase before it was audited three times: by its author with four independent reviews, by two outside teams who wrote scripts that reproduce what they found, and by a reviewer who went over the voice paths once more. The code here has the fixes for all of them. What was measured is under [Results](#results) and [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet: that session is the project owner's.
 
 | What the brief asks for | State today |
 |---|---|
@@ -15,7 +15,7 @@ All four phases are done and deployed. Try it at **https://fernhill-support.verc
 | Observability drawer | Done. Per turn: end-to-end latency, what the customer waited for (first sign of work, first text, approved answer), tokens, estimated cost with the hosted reranker included, a timeline of every model and tool call, retrieval scores, the grounding verdict, and the full prompts with PINs masked, fetched when their tab is opened. For a spoken turn also the wait for the end of the turn, the voice's first sound, voice-to-voice time to the first sound and, where "one moment" came first, to the answer, the cost of speech, how long before the turn its first model call began, and whether a request was sent twice. Per session, the model calls that were started early and not used. |
 | Vector database with custom chunking | Done. pgvector and full-text search fused in SQL, a chunker that follows the heading tree, a reranker. |
 | Confidence guardrails that route to a person | Done. A gate on the reranker's score, a second model that checks each answer, and a ticket for a Fernhill question the help center does not answer. |
-| A chain of three or more tool calls | Done. Six tools, with the business rules in code. |
+| A chain of three or more tool calls | Done. Seven tools, with the business rules in code. |
 | Tool start and finish streamed to the UI | Done. |
 | Fallback states for timeouts, rate limits and tool failures | Done. The UI shows a retry, a switch to the backup model, a failed turn with Try again, a stopped turn with Resume, and a dropped connection. A panel can inject each failure on demand. |
 | One memory across text and voice | Done. A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. A spoken message and a typed one start the same kind of turn on the same session: an identity check done by voice holds for a typed question after it. |
@@ -33,6 +33,7 @@ Each step shows one thing the brief asks for.
 6. In **Observability**, open **Failures**. Queue **Main model down** and ask anything: the turn says it switched to the backup model. Queue **Every model down**: the turn fails with **Try again**, which picks it up where it stopped.
 7. Reload the page. The conversation, its steps and the verified customer come back from the stored events.
 8. Click **Voice** and start the microphone. Ask for help with a refund, talk over the reply to interrupt it, then say an account number and PIN at your own pace. Type a question after that: it is answered for the customer you verified by voice.
+9. Click **Refund above the limit**, then **Desk** in the top bar. The ticket is there, with a receipt of what the assistant did and why it stopped, and the customer's account beside it. Take the ticket, approve the refund on the invoice, and send a reply. Go back to **Assistant**: the reply is in the conversation, and it is still there after a reload. Ask "Any update on my ticket?" and the assistant reads the reply with its ticket tool.
 
 
 ## How a turn runs
@@ -54,7 +55,7 @@ flowchart LR
 ```
 
 1. `begin` stores the customer's message. If the last turn died half way, it first repairs the conversation, so the model never sees a tool call without a result.
-2. `agent` calls the model with the six tools. The model makes one tool call per step.
+2. `agent` calls the model with the seven tools. The model makes one tool call per step.
 3. `tools` runs the call inside a guard. The guard emits `tool.started` and `tool.finished`, enforces a timeout, retries a failure that may pass, and turns any other failure into an error the model can read.
 4. `check` sends the final answer and its evidence to a second model. Nothing tells the client "this is the answer" before that verdict. An answer with an unsupported statement is withdrawn. If the customer had seen or heard none of it, the reply says it could not be confirmed, and takes nothing back. An answer that stands and says the help center lacks something gets a ticket added, and the turn ends as escalated.
 5. `escalate` opens a ticket and replies with fixed wording. No model writes that text. If the turn had already refunded or changed something, the reply says so.
@@ -65,7 +66,7 @@ One process runs a session's turn at a time. It holds a lease in Postgres and re
 
 Chat and voice are two clients of this one pipeline. The turn runner takes a mode, text or voice, and the system prompt changes with it: a spoken reply is short, has no lists or citation numbers, and names an invoice by date and amount. [ARCHITECTURE.md](ARCHITECTURE.md) follows one turn through every part, with the storage, the failure handling and the voice pipeline.
 
-## The six tools
+## The seven tools
 
 | Tool | What it does | Rules the code enforces |
 |---|---|---|
@@ -75,6 +76,7 @@ Chat and voice are two clients of this one pipeline. The turn runner takes a mod
 | `issue_refund` | Refunds one invoice | 14 days for Pro monthly, 30 days otherwise, 90 days for a duplicate charge. Up to $500 on Pro and $2,000 on Enterprise. Anything above goes to the billing team as a ticket. The invoice has to be paid and not yet refunded. No refunds on Free, on a suspended account or on a past-due one. |
 | `update_account_field` | Changes the billing email, contact name, contact phone or marketing opt-in | Validates the value. No other field can change. |
 | `create_escalation_ticket` | Hands the case to a person | One ticket per call, even when the call is retried |
+| `get_ticket_status` | Reads this conversation's tickets: where each stands, who has it, and what the support team has written to the customer | Needs a verified customer. Internal notes are never in what it returns. |
 
 The model cannot talk its way around these. The limits are constants in `crm/policy.py`, the refund runs in one transaction that locks the customer row, and the account tools refuse until `verify_identity` has succeeded in this conversation.
 
@@ -285,9 +287,26 @@ The page is a fold over the event stream. `lib/state.ts` is one reducer that tur
 
 The page sends a content security policy that names the backend as the only place it may connect to, and refuses to be framed.
 
-The look follows a design file the project owner supplied: a dark, flat, monochrome system with one action colour. Its typefaces are not licensed for this repo, so Inter stands in, as the design file suggests.
+The look follows a design file the project owner supplied: a light, flat system in the manner of a developer tool. One near-white canvas, near-black type, hairline rings where another system would use shadows, 6px corners, Geist for text and Geist Mono for labels, IDs and figures. Green is the one colour, and it marks only what went through. State is shown by a glyph and words. A reply written by a person is the one inverted card on the page.
 
-Checked in a browser against the live backend, on the lab build and on the public address: the full chain of identity check, policy search, account read and refund with its receipt, opening a source, the drawer's metrics and its prompts on request, a hand-off with its ticket, a ticket added to an answer that left a question open, a failed grounding check and its retry, stop and resume, a reload, and a phone-sized screen. The reducer, the reconnect rules, the voice link, the Stop rules and the audio worklets have 127 tests. The case of a message lost on its way is covered by those tests and was not reproduced in a live browser.
+Checked in a browser against the live backend, on the lab build and on the public address: the full chain of identity check, policy search, account read and refund with its receipt, opening a source, the drawer's metrics and its prompts on request, a hand-off with its ticket, a ticket added to an answer that left a question open, a failed grounding check and its retry, stop and resume, a reload, and a phone-sized screen. The reducers, the reconnect rules, the voice link, the Stop rules and the audio worklets have 133 tests. The case of a message lost on its way is covered by those tests and was not reproduced in a live browser.
+
+## The service desk
+
+A hand-off is where most assistants end. Here it is where a second screen begins. **Desk** in the top bar is the inbox a support team would work from, and it is wired to the conversations end to end.
+
+- Tickets arrive live. The moment a tool or a guardrail opens a ticket, every open desk of the workspace lists it. The desk has its own WebSocket, `/desk`, with a typed protocol of its own.
+- The hand-off receipt. Each ticket opens with what the customer asked, each tool the assistant ran and how it ended, what it searched and how well that matched, the verdict of the grounding check, what the customer was told, and one sentence on why the assistant stopped. The server reads all of it from the stored events of the turn. No model writes it, so it says what happened and not what a model says happened. For a spoken turn that was cut off it also says how much of the reply the customer heard.
+- The customer's account sits beside the ticket: plan, status, invoices, refunds and what changed in the conversation.
+- A person can take the ticket, set its status and priority, write an internal note, or reply. The reply and the note look different on purpose, because sending the wrong one is the mistake to prevent.
+- A reply reaches the customer where they asked. It is stored as an event of their conversation, so it shows at once, survives a reload, and is in the transcript. A note never leaves the desk. Changes of hands and of status reach the customer as one line each. A change of priority does not.
+- The billing team can approve what the assistant may not. A refund above the support limit, or on a suspended account, is refused by the tool and sent to the desk. There a person approves it with one click. It runs through the same transaction as the assistant's refunds, so the refund window, the once-only rule and the past-due rule still hold for people.
+- The assistant knows what the desk did. Asked about a ticket, it calls `get_ticket_status` and answers from the result, which the grounding check sees as evidence like any other tool result.
+- Five figures at the top: open, waiting on the customer, resolved, the share of turns the assistant settled without a person, and the median time to a first reply.
+
+Who sees which tickets. There is no login in this demo. A browser makes up a random key once and keeps it. Each conversation it starts joins that workspace, the server stores a hash of the key with the session, and a desk lists the tickets of its own workspace and can act on no other. A conversation stays in the workspace it joined first. The desk names a ticket by an opaque key of its own, never by the conversation's ID, which is the conversation's only credential.
+
+Checked in a browser: a refund above the limit turned into a ticket on the desk while the turn was still running, the ticket was taken, a note written, the refund approved and a reply sent with "resolved", the reply and the refund appeared in the conversation and again after a reload, and "Any update on my ticket?" was answered from the ticket tool with the reply's own words. Nine tests drive the same paths over the real sockets, among them that another workspace can neither see nor touch a ticket and that a note is in nothing the conversation stores.
 
 ## Voice
 
@@ -355,18 +374,18 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 
 ### Results
 
-Hosted models through OpenRouter. The bake-off is from 2026-11-26. Every other row is from 2026-11-28, on the code that is deployed.
+Hosted models through OpenRouter. The bake-off is from 2026-11-26. Every other row is from 2026-11-28. The tests, the suite and the judge ran on the code with the service desk, which changed the prompt and added a tool. The retrieval rows, the three conversations at once and the spoken part of the browser run are from earlier that day, on the code before it, and nothing since touches what they measure.
 
 | Check | Result |
 |---|---|
-| Tests | 606 backend and 127 frontend pass, locally and in CI |
+| Tests | 616 backend and 133 frontend pass, locally and in CI |
 | Bake-off, 55 conversations run 3 times | Gemma 4 31B passed 164 of 165 with a median tool chain of 2.0 s at $0.0005 a turn, and is the agent model. Gemini 3.6 Flash passed 156 and GPT-6 Luna 155. |
-| Scenario suite, 55 conversations once | 55 passed, interval 93.5% to 100%. From the customer's message: first sign of work after 0.4 s, approved answer after 2.4 s at the median and 5.3 s at the 95th percentile. |
-| Grounding judge, Gemini 3.6 Flash, 54 replies run twice | 0 misses on 54 seeded errors. 1 false alarm on 54 correct replies. Of the replies that leave a question open, 8 of 8 were flagged, and none of the 45 that settle it. |
+| Scenario suite, 55 conversations once | 55 passed, interval 93.5% to 100%. From the customer's message: first sign of work after 0.3 s, approved answer after 2.4 s at the median and 7.4 s at the 95th percentile. |
+| Grounding judge, Gemini 3.6 Flash, 54 replies once | 0 misses on 27 seeded errors. 0 false alarms on 27 correct replies. Of the replies that leave a question open, 4 of 4 were flagged, and none of the 23 that settle it. Run twice on the code before the desk: 0 misses and 1 false alarm in 54 each. |
 | Retrieval, Cohere rerank-5-pro | The right section is first for 69 of 74 answerable questions and in the top 5 for all 74. A search takes 0.27 s at the median, nearly all of it the hosted reranker. |
 | Scope gate, 110 questions | 1 of 74 answerable questions escalated. 0 of 9 off-topic questions accepted. 2 of 22 near misses pass the threshold and are held for the grounding check. 5 of 5 questions that belong to another plan sent to verify or told the plan. |
 | Three conversations at once on the deployed backend, six turns each | 18 of 18 turns finished, 2.1 s at the median, 6.0 s the slowest. Every stream arrived in order, and a second connection read each conversation back whole. |
-| The public address in a browser | The tour above, step by step, and the page at 390 px. Spoken, in Chrome with a recording as its microphone: the greeting, a spoken turn, a reply cut off by speech with what was heard of it, an account number and PIN with the PIN masked, a turn with a tool, and a typed question answered for the customer verified by voice. No error in the page's console. |
+| The public address in a browser | The tour above, step by step, and the page at 390 px. Spoken, in Chrome with a recording as its microphone: the greeting, a spoken turn, a reply cut off by speech with what was heard of it, an account number and PIN with the PIN masked, a turn with a tool, and a typed question answered for the customer verified by voice. No error in the page's console. The service desk, typed: step 9 of the tour. |
 
 Read these with care.
 
@@ -413,7 +432,7 @@ One socket per client, at `/ws`. The client speaks first.
 
 | Client sends | For |
 |---|---|
-| `hello` | Opens a new session or resumes one. Carries the last event number the client saw. |
+| `hello` | Opens a new session or resumes one. Carries the last event number the client saw, and the browser's workspace key, which puts a new conversation into that workspace. |
 | `user.message` | Starts a turn. Carries an ID of the client's choosing, which `turn.started` or a refusal hands back. |
 | `turn.retry` | Resumes a failed or stopped turn |
 | `turn.cancel` | Stops the running turn |
@@ -433,6 +452,7 @@ The server answers with events. Those that belong to the conversation carry a se
 - tools: `tool.started`, `tool.retry`, `tool.error`, `tool.finished`
 - guardrails: `retrieval.result`, `guardrail.verdict`, `answer.retracted`, `escalation.created`
 - reply: `answer.drafted` when a step is known to be the answer, then `assistant.message`, always after the verdict
+- from the service desk: `case.updated`, when a person replied, took the ticket, changed its status or approved a refund. It belongs to no turn.
 - speech, stored: `speech.heard` and `speech.spoken` with timings and cost for a spoken turn, `speech.spoken` marked `filler` for "one moment" and counted under the turn it filled, `voice.usage` for listening time no turn accounts for
 - on request: `trace.list`, `passage.detail`
 - voice, to the connection with the microphone only and not stored: `voice.started`, `voice.stopped`, `voice.state`, `stt.partial`, `voice.playback` with pause, resume or flush, and the reply's audio as binary frames at 24 kHz. Flushes are numbered. A flush arrives in order with the audio. A pause or a resume may overtake audio that is still queued.
@@ -443,14 +463,18 @@ The server answers with events. Those that belong to the conversation carry a se
 
 Close codes from 4000 to 4005 tell the client why the server closed: it fell behind, it idled, the address started too many conversations, the server is full, too many connections are open, or the conversation has expired.
 
-`frontend/src/lib/protocol.ts` holds the TypeScript types. `python -m supportagent.cli.gen_types` writes that file from the pydantic models in `events.py` and `api/protocol.py`, and a test fails when it is stale.
+The desk has a socket of its own, at `/desk`, under the same origin check and limits. It says `desk.hello` with the workspace key and a display name, and then `desk.open`, `desk.assign`, `desk.status`, `desk.priority`, `desk.note`, `desk.reply` and `desk.refund`, each naming a ticket by its key. The server sends `desk.ready` with the workspace's tickets and figures, `desk.ticket` whenever one is new or has changed, `desk.detail` with a full case, and `desk.error` with a reason when it turns something down.
+
+`frontend/src/lib/protocol.ts` holds the TypeScript types for both sockets. `python -m supportagent.cli.gen_types` writes that file from the pydantic models in `events.py`, `api/protocol.py` and `desk/models.py`, and a test fails when it is stale.
 
 ## Layout
 
 ```text
 backend/src/supportagent/
-  agent/      the graph, the six tools, the tool guard, the judge, prompts, tickets, a model call
+  agent/      the graph, the seven tools, the tool guard, the judge, prompts, tickets, a model call
               started ahead of its turn
+  desk/       the service desk: its messages, its queries and actions, the hand-off receipt,
+              and the bus that tells open desks of a change
   api/        FastAPI app, session hub, client messages, limits per visitor and the daily budgets
   voice/      the voice session, Deepgram's two sockets, text on its way into and out of speech
   crm/        mock customers, policy constants, queries, per-session worlds
@@ -467,9 +491,12 @@ kb/              16 help center documents, 96 chunks after ingest
 evals/           question sets and bake-off candidate files
 frontend/src/
   app/           layout, the one page, design tokens in globals.css
-  components/    conversation, one turn, composer, voice panel, top bar, observability drawer
+  components/    conversation, one turn, composer, voice panel, top bar, observability drawer,
+                 the desk's inbox and one case, a reply from the desk in the conversation
   lib/state.ts   the reducer that folds the event stream into what the page shows
   lib/session.ts the WebSocket client: resume, reconnect, retry, cancel
+  lib/desk.ts    the desk's socket and the reducer for what it sends
+  lib/workspace.ts the key that ties a browser's conversations to its desk
   lib/voice.ts   microphone audio out, reply audio in, the playhead reported to the server
   lib/stop.ts    what Stop stops, and which key presses count as pressing it
   lib/audio.ts   the audio engine around the two worklets
@@ -488,12 +515,17 @@ Dockerfile       the backend image
 2. Phase 2, the chat UI and the first deploy: done. Two outside reviews after it led to a hardening pass, which is the commit history from `6e9a2b3` on.
 3. Phase 3, voice: done, and audited three times. Open from it: the project owner's own session on loudspeakers and on headphones.
 4. Phase 4, hardening and the write-up: done. Fixed from an end-to-end review: a search that ran on the customer's credentials, two figures in the drawer that timed different sounds, a ticket with another customer's lines, and a message field that could stay disabled. Fixed from a run of the public address in a browser: a PIN attempt that the backup model wasted for a verified customer, a table shown as text and its last row lost to a sentence added after it, a source card that kept loading, and a wrong line for an identity check after a change of account. Left out by choice: an access code in front of the demo, an uptime check from outside, and another run of the voice gate.
+5. After the phases: the service desk, a seventh tool, and a new look for the whole page. Not rerun for it: the voice gate, and the retrieval eval, which nothing here touches.
 
 The page is built and deployed by Vercel from this repo on every push to `main`. The backend is deployed to Railway by hand. CI runs on every push.
 
 ## Known gaps
 
 - The limits per address are counted in one process's memory. Several backend processes would each count for themselves, and a restart forgets the counts. The daily budget and the lease on a turn are in Postgres and hold across processes.
+- The service desk has no login. A workspace key in the browser's storage is what a login would be: whoever has it sees that workspace's tickets and can act on them, refunds included. The name a person acts under is free text.
+- Open desks hear of a change through a bus in one process's memory, like the limits above. With several backend processes a desk would see another process's change when it next loads.
+- A reply from the desk is shown in the conversation and is not spoken. A customer in a voice call sees it on the screen.
+- A ticket can be reopened and refunded only by hand. Nothing times a ticket out, and nothing reminds anyone of one.
 - A browser is checked by an origin allowlist. A client that is not a browser can send any origin, so the limits above and a spending cap on the model key are what bound the cost.
 - The ticket for an unanswered question depends on two models. The agent is asked to open it, and the judge flags a reply that says the help center lacks something. A reply that does neither gets no ticket.
 - A PIN that was typed and never used stays in the saved conversation for one more turn.

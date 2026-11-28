@@ -1,43 +1,59 @@
-import type { ButtonHTMLAttributes, ReactNode, Ref } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, Ref } from "react";
 
 /**
- * The few controls the design allows. Every control is a pill. Cobalt fills exactly one of them
- * per screen, the primary action. Everything else is ivory on dark.
+ * The few controls the design allows. Corners are 6px. The filled obsidian button is the one
+ * primary action of a view. Everything else is a hairline or nothing. Labels are mono stamps.
  */
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "ghost" | "quiet" | "surface";
+  size?: "md" | "sm";
   ref?: Ref<HTMLButtonElement>;
 };
 
 const BUTTON_BASE =
-  "inline-flex h-40 shrink-0 items-center justify-center gap-8 whitespace-nowrap px-20 text-body-sm font-regular " +
-  "transition-opacity disabled:cursor-not-allowed disabled:opacity-40";
+  "inline-flex shrink-0 items-center justify-center gap-8 whitespace-nowrap rounded-md font-sans font-regular " +
+  "transition-colors disabled:cursor-not-allowed disabled:opacity-40";
 
-const BUTTON_VARIANTS = {
-  primary: "rounded-buttons bg-cobalt text-pure-white hover:opacity-90",
-  ghost: "rounded-nav border border-ivory-text text-ivory-text hover:bg-obsidian-button",
-  quiet: "rounded-nav text-ivory-text hover:bg-obsidian-button",
-  surface: "rounded-buttons bg-obsidian-button text-ivory-text hover:opacity-80",
+const BUTTON_SIZES = {
+  md: "h-36 px-12 text-body-sm",
+  sm: "h-28 px-8 text-caption",
 };
 
-export function Button({ variant = "ghost", className = "", type = "button", ...rest }: ButtonProps) {
-  return <button type={type} className={`${BUTTON_BASE} ${BUTTON_VARIANTS[variant]} ${className}`} {...rest} />;
+const BUTTON_VARIANTS = {
+  primary: "bg-obsidian text-pure-white hover:bg-charcoal disabled:hover:bg-obsidian",
+  ghost: "bg-pure-white text-obsidian shadow-hairline hover:bg-paper-white hover:shadow-ring",
+  quiet: "text-charcoal hover:bg-hairline/70 hover:text-obsidian",
+  surface: "bg-hairline text-obsidian hover:bg-ash/60",
+};
+
+export function Button({ variant = "ghost", size = "md", className = "", type = "button", ...rest }: ButtonProps) {
+  return <button type={type} className={`${BUTTON_BASE} ${BUTTON_SIZES[size]} ${BUTTON_VARIANTS[variant]} ${className}`} {...rest} />;
 }
 
-export function Tag({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return (
-    <span
-      className={`inline-flex h-24 items-center rounded-tags bg-obsidian-button px-12 text-caption font-w480 text-ash-text ${className}`}
-    >
-      {children}
-    </span>
-  );
+/** A pill with a mono stamp in it: a state, a plan, a priority. */
+export function Tag({ children, className = "", tone = "plain" }: { children: ReactNode; className?: string; tone?: "plain" | "solid" | "good" }) {
+  const tones = {
+    plain: "bg-pure-white text-charcoal shadow-hairline",
+    solid: "bg-obsidian text-pure-white",
+    good: "bg-pure-white text-terminal-green shadow-hairline",
+  };
+  return <span className={`label-mono inline-flex h-20 shrink-0 items-center whitespace-nowrap rounded-full px-8 ${tones[tone]} ${className}`}>{children}</span>;
 }
 
-/** A small label above a block, in the muted tone. */
+/** A small label above a block: the mono stamp, in the muted tone. */
 export function Caption({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <p className={`text-caption font-w480 text-ash-text ${className}`}>{children}</p>;
+  return <p className={`label-mono text-stone ${className}`}>{children}</p>;
+}
+
+/** The label that announces a section, in full strength. */
+export function Eyebrow({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <p className={`label-mono text-obsidian ${className}`}>{children}</p>;
+}
+
+/** A white surface one step above the page, held by a hairline ring and never by a shadow. */
+export function Card({ className = "", ...rest }: HTMLAttributes<HTMLDivElement>) {
+  return <div className={`rounded-md bg-pure-white shadow-card ${className}`} {...rest} />;
 }
 
 const GLYPHS = {
@@ -81,6 +97,29 @@ const GLYPHS = {
       <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2" />
     </>
   ),
+  inbox: <path d="M2.5 9.5l1.8-6h7.4l1.8 6v3h-11zM2.5 9.5h3.2l.8 1.5h3l.8-1.5h3.2" />,
+  chat: <path d="M2.5 3.5h11v7.5H7l-3 2.5v-2.5H2.5z" />,
+  note: (
+    <>
+      <path d="M3.5 2.5h6.5l2.5 2.5v8.5h-9z" />
+      <path d="M5.8 7h4.4M5.8 9.5h4.4" />
+    </>
+  ),
+  reply: <path d="M6.5 4L3 7.5 6.5 11M3.2 7.5h6.3a3.5 3.5 0 0 1 3.5 3.5v1" />,
+  search: (
+    <>
+      <circle cx="7" cy="7" r="4.2" />
+      <path d="M10.2 10.2l3.3 3.3" />
+    </>
+  ),
+  card: (
+    <>
+      <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
+      <path d="M2 6.5h12" />
+    </>
+  ),
+  dot: <circle cx="8" cy="8" r="2.5" fill="currentColor" stroke="none" />,
+  down: <path d="M3.5 6.5L8 11l4.5-4.5" />,
 } as const;
 
 export type GlyphName = keyof typeof GLYPHS;

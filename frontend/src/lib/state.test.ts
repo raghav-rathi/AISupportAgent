@@ -639,3 +639,39 @@ describe("model calls started early", () => {
     expect(reloaded.state.unusedCalls).toEqual(live.state.unusedCalls);
   });
 });
+
+describe("what the service desk tells a conversation", () => {
+  const update = (seq: number, extra: Partial<Extract<ServerEvent, { type: "case.updated" }>> = {}): ServerEvent => ({
+    type: "case.updated",
+    seq,
+    ts: 200 + seq,
+    turn_id: null,
+    ticket_id: "ESC-1A2B3C",
+    status: "open",
+    assignee: "Sam Carter",
+    kind: "reply",
+    author: "Sam Carter",
+    body: "I am looking into it.",
+    ...extra,
+  });
+
+  it("keeps a reply that belongs to no turn, in the order it came", () => {
+    const stream = new Stream().ready().raw(update(1, { kind: "assigned", body: "" })).raw(update(2));
+    expect(stream.state.updates.map((u) => [u.kind, u.body])).toEqual([
+      ["assigned", ""],
+      ["reply", "I am looking into it."],
+    ]);
+    expect(stream.state.lastSeq).toBe(2);
+    expect(stream.state.turns).toEqual([]);
+  });
+
+  it("shows a reply once when the stream sends it again, and none of another conversation's", () => {
+    const stream = new Stream().ready().raw(update(1)).raw(update(1));
+    expect(stream.state.updates).toHaveLength(1);
+    // The same conversation after a reload: the stored reply comes back with the replay.
+    const reloaded = new Stream().hello("s1", { last_seq: 1 }).raw(update(1)).caughtUp();
+    expect(reloaded.state.updates).toEqual(stream.state.updates);
+    // A new conversation starts without it.
+    expect(stream.hello("s2").caughtUp().state.updates).toEqual([]);
+  });
+});

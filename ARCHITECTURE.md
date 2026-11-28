@@ -13,19 +13,24 @@ flowchart TB
         AW <--> UI
     end
     UI <-->|"one WebSocket: JSON events and binary audio"| API
+    UI <-->|"a second WebSocket: the service desk"| DK
     subgraph RW["Railway: one container"]
         API["FastAPI socket handler: origin check, limits, budgets"]
         HUB["Session hub: one per live conversation"]
         RUN["Turn runner: lease and event log"]
         AG["LangGraph loop: begin, agent, tools, check, escalate"]
         VS["Voice session: turn-taking and interruption"]
+        DK["Desk handler: tickets of one workspace, actions of a person"]
         API --> HUB
         HUB --> RUN
         RUN --> AG
         HUB <--> VS
+        HUB -->|"a ticket was opened"| DK
+        DK -->|"a reply for the customer"| HUB
     end
     RUN <-->|"events, lease"| PG[("Postgres 17 with pgvector: help center, mock CRM, checkpoints, event log")]
     AG <-->|"SQL"| PG
+    DK <-->|"SQL"| PG
     AG -->|"agent, backup, judge, reranker"| ORT["OpenRouter"]
     VS <-->|"two WebSockets"| DG["Deepgram: Flux speech to text, Flux TTS"]
 ```
@@ -33,15 +38,16 @@ flowchart TB
 | Part | What it is | Where |
 |---|---|---|
 | Page | Next.js 16 and React 19, built statically. One reducer turns events into what is shown. | `frontend/src/lib/state.ts`, `frontend/src/components/` |
-| Socket handler | FastAPI. One WebSocket per client at `/ws`, `GET /health`, nothing else. | `backend/src/supportagent/api/app.py` |
+| Socket handler | FastAPI. One WebSocket per client at `/ws`, one per open desk at `/desk`, `GET /health`, nothing else. | `backend/src/supportagent/api/app.py` |
 | Session hub | One object per live conversation. Runs its turn in the background and fans the events out to up to 4 connections. | `api/hub.py` |
 | Turn runner | Runs one turn of the graph and reports it as numbered events. Holds the lease on the session. | `session.py`, `eventlog.py` |
-| Agent loop | A LangGraph state machine with a Postgres checkpointer. Five nodes, six tools. | `agent/graph.py`, `agent/tools.py`, `agent/guard.py` |
+| Agent loop | A LangGraph state machine with a Postgres checkpointer. Five nodes, seven tools. | `agent/graph.py`, `agent/tools.py`, `agent/guard.py` |
 | Model client | One client for every model call: time limits, retries, backup model, cost. | `llm/client.py` |
 | Retrieval | Chunker, hybrid search in one SQL query, reranker, scope gate. | `kb/`, `agent/context.py` |
 | Voice session | One more client of the hub: Deepgram's two sockets, turn-taking, interruption. | `voice/session.py`, `voice/deepgram.py` |
 | Redactor | Keeps PINs out of everything that is stored or sent. | `redact.py` |
 | Mock CRM | Customers, invoices, refunds and tickets, with the business rules as constants. | `crm/` |
+| Service desk | The tickets of one workspace over a socket of their own: a live inbox, the hand-off receipt, notes, replies that reach the customer, refunds a person approves. | `desk/`, `api/desk.py` |
 
 Models, as deployed. All of them are settings.
 
@@ -84,7 +90,7 @@ sequenceDiagram
     H-->>P: turn.started with the same client ID
     H->>G: begin, which repairs a turn that died half way
     loop one tool call per step, at most 8 steps
-        G->>M: prompt and the six tools
+        G->>M: prompt and the seven tools
         M-->>P: llm.delta, a draft
         G->>T: the tool call, inside a guard
         T-->>P: tool.started, retrieval.result, tool.finished
@@ -99,7 +105,7 @@ sequenceDiagram
 The loop has five nodes.
 
 - `begin` resets the turn's working memory and repairs the conversation if the last turn stopped half way: a tool call without a result gets one, an answer that never passed its check is removed.
-- `agent` calls the model with the six tools and keeps the first tool call of the reply. Text a model writes on the way to a tool call is dropped.
+- `agent` calls the model with the seven tools and keeps the first tool call of the reply. Text a model writes on the way to a tool call is dropped.
 - `tools` runs the call inside a guard: a timeout of 8 seconds, up to 3 attempts for failures that may pass, and every other failure turned into an error the model can read. The guard is what emits the step events, so the page shows exactly what ran.
 - `check` sends the final answer to the judge with everything the tools returned in this turn.
 - `escalate` opens a ticket and replies with fixed wording that no model wrote. It runs when a search found nothing, when the check failed, or when the loop used its 8 steps.
@@ -167,6 +173,7 @@ erDiagram
     invoices ||--o| refunds : "at most one"
     customers ||--o{ account_changes : logs
     worlds ||--o{ tickets : holds
+    tickets ||--o{ ticket_activity : "notes, replies, changes"
     worlds ||--o{ sessions : "belongs to"
     sessions ||--o{ session_events : "numbered per session"
     kb_chunks ||--o{ kb_embeddings : "one per embedding model"
@@ -175,12 +182,49 @@ erDiagram
 - Help center: `kb_chunks` with a generated `tsvector` column, and `kb_embeddings`.
 - Mock CRM: every conversation gets a world, a private copy of the customers and invoices. One reviewer's refund does not exist for the next reviewer, and eval scenarios cannot disturb each other.
 - Conversation state: LangGraph's checkpoint tables. Only the newest saved state of a conversation is kept.
-- `sessions`: the stream position, the lease (`turn_owner`, `turn_heartbeat_at`), the last activity, the hashes of PINs, and what the customer had heard of a spoken reply they cut off.
+- `sessions`: the stream position, the lease (`turn_owner`, `turn_heartbeat_at`), the last activity, the hashes of PINs, what the customer had heard of a spoken reply they cut off, and the workspace the conversation is in.
 - `session_events`: the event log. Token deltas are numbered and not stored. Prompt traces are stored and not streamed: the page fetches them when their tab is opened.
+- `tickets` and `ticket_activity`: a ticket's status, priority and owner, and everything that happened to it, each row marked as public or not.
 
 Reconnecting. The client's first message says the last sequence number it saw. The hub subscribes it, then merges four sources read at one moment: stored events, events a save has not written yet, the events of the turn in flight, and what arrived meanwhile. A marker ends the replay, and the live stream follows, each event exactly once. Every message carries a client ID that its turn hands back, so after a reconnect the page knows whether its last message arrived. If not, the text goes back into the field. It is never sent twice behind the visitor's back.
 
 The session ID is the only key to a conversation. The browser keeps it, so a reload or a second tab continues the same one.
+
+## The service desk
+
+The assistant's last tool is a hand-off, and a hand-off needs somewhere to land. The desk is that place, built on what was already there: the ticket table, the event log and the hubs.
+
+```mermaid
+sequenceDiagram
+    participant C as Customer's page
+    participant H as Session hub
+    participant P as Postgres
+    participant B as Desk bus
+    participant D as Desk's page
+    C->>H: "refund INV-30388"
+    H->>P: the tool refuses and writes the ticket
+    H->>B: a ticket of this workspace was opened
+    B->>D: desk.ticket, live
+    D->>P: desk.open reads the case: receipt, account, activity
+    D->>P: desk.refund runs the refund transaction as billing
+    D->>P: desk.reply writes the activity and a case.updated event
+    P-->>H: the event is numbered and stored with the conversation
+    H->>C: case.updated, live and on every reload
+    C->>H: "any update on my ticket?"
+    H->>P: get_ticket_status reads the public activity
+```
+
+**Scope is a workspace, not the world.** Every conversation has a private copy of the CRM, so one inbox over all conversations would show a reviewer the tickets of strangers. A browser makes up a random key and sends it with its first message on either socket. The server stores a hash of it on the session, once: a conversation stays in the workspace it joined first, so someone who learns a conversation's ID cannot pull its tickets onto a desk of their own. Every desk query joins through that column. The desk never sees a session ID, because that ID is the conversation's only credential. It names a ticket by a random key the ticket was given when it was written.
+
+**The receipt is read, not written.** The turn that opened a ticket is already in the event log: the message, each tool with its outcome, each search with its band and score, the judge's verdict, the reply, and for a spoken reply how much of it was heard. `desk/receipt.py` selects those rows and adds one fixed sentence per ticket reason. No model call, no second summary to disagree with the first, and the PIN is masked because it was masked when the events were stored.
+
+**A reply is an event of the conversation.** What a person writes for the customer goes through `Hubs.tell`, which numbers it, stores it in the conversation's log and sends it to whoever is connected. So the page shows it through the same reducer as everything else, a reload replays it, and a customer who was away finds it. Each row of `ticket_activity` says whether it is public. Notes and priority are not, and nothing reads them on the customer's side: the stored events hold only what `case.updated` carries.
+
+**The assistant reads the desk through a tool.** A staff reply is not slipped into the prompt. When a customer asks about a ticket, the model calls `get_ticket_status`, which returns the public activity. The result is a tool result like any other: it is in the transcript, the judge accepts it as evidence, and the prefix of the prompt that voice warms up ahead of a turn does not change.
+
+**People work under the same rules, with one more permission.** `evaluate_refund` takes `by_billing`. It lifts the two refusals that send a case to the billing team, the support limit and a suspended account, and nothing else. The refund then runs in the transaction the assistant's refunds run in, with the same lock on the customer row and the same business key, so a person cannot refund outside the window or twice either.
+
+Open desks hear of a change through `DeskBus`, an in-process fan-out keyed by workspace, the same shape as the hubs. Each desk connection is admitted like a conversation's: the origin check, the limit on connections per address, a cap on messages per minute, and an outbox that cuts off a reader that stopped reading.
 
 ## When things fail
 
@@ -258,9 +302,9 @@ Tests use the real graph, tools, database and retrieval with a scripted model in
 
 - Limits per address live in one process's memory. Several instances need them in Postgres or Redis. The budgets and the lease already are.
 - One instance serves the demo. The lease keeps two instances off one turn, and two gaps remain for overlapping workers: a worker that lost its lease can still announce its last event to its own clients, and a voice event can get one number live and another on replay.
-- Identity is an account number and a PIN typed into a chat. A product would use the session of a signed-in user.
+- Identity is an account number and a PIN typed into a chat. A product would use the session of a signed-in user. The desk has no login at all: a key in the browser's storage scopes it, and the name a person acts under is free text.
 - The CRM is a set of fixtures. The refund path is shaped for a real one: one transaction, and a business key that makes a retry pay at most once.
-- A ticket goes into a table and nobody reads it. The human side is the next thing to build: an inbox, ownership, a reply path back to the customer.
+- The desk bus is in one process's memory. Several instances need Postgres `LISTEN` or a broker behind it. And a ticket has no clock: nothing reminds anyone of one that waits.
 - The ticket for an unanswered question depends on two models, the agent and the judge.
 - A spoken reply that used no tool is said while it is checked. Holding it would add the judge's time to every such turn.
 - Nobody has measured echo with a person on loudspeakers. The guard against the assistant hearing itself compares words and has only run on audio without an echo.

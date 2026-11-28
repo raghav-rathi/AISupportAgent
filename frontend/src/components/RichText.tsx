@@ -40,14 +40,14 @@ function inline(text: string, keyPrefix: string, cites?: Cites): ReactNode[] {
     const key = `${keyPrefix}-${i}`;
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
       return (
-        <strong key={key} className="font-w480">
+        <strong key={key} className="font-medium">
           {inline(part.slice(2, -2), key, cites)}
         </strong>
       );
     }
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
       return (
-        <code key={key} className="rounded-md bg-obsidian-button px-4 font-mono text-body-sm">
+        <code key={key} className="rounded-sm bg-hairline px-4 font-mono text-[0.875em]">
           {part.slice(1, -1)}
         </code>
       );
@@ -55,7 +55,7 @@ function inline(text: string, keyPrefix: string, cites?: Cites): ReactNode[] {
     if (ONLY_CITATION.test(part)) {
       const numbers = numbersIn(part);
       return (
-        <sup key={key} className="ml-2 text-caption text-ash-text">
+        <sup key={key} className="ml-2 font-mono text-label text-stone">
           {/* A mark can name a number twice, as in [1, 1], so its place in the mark is the key. */}
           {numbers.map((n, at) => (
             <span key={at}>
@@ -66,7 +66,7 @@ function inline(text: string, keyPrefix: string, cites?: Cites): ReactNode[] {
                   aria-label={`Source ${n}`}
                   aria-expanded={cites.open === n}
                   onClick={() => cites.onCite(n)}
-                  className="-my-8 rounded-md px-4 py-8 underline decoration-slate-border underline-offset-2 hover:text-ivory-text"
+                  className="-my-8 rounded-md px-4 py-8 underline decoration-ash underline-offset-2 hover:text-obsidian"
                 >
                   {n}
                 </button>
@@ -130,16 +130,16 @@ function tableRows(lines: string[]): string[][] {
 export function RichText({ text, caret = false, cites, small = false }: { text: string; caret?: boolean; cites?: Cites; small?: boolean }) {
   const all = blocks(text);
   return (
-    <div className={`flex flex-col gap-12 break-words ${small ? "text-body-sm leading-[1.5]" : "text-body"}`}>
+    <div className={`flex flex-col gap-12 break-words ${small ? "text-body-sm" : "text-body"}`}>
       {all.map((block, b) => {
         const tail =
           caret && b === all.length - 1 ? (
-            <span aria-hidden="true" className="ml-2 inline-block h-16 w-2 animate-caret bg-ivory-text align-[-2px]" />
+            <span aria-hidden="true" className="ml-2 inline-block h-16 w-2 animate-caret bg-obsidian align-[-2px]" />
           ) : null;
         if (block.kind === "bullets" || block.kind === "numbers") {
           const List = block.kind === "bullets" ? "ul" : "ol";
           return (
-            <List key={b} className={`flex flex-col gap-4 pl-20 marker:text-ash-text ${block.kind === "bullets" ? "list-disc" : "list-decimal"}`}>
+            <List key={b} className={`flex flex-col gap-4 pl-20 marker:text-smoke ${block.kind === "bullets" ? "list-disc" : "list-decimal"}`}>
               {block.lines.map((line, l) => (
                 <li key={l}>
                   {inline(line, `${b}-${l}`, cites)}
@@ -157,7 +157,7 @@ export function RichText({ text, caret = false, cites, small = false }: { text: 
                 <thead>
                   <tr>
                     {head.map((cell, c) => (
-                      <th key={c} scope="col" className="border-b border-slate-border px-12 py-8 font-w480 first:pl-0">
+                      <th key={c} scope="col" className="label-mono border-b border-hairline px-12 py-8 text-stone first:pl-0">
                         {inline(cell, `${b}-h-${c}`, cites)}
                       </th>
                     ))}
@@ -167,7 +167,7 @@ export function RichText({ text, caret = false, cites, small = false }: { text: 
                   {rows.map((row, r) => (
                     <tr key={r}>
                       {row.map((cell, c) => (
-                        <td key={c} className="border-b border-slate-border/40 px-12 py-8 align-top first:pl-0">
+                        <td key={c} className="border-b border-hairline px-12 py-8 align-top first:pl-0">
                           {inline(cell, `${b}-${r}-${c}`, cites)}
                         </td>
                       ))}
@@ -180,7 +180,7 @@ export function RichText({ text, caret = false, cites, small = false }: { text: 
           );
         }
         return (
-          <p key={b} className={`whitespace-pre-wrap ${block.kind === "heading" ? "font-w480" : ""}`}>
+          <p key={b} className={`whitespace-pre-wrap ${block.kind === "heading" ? "font-medium" : ""}`}>
             {inline(block.lines.join("\n"), String(b), cites)}
             {tail}
           </p>

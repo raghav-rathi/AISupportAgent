@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react"
 import type { Voice } from "@/lib/state";
 import type { Levels } from "@/lib/voice";
 
-import { Button, Caption, Glyph } from "./ui";
+import { Button, Caption, Card, Glyph } from "./ui";
 
 const ACTIVITY: Record<NonNullable<Voice["activity"]>, string> = {
   listening: "Listening",
@@ -82,7 +82,7 @@ function Meter({ label, levels, active }: { label: string; levels: Levels; activ
   return (
     <div className="flex flex-col gap-4">
       <Caption>{label}</Caption>
-      <canvas ref={canvas} role="img" aria-label={`${label}: audio level`} className={`h-32 w-[138px] ${active ? "text-ivory-text" : "text-slate-border"}`} />
+      <canvas ref={canvas} role="img" aria-label={`${label}: audio level`} className={`h-32 w-[138px] ${active ? "text-obsidian" : "text-ash"}`} />
     </div>
   );
 }
@@ -95,20 +95,20 @@ function Consent({ onStart, onDecline }: { onStart: () => void; onDecline: () =>
   useEffect(() => start.current?.focus(), []);
   return (
     <section aria-label="Voice" className="mx-auto w-full max-w-760 px-24 pb-12">
-      <div className="flex flex-col gap-12 rounded-cards bg-graphite-card px-20 py-16">
-        <p id={described} className="text-body-sm leading-[1.45]">
+      <Card className="flex flex-col gap-12 p-16">
+        <p id={described} className="text-body-sm text-charcoal">
           {DISCLOSURE}
         </p>
         <div className="flex gap-8">
           {/* Only this opens the microphone. */}
-          <Button ref={start} variant="surface" aria-describedby={described} onClick={onStart}>
+          <Button ref={start} variant="primary" aria-describedby={described} onClick={onStart}>
             Start microphone
           </Button>
           <Button variant="quiet" onClick={onDecline}>
             Not now
           </Button>
         </div>
-      </div>
+      </Card>
     </section>
   );
 }
@@ -157,13 +157,13 @@ export function VoicePanel({ voice, mic, out, onStop, onEnd, onDismiss, asking, 
           <Consent onStart={onStart} onDecline={onDecline} />
         ) : voice.notice ? (
           <div className="mx-auto w-full max-w-760 px-24 pb-12">
-            <div className="flex items-center gap-12 rounded-cards bg-graphite-card px-20 py-12 text-body-sm leading-[1.45]">
+            <Card className="flex items-center gap-12 p-16 text-body-sm text-obsidian">
               <Glyph name="alert" />
               <p className="flex-1">Voice is off: {voice.notice}. You can go on in text.</p>
-              <Button variant="quiet" onClick={onDismiss} className="h-32 px-12">
+              <Button variant="quiet" size="sm" onClick={onDismiss}>
                 Dismiss
               </Button>
-            </div>
+            </Card>
           </div>
         ) : null}
       </>
@@ -174,17 +174,17 @@ export function VoicePanel({ voice, mic, out, onStop, onEnd, onDismiss, asking, 
     <>
       {region}
       <section aria-label="Voice" className="mx-auto w-full max-w-760 px-24 pb-12">
-        <div className="flex flex-col gap-12 rounded-cards bg-graphite-card px-20 py-16">
-          <div className="flex flex-wrap items-end gap-x-20 gap-y-12">
+        <Card className="flex flex-col gap-12 p-16">
+          <div className="flex flex-wrap items-end gap-x-16 gap-y-12">
             <Meter label="You" levels={mic} active={voice.activity === "hearing"} />
             <Meter label="Assistant" levels={out} active={voice.activity === "speaking"} />
             {/* Not a live region: it changes with every breath and would talk over the reply. */}
-            <p className="min-w-[138px] flex-1 pb-4 text-body-sm font-w480">{starting ? "Starting voice…" : ACTIVITY[voice.activity ?? "listening"]}</p>
+            <p className="min-w-[138px] flex-1 pb-8 font-mono text-caption text-obsidian">{starting ? "Starting voice…" : ACTIVITY[voice.activity ?? "listening"]}</p>
             <div className="flex gap-8">
               {/* Always here while voice is on, so the keyboard focus never falls off it. It is
                   marked disabled rather than disabled outright: a disabled button drops its focus. */}
               <Button
-                variant="surface"
+                variant="ghost"
                 aria-disabled={onStop === null}
                 aria-keyshortcuts="Space Escape"
                 onClick={onStop ?? undefined}
@@ -198,16 +198,16 @@ export function VoicePanel({ voice, mic, out, onStop, onEnd, onDismiss, asking, 
             </div>
           </div>
           {/* The visitor's words as the recogniser hears them. They become the message when the turn ends. */}
-          <p aria-live="off" className="min-h-[1.45em] break-words text-body-sm leading-[1.45] text-ash-text">
+          <p aria-live="off" className="min-h-20 break-words text-body-sm text-charcoal">
             {voice.partial ? `“${voice.partial}”` : ""}
           </p>
-          <p className="text-caption leading-[1.4] text-ash-text">
+          <p className="text-caption text-stone">
             {DISCLOSURE}{" "}
             {voice.bargeIn
               ? "Speak to interrupt a reply, or use Stop, the space bar or Escape."
               : "This browser does not cancel the echo of the reply, so speaking over a reply does not stop it. Use Stop, the space bar or Escape."}
           </p>
-        </div>
+        </Card>
       </section>
     </>
   );

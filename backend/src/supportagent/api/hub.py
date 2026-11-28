@@ -25,6 +25,7 @@ from supportagent.agent.early import EarlyCall
 from supportagent.agent.graph import first_prompt
 from supportagent.agent.tools import TOOL_NAMES, TOOLS
 from supportagent.api.protocol import FaultInject
+from supportagent.desk.bus import DeskBus
 from supportagent.eventlog import EventLog, SessionGone, TurnInProgress
 from supportagent.events import NOT_STREAMED, TURN_ENDED, ProtocolError, TurnFailed
 from supportagent.llm import faults as presets
@@ -118,7 +119,13 @@ class Subscription:
 
 class SessionHub:
     def __init__(
-        self, rt: Runtime, log: EventLog, on_idle: Callable[[SessionHub], None], turns: int = 0
+        self,
+        rt: Runtime,
+        log: EventLog,
+        on_idle: Callable[[SessionHub], None],
+        turns: int = 0,
+        desk: DeskBus | None = None,
+        workspace: str | None = None,
     ) -> None:
         self.rt = rt
         self.log = log
@@ -140,8 +147,20 @@ class SessionHub:
         self.greeted = False  # the voice has said hello in this conversation
         self._task: asyncio.Task[None] | None = None
         self._working = False  # the task of the last turn has not returned yet
+        self.desk = desk  # where the open service desks hear of this session's tickets
+        self.workspace = workspace  # the workspace this conversation is in, hashed, if any
+        self._ticket_ids: set[str] = set()  # the tickets this hub has seen opened
 
     def _publish(self, event: BaseModel) -> None:
+        if event.type == "escalation.created" and self.desk is not None:
+            # The ticket is in the database by now. Every open desk of the workspace hears of it.
+            self._ticket_ids.add(event.ticket.id)
+            self.desk.publish(self.workspace, self.log.world_id, event.ticket.id)
+        if event.type in TURN_ENDED and self.desk is not None:
+            # And again when a turn is over and stored: the receipt of a new ticket is whole only
+            # then, and a desk that has a case open sees what the customer went on to say.
+            for ticket_id in sorted(self._ticket_ids):
+                self.desk.publish(self.workspace, self.log.world_id, ticket_id)
         if event.type in NOT_STREAMED:
             return  # stored by the turn, and read back on request
         if event.type in TURN_ENDED:
@@ -160,6 +179,23 @@ class SessionHub:
             subscriber.offer(event)
         for listener in list(self._listeners):
             listener(event)
+
+    async def join(self, workspace: str | None) -> None:
+        """Put a conversation that is in no workspace yet into the one its browser names.
+
+        It stays in the first one it joined. The service desk of that workspace is where its
+        tickets show, and a second browser that learns the conversation's ID does not move it.
+        """
+        if not workspace or self.workspace is not None:
+            return
+        async with self.rt.pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE sessions SET workspace_id = coalesce(workspace_id, %s) WHERE id = %s "
+                "RETURNING workspace_id",
+                (workspace, self.session_id),
+            )
+            row = await cur.fetchone()
+        self.workspace = row["workspace_id"] if row else None
 
     def listen(self, listener: Callable[[BaseModel], None]) -> Callable[[], None]:
         """Call `listener` with every event from now on. Returns the way to stop that."""
@@ -450,6 +486,7 @@ class Hubs:
     def __init__(self, rt: Runtime, max_sessions: int = 200) -> None:
         self.rt = rt
         self.max_sessions = max_sessions
+        self.desk = DeskBus()
         self._hubs: dict[str, SessionHub] = {}
         self._opening = 0  # hubs being built: they hold a place before they exist
 
@@ -484,14 +521,15 @@ class Hubs:
             raise TooManySessions
         self._opening += 1
         try:
-            world_id = None
+            world_id = workspace = None
             if session_id:
                 async with self.rt.pool.connection() as conn:
                     cur = await conn.execute(
-                        "SELECT world_id FROM sessions WHERE id = %s", (session_id,)
+                        "SELECT world_id, workspace_id FROM sessions WHERE id = %s", (session_id,)
                     )
                     row = await cur.fetchone()
                 world_id = row["world_id"] if row else None
+                workspace = row["workspace_id"] if row else None
             resumed = world_id is not None
             if not resumed:
                 # The ID is the only key to the session, so it has to be unguessable.
@@ -509,7 +547,10 @@ class Hubs:
                 await ensure_world(self.rt, world_id)
                 log = await EventLog.open(self.rt.pool, session_id, world_id)
             turns = await log.turn_count() if resumed else 0
-            hub = self._hubs.setdefault(session_id, SessionHub(self.rt, log, self._release, turns))
+            hub = self._hubs.setdefault(
+                session_id,
+                SessionHub(self.rt, log, self._release, turns, self.desk, workspace),
+            )
             return hub, resumed
         finally:
             self._opening -= 1
@@ -518,6 +559,22 @@ class Hubs:
         """Forget a hub nobody is using. Its session lives on in Postgres."""
         if hub.idle and self._hubs.get(hub.session_id) is hub:
             del self._hubs[hub.session_id]
+
+    async def tell(self, session_id: str, event: BaseModel) -> bool:
+        """Put an event that no turn emits into a conversation, whether or not anyone has it open.
+
+        For what the service desk does to a ticket: the event is numbered and stored with the
+        conversation and sent to every connection it has. False when the conversation is gone.
+        """
+        if not await self.known(session_id):
+            return False
+        hub, resumed = await self.open(session_id)
+        try:
+            if resumed:
+                await hub.record(event, None)
+            return resumed
+        finally:
+            self._release(hub)
 
     async def close(self) -> None:
         """Stop every running turn and wait until each has been stored. For shutdown."""

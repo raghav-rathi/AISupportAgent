@@ -136,6 +136,7 @@ async def refund_invoice(
     reason: str,
     tool_call_id: str | None,
     today: date,
+    by_billing: bool = False,
 ) -> RefundOutcome:
     """Refund one invoice in full if policy allows it. Safe to call any number of times.
 
@@ -219,6 +220,7 @@ async def refund_invoice(
             issued_on=invoice.issued_on,
             today=today,
             is_duplicate=is_duplicate,
+            by_billing=by_billing,
         )
         if not decision.allowed:
             return RefundOutcome(decision, invoice_id)
@@ -319,36 +321,48 @@ async def create_ticket(
     summary: str,
     transcript_excerpt: str,
     tool_call_id: str | None = None,
+    channel: str = "text",
 ) -> str:
     """Store an escalation ticket and return its ID.
 
     With a `tool_call_id` the ticket is stored once per call: a tool that is retried after its
-    first attempt already wrote the ticket gets that ticket's ID back.
+    first attempt already wrote the ticket gets that ticket's ID back. The ticket and the first
+    line of its activity are written together, so the desk never sees one without the other.
     """
     for _ in range(4):  # a fresh random ID on the rare clash with an existing one
-        cur = await conn.execute(
-            "INSERT INTO tickets (world_id, id, account_number, tier, reason, priority, summary, "
-            "transcript_excerpt, tool_call_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT DO NOTHING RETURNING id",
-            (
-                world_id,
-                f"ESC-{secrets.token_hex(3).upper()}",
-                account_number,
-                tier,
-                reason,
-                priority,
-                summary,
-                transcript_excerpt,
-                tool_call_id,
-            ),
-        )
-        row = await cur.fetchone()
-        if row is None and tool_call_id is not None:
+        async with conn.transaction():
+            cur = await conn.execute(
+                "INSERT INTO tickets (world_id, id, account_number, tier, reason, priority, "
+                "summary, transcript_excerpt, tool_call_id, channel) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING RETURNING id",
+                (
+                    world_id,
+                    f"ESC-{secrets.token_hex(3).upper()}",
+                    account_number,
+                    tier,
+                    reason,
+                    priority,
+                    summary,
+                    transcript_excerpt,
+                    tool_call_id,
+                    channel,
+                ),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                await conn.execute(
+                    "INSERT INTO ticket_activity (world_id, ticket_id, kind, author, public, body) "
+                    "VALUES (%s, %s, 'created', 'Assistant', true, %s)",
+                    (world_id, row["id"], summary),
+                )
+                return row["id"]
+        if tool_call_id is not None:
             cur = await conn.execute(
                 "SELECT id FROM tickets WHERE world_id = %s AND tool_call_id = %s",
                 (world_id, tool_call_id),
             )
             row = await cur.fetchone()
-        if row is not None:
-            return row["id"]
+            if row is not None:
+                return row["id"]
     raise RuntimeError("could not allocate a ticket ID")

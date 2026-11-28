@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from supportagent.api.protocol import CLIENT_ADAPTER
+from supportagent.desk.models import DESK_CLIENT_ADAPTER, DESK_EVENT_ADAPTER
 from supportagent.events import EVENT_ADAPTER
 
 DEFAULT_PATH = Path(__file__).resolve().parents[4] / "frontend" / "src" / "lib" / "protocol.ts"
@@ -72,12 +73,21 @@ def _union(name: str, schema: dict[str, Any]) -> str:
 
 
 def render() -> str:
-    server, client = EVENT_ADAPTER.json_schema(), CLIENT_ADAPTER.json_schema()
     parts = [_HEADER]
-    parts += [_interface(n, s, all_required=True) for n, s in server["$defs"].items()]
-    parts.append(_union("ServerEvent", server))
-    parts += [_interface(n, s, all_required=False) for n, s in client["$defs"].items()]
-    parts.append(_union("ClientMessage", client))
+    written: set[str] = set()
+    # The conversation's socket, then the desk's. A type both use is written once.
+    for adapter, union, all_required in (
+        (EVENT_ADAPTER, "ServerEvent", True),
+        (CLIENT_ADAPTER, "ClientMessage", False),
+        (DESK_EVENT_ADAPTER, "DeskEvent", True),
+        (DESK_CLIENT_ADAPTER, "DeskMessage", False),
+    ):
+        schema = adapter.json_schema()
+        for name, spec in schema["$defs"].items():
+            if name not in written:
+                written.add(name)
+                parts.append(_interface(name, spec, all_required=all_required))
+        parts.append(_union(union, schema))
     return "\n\n".join(parts) + "\n"
 
 

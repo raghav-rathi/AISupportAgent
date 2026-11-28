@@ -5,6 +5,7 @@
  */
 
 import type {
+  CaseUpdated,
   CustomerSummary,
   GuardrailVerdict,
   LlmFinished,
@@ -153,6 +154,8 @@ export interface AppState {
   epoch: number; // counts the connections this page has had: a message belongs to one of them
   customer: CustomerSummary | null;
   tickets: Ticket[];
+  /** What people at the service desk did to this conversation's tickets, as far as the customer is told. */
+  updates: CaseUpdated[];
   turns: Turn[];
   busy: boolean; // a turn is running on the server
   resumable: boolean; // the last turn stopped early and can be picked up
@@ -190,6 +193,7 @@ export const initialState: AppState = {
   tickets: [],
   turns: [],
   busy: false,
+  updates: [],
   resumable: false,
   faultInjection: false,
   pending: null,
@@ -388,6 +392,9 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     // or none, the ones fetched before are asked for again.
     const same = (state.customer?.account_number ?? null) === (e.customer?.account_number ?? null);
     return { ...state, customer: e.customer, tickets: e.tickets, passages: same ? state.passages : {} };
+  }
+  if (e.type === "case.updated") {
+    return { ...state, updates: [...state.updates, e] };
   }
   if (e.type === "voice.usage" || (e.type === "speech.spoken" && !e.turn_id)) {
     return { ...state, speechUsd: state.speechUsd + e.cost_usd };

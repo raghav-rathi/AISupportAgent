@@ -32,7 +32,7 @@ const STATUS_LABELS: Record<TurnStatus, string> = {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-12">
-      <h3 className="text-body-sm font-w480">{title}</h3>
+      <h3 className="label-mono text-obsidian">{title}</h3>
       {children}
     </section>
   );
@@ -40,16 +40,16 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function Metric({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
-    <div className="flex flex-col gap-8 rounded-cards bg-onyx-canvas p-16">
+    <div className="flex min-w-0 flex-col gap-8 rounded-md bg-paper-white p-12 shadow-ring">
       <Caption>{label}</Caption>
-      <p className="font-arcadiadisplay text-subheading font-w480 tabular-nums">{value}</p>
-      {note ? <p className="text-caption leading-[1.4] text-ash-text">{note}</p> : null}
+      <p className="break-words text-heading font-regular tabular-nums text-obsidian">{value}</p>
+      {note ? <p className="text-caption text-stone">{note}</p> : null}
     </div>
   );
 }
 
 function Quiet({ children }: { children: ReactNode }) {
-  return <p className="text-body-sm leading-[1.45] text-ash-text">{children}</p>;
+  return <p className="text-caption text-stone">{children}</p>;
 }
 
 interface Bar {
@@ -81,7 +81,7 @@ function timeline(turn: Turn): Bar[] {
       detail: notes.join(", "),
       startMs: span.startMs,
       durationMs: span.durationMs,
-      tone: judge ? "bg-ash-text" : "bg-ivory-text",
+      tone: done.cancelled ? "bg-ash" : judge ? "bg-charcoal" : "bg-obsidian",
     });
   }
   for (const step of turn.steps) {
@@ -92,7 +92,7 @@ function timeline(turn: Turn): Bar[] {
       detail: step.status === "ok" ? "tool" : `tool, ${step.status}`,
       startMs: step.atMs,
       durationMs: step.durationMs,
-      tone: "bg-slate-border",
+      tone: step.status === "stopped" ? "bg-ash" : "bg-smoke",
     });
   }
   return bars.sort((a, b) => a.startMs - b.startMs);
@@ -112,15 +112,15 @@ function Timeline({ turn }: { turn: Turn }) {
         return (
           <li key={bar.key} className="grid grid-cols-[128px_1fr_56px] items-center gap-12">
             <div className="min-w-0">
-              <p className="truncate text-caption leading-[1.35]">{bar.label}</p>
-              <p className="truncate text-caption leading-[1.35] text-ash-text" title={bar.detail}>
+              <p className="truncate text-caption text-obsidian">{bar.label}</p>
+              <p className="truncate font-mono text-label text-stone" title={bar.detail}>
                 {bar.detail}
               </p>
             </div>
-            <div className="relative h-8 overflow-hidden rounded-full bg-onyx-canvas">
-              <span className={`absolute inset-y-0 rounded-full ${bar.tone}`} style={{ left: `${left}%`, width: `${width}%` }} />
+            <div className="relative h-8 overflow-hidden rounded-sm bg-hairline">
+              <span className={`absolute inset-y-0 rounded-sm ${bar.tone}`} style={{ left: `${left}%`, width: `${width}%` }} />
             </div>
-            <p className="text-right text-caption tabular-nums text-ash-text">{formatMs(bar.durationMs)}</p>
+            <p className="text-right font-mono text-label tabular-nums text-stone">{formatMs(bar.durationMs)}</p>
           </li>
         );
       })}
@@ -137,31 +137,31 @@ function Retrieval({ result, passages, onPassage }: { result: RetrievalResult; p
   // Only a search that answered handed its passages to the model, and only those can be read.
   const passedOn = result.band === "answer" || result.band === "check";
   return (
-    <div className="flex flex-col gap-12 rounded-cards bg-onyx-canvas p-16">
-      <p className="break-words text-body-sm leading-[1.45]">“{result.query}”</p>
-      <div className="flex flex-wrap gap-8">
+    <div className="flex flex-col gap-12 rounded-md bg-paper-white p-12 shadow-ring">
+      <p className="break-words font-mono text-caption text-obsidian">“{result.query}”</p>
+      <div className="flex flex-wrap items-center gap-x-12 gap-y-4">
         <Tag>{BAND_LABELS[result.band]}</Tag>
-        <Tag>top score {score(result.top_score)}</Tag>
-        <Tag>
+        <span className="font-mono text-label tabular-nums text-stone">top score {score(result.top_score)}</span>
+        <span className="font-mono text-label tabular-nums text-stone">
           thresholds {result.low} and {result.high}
-        </Tag>
-        {result.plan_score != null ? <Tag>other plans {score(result.plan_score)}</Tag> : null}
+        </span>
+        {result.plan_score != null ? <span className="font-mono text-label tabular-nums text-stone">other plans {score(result.plan_score)}</span> : null}
       </div>
       {result.hits.length > 0 ? (
-        <ol className="flex flex-col gap-4">
+        <ol className="flex flex-col">
           {result.hits.map((hit) => {
             const passage = passages[hit.chunk_id];
             const row = (
               <>
-                <span className="text-ash-text">{hit.n}</span>
-                <span className="tabular-nums">{hit.score.toFixed(2)}</span>
-                <span className="text-ash-text">
+                <span className="font-mono text-label text-stone">{hit.n}</span>
+                <span className="font-mono text-label tabular-nums text-obsidian">{hit.score.toFixed(2)}</span>
+                <span className="break-words text-caption text-obsidian">
                   {hit.source} ({hit.tiers.join(", ")})
                 </span>
               </>
             );
             return (
-              <li key={hit.chunk_id} className="flex flex-col gap-4">
+              <li key={hit.chunk_id} className="flex flex-col gap-4 border-b border-hairline last:border-b-0">
                 {passedOn ? (
                   <button
                     type="button"
@@ -170,15 +170,15 @@ function Retrieval({ result, passages, onPassage }: { result: RetrievalResult; p
                       setOpen((was) => (was === hit.chunk_id ? null : hit.chunk_id));
                       if (typeof passage !== "object") onPassage(hit.chunk_id);
                     }}
-                    className="-mx-8 grid grid-cols-[20px_44px_1fr] gap-8 rounded-lg px-8 py-4 text-left text-caption leading-[1.4] hover:bg-graphite-card"
+                    className="-mx-8 grid grid-cols-[20px_44px_1fr] items-baseline gap-8 rounded-md px-8 py-8 text-left hover:bg-hairline/70"
                   >
                     {row}
                   </button>
                 ) : (
-                  <div className="grid grid-cols-[20px_44px_1fr] gap-8 py-4 text-caption leading-[1.4]">{row}</div>
+                  <div className="grid grid-cols-[20px_44px_1fr] items-baseline gap-8 py-8">{row}</div>
                 )}
                 {open === hit.chunk_id ? (
-                  <p className="max-h-240 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-graphite-card p-12 text-caption leading-[1.5]">
+                  <p className="mb-8 max-h-240 overflow-auto whitespace-pre-wrap break-words rounded-md bg-pure-white p-12 text-caption text-charcoal shadow-ring">
                     {passage === undefined || passage === "loading" ? "Loading the passage…" : passage === "missing" ? "This passage is no longer available." : passage.content}
                   </p>
                 ) : null}
@@ -188,11 +188,11 @@ function Retrieval({ result, passages, onPassage }: { result: RetrievalResult; p
         </ol>
       ) : null}
       {!passedOn ? (
-        <p className="text-caption leading-[1.4] text-ash-text">
+        <p className="text-caption text-stone">
           {result.hits.length > 0 ? "These were candidates only. No passage was passed to the model." : "No passage was passed to the model."}
         </p>
       ) : null}
-      <p className="text-caption leading-[1.4] text-ash-text">
+      <p className="font-mono text-label tabular-nums text-stone">
         embed {formatMs(result.embed_ms)} · search {formatMs(result.search_ms)} · rerank {formatMs(result.rerank_ms)}
         {result.cost_usd != null ? ` · ${formatCost(result.cost_usd)}` : ""}
       </p>
@@ -302,18 +302,18 @@ function TurnPanel({ turn, status, passages, onPassage }: { turn: Turn; status: 
 
       <Section title="Grounding check">
         {verdict ? (
-          <div className="flex flex-col gap-12 rounded-cards bg-onyx-canvas p-16">
+          <div className="flex flex-col gap-12 rounded-md bg-paper-white p-12 shadow-ring">
             <div className="flex flex-wrap gap-8">
               <Tag>{verdict.verdict}</Tag>
               <Tag>{verdict.held ? "answer held until checked" : "answer streamed, then checked"}</Tag>
               <Tag>{formatMs(verdict.ms)}</Tag>
             </div>
             {verdict.unsupported.map((claim, i) => (
-              <p key={i} className="break-words text-caption leading-[1.4] text-ash-text">
+              <p key={i} className="break-words text-caption text-charcoal">
                 Unsupported: “{claim}”
               </p>
             ))}
-            {turn.retracted ? <p className="text-caption leading-[1.4] text-ash-text">The answer was withdrawn and never stored.</p> : null}
+            {turn.retracted ? <p className="text-caption text-stone">The answer was withdrawn and never stored.</p> : null}
           </div>
         ) : (
           <Quiet>No answer has been checked in this turn.</Quiet>
@@ -325,7 +325,8 @@ function TurnPanel({ turn, status, passages, onPassage }: { turn: Turn; status: 
 
 function Message({ message, label }: { message: TraceMessage; label?: string }) {
   const calls = message.tool_calls.length > 0 ? JSON.stringify(message.tool_calls, null, 2) : null;
-  const block = "max-h-240 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-graphite-card p-12 font-mono text-caption leading-[1.5]";
+  const block =
+    "max-h-240 overflow-auto whitespace-pre-wrap break-words rounded-md bg-paper-white p-12 shadow-ring font-mono text-label leading-[1.6] text-charcoal";
   return (
     <div className="flex flex-col gap-8">
       <Caption>
@@ -341,12 +342,12 @@ function Message({ message, label }: { message: TraceMessage; label?: string }) 
 function Trace({ trace, call }: { trace: LlmTrace; call: ModelCall | undefined }) {
   const done = call?.finished;
   return (
-    <details className="group rounded-cards bg-onyx-canvas">
-      <summary className="flex cursor-pointer list-none items-center gap-8 rounded-cards p-16 text-body-sm [&::-webkit-details-marker]:hidden">
-        <Glyph name="right" className="transition-transform group-open:rotate-90" />
-        <span className="font-w480">{trace.purpose === "judge" ? "Grounding check" : "Agent"}</span>
-        <span className="truncate text-ash-text">{shortModel(trace.model)}</span>
-        <span className="ml-auto shrink-0 text-caption tabular-nums text-ash-text">
+    <details className="group rounded-md bg-pure-white shadow-card">
+      <summary className="flex cursor-pointer list-none items-center gap-8 rounded-md p-12 [&::-webkit-details-marker]:hidden">
+        <Glyph name="right" className="text-stone transition-transform group-open:rotate-90" />
+        <span className="shrink-0 text-caption font-medium text-obsidian">{trace.purpose === "judge" ? "Grounding check" : "Agent"}</span>
+        <span className="truncate font-mono text-label text-stone">{shortModel(trace.model)}</span>
+        <span className="ml-auto shrink-0 font-mono text-label tabular-nums text-stone">
           {done
             ? done.cancelled
               ? `stopped · ${formatMs(done.total_ms)}`
@@ -354,7 +355,7 @@ function Trace({ trace, call }: { trace: LlmTrace; call: ModelCall | undefined }
             : ""}
         </span>
       </summary>
-      <div className="flex flex-col gap-16 px-16 pb-16">
+      <div className="flex flex-col gap-12 px-12 pb-12">
         {done ? (
           <div className="flex flex-wrap gap-8">
             <Tag>first token {formatMs(done.ttft_ms)}</Tag>
@@ -368,7 +369,7 @@ function Trace({ trace, call }: { trace: LlmTrace; call: ModelCall | undefined }
         {trace.tools.length > 0 ? (
           <div className="flex flex-col gap-8">
             <Caption>Tools offered</Caption>
-            <p className="break-words font-mono text-caption leading-[1.5] text-ash-text">{trace.tools.join(", ")}</p>
+            <p className="break-words font-mono text-label leading-[1.6] text-stone">{trace.tools.join(", ")}</p>
           </div>
         ) : null}
         {trace.prompt.map((message, i) => (
@@ -392,7 +393,7 @@ function PromptsPanel({ state, turn, onTraces }: { state: AppState; turn: Turn; 
 
   if (!held || (held.status === "loading" && held.items.length === 0)) {
     return (
-      <p className="flex items-center gap-12 text-body-sm text-ash-text" role="status">
+      <p className="flex items-center gap-8 text-caption text-stone" role="status">
         <Spinner /> Loading the prompts of this turn…
       </p>
     );
@@ -418,8 +419,8 @@ function PromptsPanel({ state, turn, onTraces }: { state: AppState; turn: Turn; 
 function Pair({ term, children }: { term: string; children: ReactNode }) {
   return (
     <>
-      <dt className="text-ash-text">{term}</dt>
-      <dd className="min-w-0 truncate text-right tabular-nums">{children}</dd>
+      <dt className="label-mono flex items-center border-b border-hairline py-8 text-stone">{term}</dt>
+      <dd className="min-w-0 truncate border-b border-hairline py-8 text-right text-caption tabular-nums text-obsidian">{children}</dd>
     </>
   );
 }
@@ -431,7 +432,7 @@ function SessionPanel({ state }: { state: AppState }) {
   return (
     <>
       <Section title="This conversation">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-16 gap-y-12 rounded-cards bg-onyx-canvas p-16 text-body-sm leading-[1.45]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-16">
           <Pair term="Session">{state.sessionId ? `${state.sessionId.slice(0, 8)}…` : "none"}</Pair>
           <Pair term="Customer">{customer ? `${customer.contact_name}, ${customer.company_name}` : "Not verified"}</Pair>
           {customer ? (
@@ -453,7 +454,7 @@ function SessionPanel({ state }: { state: AppState }) {
       </Section>
       {unused.count > 0 ? (
         <Section title="Voice">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-16 gap-y-12 rounded-cards bg-onyx-canvas p-16 text-body-sm leading-[1.45]">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-16">
             <Pair term="Model calls started early and not used">
               {unused.count}, {formatCost(unused.costUsd)}
             </Pair>
@@ -464,13 +465,13 @@ function SessionPanel({ state }: { state: AppState }) {
       <Section title="Tickets">
         {state.tickets.length > 0 ? (
           state.tickets.map((ticket) => (
-            <div key={ticket.id} className="flex flex-col gap-12 rounded-cards bg-onyx-canvas p-16">
-              <p className="text-body-sm font-w480">{ticket.id}</p>
+            <div key={ticket.id} className="flex flex-col gap-8 rounded-md bg-paper-white p-12 shadow-ring">
+              <p className="font-mono text-caption text-obsidian">{ticket.id}</p>
               <div className="flex flex-wrap gap-8">
                 <Tag>{TICKET_REASONS[ticket.reason]}</Tag>
                 <Tag>{ticket.priority} priority</Tag>
               </div>
-              <p className="break-words text-caption leading-[1.45] text-ash-text">{ticket.summary}</p>
+              <p className="break-words text-caption text-charcoal">{ticket.summary}</p>
             </div>
           ))
         ) : (
@@ -514,25 +515,26 @@ function FailuresPanel({
           const at = failure.kind === "speech_down" ? voiceDrops : turnCount;
           const isQueued = queued[failure.kind] === at;
           return (
-            <li key={failure.kind} className="flex items-center gap-16 rounded-cards bg-onyx-canvas p-16">
+            <li key={failure.kind} className="flex items-center gap-12 rounded-md bg-paper-white p-12 shadow-ring">
               <div className="flex min-w-0 flex-1 flex-col gap-4">
-                <p className="text-body-sm font-w480 leading-[1.45]">{failure.title}</p>
-                <p className="text-caption leading-[1.45] text-ash-text">{failure.effect}</p>
+                <p className="text-body-sm font-medium text-obsidian">{failure.title}</p>
+                <p className="text-caption text-stone">{failure.effect}</p>
               </div>
               {/* Queued, it stays a button, so the focus has somewhere to stay. */}
               <Button
-                variant="surface"
+                variant={isQueued ? "surface" : "ghost"}
+                size="sm"
                 aria-label={`Queue ${failure.title}`}
                 aria-pressed={isQueued}
                 aria-disabled={isQueued || undefined}
                 onClick={() => {
                   if (!isQueued && onInject(failure.kind, failure.tool)) onQueued(failure.kind, at);
                 }}
-                className={isQueued ? "cursor-default text-ash-text hover:opacity-100" : ""}
+                className={isQueued ? "cursor-default hover:bg-hairline" : ""}
               >
                 {isQueued ? (
                   <>
-                    <Glyph name="check" /> Queued
+                    <Glyph name="check" className="text-terminal-green" /> Queued
                   </>
                 ) : (
                   "Queue"
@@ -625,7 +627,7 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
 
   return (
     <>
-      {overlay ? <div aria-hidden="true" onClick={onClose} className="fixed inset-0 z-10 bg-onyx-canvas/70" /> : null}
+      {overlay ? <div aria-hidden="true" onClick={onClose} className="fixed inset-0 z-10 bg-paper-white/80" /> : null}
       <aside
         ref={root}
         id="observability"
@@ -638,16 +640,16 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
             onClose();
           }
         }}
-        className="flex w-480 shrink-0 flex-col overflow-hidden rounded-cards bg-graphite-card max-lg:fixed max-lg:inset-12 max-lg:z-20 max-lg:w-auto lg:mb-16 lg:mr-16"
+        className="flex w-480 shrink-0 flex-col overflow-hidden bg-pure-white lg:border-l lg:border-hairline max-lg:fixed max-lg:inset-12 max-lg:z-20 max-lg:w-auto max-lg:rounded-md max-lg:shadow-card"
       >
-        <div className="flex flex-col gap-20 p-32 pb-20 max-sm:p-20 max-sm:pb-16">
+        <div className="flex flex-col gap-12 p-20 pb-16 max-sm:p-16 max-sm:pb-12">
           <div className="flex items-center justify-between gap-12">
-            <h2 className="font-arcadiadisplay text-subheading font-w480 tracking-[0.02em]">Observability</h2>
-            <Button ref={closer} variant="quiet" onClick={onClose} aria-label="Close observability" className="w-44 px-0">
+            <h2 className="text-body font-medium text-obsidian">Observability</h2>
+            <Button ref={closer} variant="quiet" size="sm" onClick={onClose} aria-label="Close observability" className="w-28 px-0">
               <Glyph name="cross" />
             </Button>
           </div>
-          <div role="tablist" aria-label="What to show" className="flex gap-4 rounded-nav bg-onyx-canvas p-4">
+          <div role="tablist" aria-label="What to show" className="flex gap-2 rounded-md bg-paper-white p-2 shadow-ring">
             {tabs.map((t) => (
               <button
                 key={t.id}
@@ -659,8 +661,8 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
                 tabIndex={shown === t.id ? 0 : -1}
                 onClick={() => setTab(t.id)}
                 onKeyDown={onTabKey}
-                className={`h-32 flex-1 rounded-nav px-12 text-caption font-w480 ${
-                  shown === t.id ? "bg-obsidian-button text-ivory-text" : "text-ash-text hover:text-ivory-text"
+                className={`h-28 flex-1 rounded-sm px-8 text-caption transition-colors ${
+                  shown === t.id ? "bg-pure-white text-obsidian shadow-ring" : "text-stone hover:text-obsidian"
                 }`}
               >
                 {t.label}
@@ -669,19 +671,20 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
           </div>
           {perTurn && turn ? (
             <div className="flex items-center justify-between gap-12">
-              <p className="min-w-0 truncate text-body-sm leading-[1.45] text-ash-text">
+              <p className="min-w-0 truncate text-caption text-charcoal">
                 Turn {index + 1} of {turns.length}: “{turn.userText}”
               </p>
               <div className="flex shrink-0 gap-4">
-                <Button variant="quiet" disabled={index <= 0} onClick={() => go(index - 1)} aria-label="Earlier turn" className="h-32 w-32 px-0">
+                <Button variant="quiet" size="sm" disabled={index <= 0} onClick={() => go(index - 1)} aria-label="Earlier turn" className="w-28 px-0">
                   <Glyph name="left" />
                 </Button>
                 <Button
                   variant="quiet"
+                  size="sm"
                   disabled={index >= turns.length - 1}
                   onClick={() => go(index + 1)}
                   aria-label="Later turn"
-                  className="h-32 w-32 px-0"
+                  className="w-28 px-0"
                 >
                   <Glyph name="right" />
                 </Button>
@@ -695,7 +698,7 @@ export function Drawer({ state, turnId, overlay, queued, onQueued, onSelectTurn,
           role="tabpanel"
           aria-labelledby={`drawer-tab-${shown}`}
           tabIndex={0}
-          className="flex min-h-0 flex-1 flex-col gap-32 overflow-y-auto px-32 pb-32 max-sm:px-20 max-sm:pb-20"
+          className="relative flex min-h-0 flex-1 flex-col gap-24 overflow-y-auto px-20 pb-20 max-sm:px-16 max-sm:pb-16"
         >
           {shown === "session" ? <SessionPanel state={state} /> : null}
           {shown === "failures" ? (

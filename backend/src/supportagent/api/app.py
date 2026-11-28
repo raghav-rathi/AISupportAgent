@@ -1,4 +1,5 @@
-"""The backend app: a health check and one WebSocket that carries everything else.
+"""The backend app: a health check and two WebSockets. `/ws` carries a customer's conversation,
+`/desk` the service desk of a workspace.
 
 Run with: uv run uvicorn --factory supportagent.api.app:create_app --host 127.0.0.1 --port 8787
 """
@@ -17,6 +18,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
+from supportagent.api.desk import serve_desk
 from supportagent.api.hub import Hubs, SessionHub, Subscription, TooManyClients, TooManySessions
 from supportagent.api.limits import Allowance, Budget, Counter, SlidingWindow, client_address
 from supportagent.api.protocol import (
@@ -35,6 +37,7 @@ from supportagent.api.protocol import (
 )
 from supportagent.config import Settings, get_settings
 from supportagent.crm import world as worlds
+from supportagent.desk.store import workspace_id
 from supportagent.eventlog import LEASE_S
 from supportagent.events import (
     TURN_ENDED,
@@ -256,15 +259,15 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             return {"ok": False}
         return {"ok": True}
 
-    @app.websocket("/ws")
-    async def ws(socket: WebSocket) -> None:
+    async def _admit(socket: WebSocket) -> str | None:
+        """Accept a socket from an allowed origin and count it. Returns who it is from."""
         headers = socket.headers
         over_tls = headers.get("x-forwarded-proto", socket.url.scheme).lower() in ("https", "wss")
         if not origin_allowed(
             headers.get("origin"), headers.get("host"), settings, over_tls=over_tls
         ):
             await socket.close(code=POLICY_VIOLATION)
-            return
+            return None
         visitor = client_address(
             socket.client.host if socket.client else None,
             headers.get(settings.client_address_header) if settings.client_address_header else None,
@@ -272,9 +275,26 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         await socket.accept()
         if not connections.take(visitor):
             await socket.close(code=TOO_MANY_CONNECTIONS, reason="too many connections")
+            return None
+        return visitor
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        visitor = await _admit(socket)
+        if visitor is None:
             return
         try:
             await _serve(socket, visitor)
+        finally:
+            connections.give_back(visitor)
+
+    @app.websocket("/desk")
+    async def desk(socket: WebSocket) -> None:
+        visitor = await _admit(socket)
+        if visitor is None:
+            return
+        try:
+            await serve_desk(socket, socket.app.state.hubs, settings)
         finally:
             connections.give_back(visitor)
 
@@ -333,6 +353,7 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
             tell(ProtocolError(code=code, message=message, client_id=client_id, chunk_id=chunk_id))
 
         try:
+            await hub.join(workspace_id(hello.workspace) if hello.workspace else None)
             state = await hubs.rt.graph.aget_state({"configurable": {"thread_id": hub.session_id}})
             customer = state.values.get("customer")
             # A turn that is storing its last event still counts as running, and that event is

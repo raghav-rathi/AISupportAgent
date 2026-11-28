@@ -1,4 +1,4 @@
-"""The six tools the agent can call.
+"""The seven tools the agent can call.
 
 Rules that hold for every tool:
 
@@ -31,6 +31,7 @@ from supportagent.agent.state import (
 )
 from supportagent.agent.tickets import open_question, open_ticket
 from supportagent.crm import policy, repo
+from supportagent.desk import store as desk
 from supportagent.events import (
     Band,
     CustomerSummary,
@@ -51,7 +52,13 @@ Runtime = ToolRuntime[Any, Any]
 # Tools whose results hold one customer's data. When that customer stops being the verified
 # one, the results are taken out of the conversation the model and the judge read.
 _ACCOUNT_TOOLS = frozenset(
-    {"verify_identity", "get_account", "issue_refund", "update_account_field"}
+    {
+        "verify_identity",
+        "get_account",
+        "issue_refund",
+        "update_account_field",
+        "get_ticket_status",
+    }
 )
 # How much a search result is worth to the turn. The search tool keeps the best of its wordings.
 _WORTH: dict[str, int] = {"answer": 3, "check": 2, "verify": 1, "restricted": 1, "escalate": 0}
@@ -692,6 +699,52 @@ async def create_escalation_ticket(
     )
 
 
+# What a ticket's status means, in words a model can pass on and a judge can check.
+_TICKET_STATUS = {
+    "open": "open, with the support team",
+    "pending": "waiting for the customer's answer",
+    "resolved": "resolved",
+}
+
+
+@tool
+async def get_ticket_status(runtime: Runtime) -> Command:
+    """Read the support tickets of this conversation: their status, who at the support team has
+    picked them up, and what the team has replied.
+
+    Call it when the customer asks about a ticket, about a case that went to a person, or
+    whether anyone has answered yet. Report only what it returns.
+    """
+    ctx: AgentContext = runtime.context
+    state: AgentState = runtime.state
+    customer = state.get("customer")
+    async with ctx.pool.connection() as conn:
+        found = await desk.for_customer(
+            conn, ctx.world_id, customer["account_number"] if customer else None
+        )
+    tickets = [
+        {
+            "id": ticket["id"],
+            "opened_on": ticket["opened"].isoformat(),
+            "about": ticket["summary"],
+            "status": _TICKET_STATUS[ticket["status"]],
+            "picked_up_by": ticket["assignee"] or "nobody yet",
+            "replies_from_the_support_team": ticket["replies"],
+        }
+        for ticket in found
+    ]
+    if not tickets:
+        return _reply(
+            runtime,
+            {"tickets": [], "message": "No ticket has been opened in this conversation."},
+            summary="No tickets in this conversation",
+        )
+    replies = sum(len(ticket["replies"]) for ticket in found)
+    count = f"{len(tickets)} ticket{'s' if len(tickets) != 1 else ''}"
+    said = f"{replies} repl{'ies' if replies != 1 else 'y'} from the support team"
+    return _reply(runtime, {"tickets": tickets}, summary=f"{count}, {said}")
+
+
 TOOLS = [
     verify_identity,
     get_account,
@@ -699,6 +752,7 @@ TOOLS = [
     issue_refund,
     update_account_field,
     create_escalation_ticket,
+    get_ticket_status,
 ]
 TOOL_NAMES = frozenset(t.name for t in TOOLS)
 
@@ -717,6 +771,7 @@ CAPABILITIES = (
     "The assistant is the support assistant for Fernhill Workspace. It answers questions about "
     "Fernhill's plans, pricing, billing, refunds, policies and product from the help center. "
     "For a customer it has verified, it can read the account, refund an invoice, update contact "
-    "details and hand the case to a person.\n"
+    "details and hand the case to a person. It can read the status of the conversation's "
+    "tickets and what the support team has replied on them.\n"
     "What the assistant's tools can do. It can do nothing else to an account.\n"
 ) + ("\n".join(f"- {t.name}: {_on_one_line(t.description)}" for t in TOOLS))

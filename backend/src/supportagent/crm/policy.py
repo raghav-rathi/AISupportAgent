@@ -81,8 +81,15 @@ def evaluate_refund(
     issued_on: date,
     today: date,
     is_duplicate: bool,
+    by_billing: bool = False,
 ) -> RefundDecision:
-    """Decide whether support may refund one invoice in full."""
+    """Decide whether one invoice may be refunded in full.
+
+    Without `by_billing` this is what support, and so the assistant, may do. The two refusals
+    that send a case to the billing team are the billing team's to lift: a person there may
+    refund above the support limit and on a suspended account. Nobody refunds outside the
+    window, twice, or on an account with an unpaid balance.
+    """
     if tier == "free":
         return FREE_PLAN_REFUND
     if invoice_status == "refunded":
@@ -91,7 +98,7 @@ def evaluate_refund(
         return _deny(
             "invoice_not_paid", "This invoice has not been paid, so there is nothing to refund."
         )
-    if account_status == "suspended":
+    if account_status == "suspended" and not by_billing:
         return _deny(
             "account_suspended",
             "The account is suspended. Refunds on suspended accounts need a review by the "
@@ -116,7 +123,7 @@ def evaluate_refund(
         return _deny("outside_window", f"The invoice is {age_days} days old. {rule}")
 
     cap = AUTO_REFUND_CAP_CENTS[tier]
-    if amount_cents > cap:
+    if amount_cents > cap and not by_billing:
         return _deny(
             "over_limit",
             f"The invoice is for {usd(amount_cents)}. Support can refund up to {usd(cap)} per "

@@ -4,15 +4,44 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 
 import { type DemoAccount, credentials } from "@/lib/demo";
+import { useDesk } from "@/lib/desk";
 import { useSession } from "@/lib/session";
 import { type KeyFocus, stopKey, stopTarget } from "@/lib/stop";
 
 import { Composer, type Incoming } from "./Composer";
 import { Conversation } from "./Conversation";
+import { Desk } from "./Desk";
 import { Drawer } from "./Drawer";
-import { TopBar } from "./TopBar";
+import { TopBar, type View } from "./TopBar";
 import { VoicePanel } from "./VoicePanel";
 import { Button, Glyph } from "./ui";
+
+/**
+ * Which side of the page is shown. It lives in the address, as `#desk`, so a reload and the
+ * back button keep it. Both sides stay connected whichever is shown: a ticket opened in the
+ * conversation is at the desk when the visitor looks, and a reply from the desk is in the
+ * conversation when they come back.
+ */
+function useView(): [View, (view: View) => void] {
+  const view = useSyncExternalStore<View>(
+    (onChange) => {
+      window.addEventListener("hashchange", onChange);
+      window.addEventListener("popstate", onChange);
+      return () => {
+        window.removeEventListener("hashchange", onChange);
+        window.removeEventListener("popstate", onChange);
+      };
+    },
+    () => (window.location.hash === "#desk" ? "desk" : "assistant"),
+    () => "assistant",
+  );
+  const show = (next: View) => {
+    if (next === view) return;
+    window.history.pushState(null, "", next === "desk" ? "#desk" : window.location.pathname + window.location.search);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+  return [view, show];
+}
 
 /** True on a screen too narrow for the drawer to sit beside the conversation. */
 const NARROW = "(max-width: 1023px)";
@@ -47,7 +76,11 @@ function keyFocus(target: Element | null, byPointer: Element | null): KeyFocus {
 export function App() {
   const session = useSession();
   const { state } = session;
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const desk = useDesk();
+  const [view, setView] = useView();
+  const [caseKey, setCaseKey] = useState<string | null>(null); // the ticket open at the desk
+  const [drawerWanted, setDrawerOpen] = useState(false);
+  const drawerOpen = drawerWanted && view === "assistant"; // the drawer belongs to the conversation
   const [inspected, setInspected] = useState<string | null>(null); // null follows the newest turn
   const [picked, setPicked] = useState<Incoming | null>(null);
   // Which simulated failures are queued, and at which point of the conversation. Kept here so
@@ -88,6 +121,10 @@ export function App() {
     drawerToggle.current?.focus();
   };
   const pickAccount = (account: DemoAccount) => setPicked((before) => ({ text: credentials(account), n: (before?.n ?? 0) + 1 }));
+  const showAtDesk = (ticketId: string) => {
+    setCaseKey(desk.state.tickets.find((ticket) => ticket.id === ticketId)?.key ?? null);
+    setView("desk");
+  };
   const overlay = drawerOpen && narrow; // the drawer covers the conversation
   const voice = state.voice;
   const speech = session.voice;
@@ -132,16 +169,31 @@ export function App() {
   }, [voiceOn, stop]);
 
   return (
-    <div className="flex h-dvh flex-col bg-onyx-canvas text-ivory-text">
+    <div className="flex h-dvh flex-col overflow-hidden bg-paper-white text-obsidian">
       <TopBar
         state={state}
+        view={view}
+        onView={setView}
+        waiting={desk.state.stats?.open ?? 0}
+        deskOnline={desk.state.connection === "open"}
         drawerOpen={drawerOpen}
         drawerToggle={drawerToggle}
         onToggleDrawer={() => (drawerOpen ? closeDrawer() : setDrawerOpen(true))}
         onStartOver={startOver}
         inert={overlay}
       />
-      <div className="flex min-h-0 flex-1">
+      {view === "desk" ? (
+        <Desk
+          desk={desk}
+          selected={caseKey}
+          onSelect={setCaseKey}
+          onTry={(text) => {
+            setView("assistant");
+            session.say(text);
+          }}
+        />
+      ) : null}
+      <div className="flex min-h-0 flex-1" hidden={view !== "assistant"}>
         <main className="flex min-w-0 flex-1 flex-col" inert={overlay}>
           <Conversation
             state={state}
@@ -149,14 +201,15 @@ export function App() {
             onAccount={pickAccount}
             onRetry={session.retry}
             onPassage={session.requestPassage}
+            onDesk={showAtDesk}
             onInspect={(turnId) => {
               setInspected(turnId);
               setDrawerOpen(true);
             }}
           />
           {down || state.notice ? (
-            <div className="mx-auto w-full max-w-760 px-24 pb-12">
-              <div role="status" className="flex items-center gap-12 rounded-cards bg-graphite-card px-20 py-12 text-body-sm leading-[1.45]">
+            <div className="mx-auto w-full max-w-760 px-24 pb-12 max-sm:px-16">
+              <div role="status" className="flex items-center gap-12 rounded-md bg-pure-white px-16 py-12 text-body-sm text-obsidian shadow-ring">
                 <Glyph name="alert" />
                 <p className="flex-1">
                   {state.connection === "stopped"
@@ -168,11 +221,11 @@ export function App() {
                         : `The server did not accept that: ${state.notice}.`}
                 </p>
                 {state.connection === "stopped" || state.connection === "paused" ? (
-                  <Button variant="surface" onClick={session.reconnect} className="h-32 px-12">
+                  <Button variant="surface" size="sm" onClick={session.reconnect}>
                     {state.connection === "paused" ? "Reconnect" : "Try again"}
                   </Button>
                 ) : !down ? (
-                  <Button variant="quiet" onClick={session.dismiss} className="h-32 px-12">
+                  <Button variant="quiet" size="sm" onClick={session.dismiss}>
                     Dismiss
                   </Button>
                 ) : null}

@@ -6,11 +6,12 @@ import type { ClientMessage, FaultInject, ServerEvent } from "./protocol";
 import { planAfterClose } from "./reconnect";
 import { type AppState, initialState, reduce } from "./state";
 import { type Levels, VoiceLink, newId } from "./voice";
+import { workspaceKey } from "./workspace";
 
 const STORAGE_KEY = "fernhill.session";
 
 /** The backend's WebSocket. Set at build time, or the same host on the backend's dev port. */
-function socketUrl(): string {
+export function socketUrl(): string {
   const configured = process.env.NEXT_PUBLIC_WS_URL;
   if (configured) return configured;
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -129,7 +130,8 @@ export function useSession(): Session {
       ws.onopen = () => {
         if (!current()) return;
         const { sessionId, lastSeq } = cursor.current;
-        ws.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seq: lastSeq }));
+        // The workspace is what the service desk of this browser shows the tickets of.
+        ws.send(JSON.stringify({ type: "hello", session_id: sessionId, last_seq: lastSeq, workspace: workspaceKey() }));
       };
       ws.onmessage = (message) => {
         if (!current()) return;

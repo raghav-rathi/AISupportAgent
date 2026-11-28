@@ -1,94 +1,97 @@
 @import "tailwindcss";
 
 /*
- * Design tokens, taken from the project's design file: a dark, flat, monochrome system with one
- * action colour. The file names two custom typefaces and gives Inter as the substitute, so both
- * font tokens resolve to Inter here.
+ * Design tokens, taken from the project's design file: a light, monochrome system. Near-white
+ * paper, near-black type, hairline rings in place of shadows, 6px corners, and one chromatic
+ * note, a green that marks a confirmation. Geist Sans is for reading and Geist Mono for
+ * stamping: every label, every piece of metadata and every identifier is mono.
  *
- * Spacing is in pixels: `p-24` is 24px, `gap-12` is 12px. That keeps utility names equal to the
- * spacing tokens of the design file.
+ * Spacing is in pixels: `p-16` is 16px, `gap-12` is 12px. The system is built on a 4px grid.
  */
 @theme inline {
-  --font-arcadia: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-arcadiadisplay: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @theme {
-  /* Colors */
-  --color-onyx-canvas: #171721;
-  --color-graphite-card: #1e1e2a;
-  --color-obsidian-button: #272735;
-  --color-slate-border: #70707d;
-  --color-mist-border: #e2e3ed;
-  --color-ash-text: #c3c3cc;
-  --color-ivory-text: #ededf3;
-  --color-cobalt: #5266eb;
+  /* Colors. Carbon is for the brand mark only. Text stops at obsidian. */
+  --color-*: initial;
+  --color-paper-white: #fafafa;
   --color-pure-white: #ffffff;
+  --color-hairline: #ebebeb;
+  --color-ash: #c9c9c9;
+  --color-smoke: #a8a8a8;
+  --color-graphite: #8f8f8f;
+  --color-slate: #7d7d7d;
+  --color-stone: #666666;
+  --color-charcoal: #4d4d4d;
+  --color-obsidian: #171717;
+  --color-carbon: #000000;
+  --color-terminal-green: #297a3a;
+  --color-transparent: transparent;
+  --color-current: currentColor;
 
-  /* Type scale. Each size carries its line height and letter spacing. */
-  --text-caption: 12px;
-  --text-caption--line-height: 1;
-  --text-caption--letter-spacing: 0.12px;
+  /* Type scale. Each size carries its line height, and the large ones their tracking. */
+  --text-*: initial;
+  --text-micro: 8px;
+  --text-micro--line-height: 1;
+  --text-eyebrow: 11px;
+  --text-eyebrow--line-height: 1.5;
+  --text-label: 12px;
+  --text-label--line-height: 1.33;
+  --text-caption: 13px;
+  --text-caption--line-height: 1.54;
   --text-body-sm: 14px;
-  --text-body-sm--line-height: 1;
-  --text-body-sm--letter-spacing: 0.07px;
+  --text-body-sm--line-height: 1.43;
   --text-body: 16px;
   --text-body--line-height: 1.5;
-  --text-body-lg: 18px;
-  --text-body-lg--line-height: 1.35;
-  --text-subheading: 21px;
-  --text-subheading--line-height: 1.35;
-  --text-heading-sm: 28px;
-  --text-heading-sm--line-height: 1.2;
-  --text-heading-sm--letter-spacing: 0.42px;
-  --text-heading: 32px;
-  --text-heading--line-height: 1.15;
-  --text-heading--letter-spacing: 0.48px;
-  --text-heading-lg: 42px;
-  --text-heading-lg--line-height: 1.15;
-  --text-heading-lg--letter-spacing: 0.42px;
-  --text-display: 65px;
-  --text-display--line-height: 1.1;
+  --text-heading: 30px;
+  --text-heading--line-height: 1.1;
+  --text-heading--letter-spacing: -1.5px;
+  --text-heading-lg: 56px;
+  --text-heading-lg--line-height: 1;
+  --text-heading-lg--letter-spacing: -3.36px;
+  --text-display: 64px;
+  --text-display--line-height: 1;
+  --text-display--letter-spacing: -3.84px;
 
-  /* Weights. The system stops at 530: nothing is bold. */
-  --font-weight-w360: 360;
+  /* Weights. Headlines speak at 400 to 450. Nothing is bold. */
+  --font-weight-*: initial;
   --font-weight-regular: 400;
-  --font-weight-w420: 420;
-  --font-weight-w480: 480;
-  --font-weight-w530: 530;
+  --font-weight-w450: 450;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  --tracking-label: 0.071em;
 
   /* Spacing */
   --spacing: 1px;
-  --spacing-4: 4px;
-  --spacing-8: 8px;
-  --spacing-12: 12px;
-  --spacing-16: 16px;
-  --spacing-20: 20px;
-  --spacing-24: 24px;
-  --spacing-32: 32px;
-  --spacing-40: 40px;
-  --spacing-56: 56px;
-  --spacing-72: 72px;
-  --spacing-112: 112px;
-  --spacing-128: 128px;
 
-  /* Radius */
-  --radius-md: 4px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-3xl: 32px;
-  --radius-3xl-2: 40px;
-  --radius-nav: 40px;
-  --radius-tags: 40px;
-  --radius-cards: 12px;
-  --radius-inputs: 32px;
-  --radius-buttons: 32px;
-  --radius-default: 4px;
+  /* Radius. Six pixels for anything with corners. A full pill only for tags and nav actions. */
+  --radius-*: initial;
+  --radius-sm: 2px;
+  --radius-md: 6px;
+  --radius-full: 9999px;
+
+  /* Depth is a hairline ring, never a drop shadow. */
+  --shadow-*: initial;
+  --shadow-ring: 0 0 0 1px rgba(0, 0, 0, 0.08);
+  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 0 0 2px #fafafa;
+  --shadow-hairline: 0 0 0 1px #ebebeb;
+  --shadow-focus: 0 0 0 1px #171717;
 
   --animate-spin-slow: spin 0.9s linear infinite;
   --animate-caret: caret 1s steps(2, start) infinite;
+}
+
+/* The mono stamp: labels, eyebrows, metadata. Colour is set where it is used. */
+@utility label-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  font-weight: 400;
+  letter-spacing: 0.071em;
+  text-transform: uppercase;
 }
 
 @keyframes caret {
@@ -98,30 +101,36 @@
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
-  background: var(--color-onyx-canvas);
-  color: var(--color-ivory-text);
-  font-family: var(--font-arcadia);
+  background: var(--color-paper-white);
+  color: var(--color-obsidian);
+  font-family: var(--font-sans);
   font-size: var(--text-body);
   line-height: var(--text-body--line-height);
   font-weight: 400;
+  font-feature-settings: "calt" 0, "rlig", "ss11";
 }
 
-/* Keyboard focus is ivory. Cobalt stays reserved for the one primary action. In the base layer, so
-   a control that draws its own focus state can switch this one off with a utility. */
+/* Keyboard focus is an obsidian line. In the base layer, so a control that draws its own focus
+   state can switch this one off with a utility. */
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--color-ivory-text);
+    outline: 2px solid var(--color-obsidian);
     outline-offset: 2px;
   }
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-obsidian-button) transparent;
+  scrollbar-color: var(--color-ash) transparent;
+}
+
+::selection {
+  background: var(--color-obsidian);
+  color: var(--color-pure-white);
 }
 
 @media (prefers-reduced-motion: reduce) {
