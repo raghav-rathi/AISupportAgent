@@ -12,7 +12,7 @@ Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support
 |---|---|
 | Streaming chat UI with live step status | Done, in Next.js over a WebSocket. Each tool shows as a step while it runs and with its result once it is done. |
 | Live voice with waveform, transcripts and interruption | Done. The backend hears the customer through Deepgram Flux and speaks through Deepgram Flux TTS. The page has a microphone button, a level meter for each side, the customer's words as they are recognised, and four ways to interrupt a reply: speaking, a Stop button, the space bar and Escape. A reply that was cut off is kept only as far as the customer heard it. |
-| Observability drawer | Done. Per turn: end-to-end latency, what the customer waited for (first sign of work, first text, approved answer), tokens, estimated cost with the hosted reranker included, a timeline of every model and tool call, retrieval scores, the grounding verdict, and the full prompts with PINs masked, fetched when their tab is opened. For a spoken turn also the wait for the end of the turn, the voice's first sound, voice-to-voice time, the cost of speech, how long before the turn its first model call began, and whether a request was sent twice. Per session, the model calls that were started early and not used. |
+| Observability drawer | Done. Per turn: end-to-end latency, what the customer waited for (first sign of work, first text, approved answer), tokens, estimated cost with the hosted reranker included, a timeline of every model and tool call, retrieval scores, the grounding verdict, and the full prompts with PINs masked, fetched when their tab is opened. For a spoken turn also the wait for the end of the turn, the voice's first sound, voice-to-voice time to the first sound and, where "one moment" came first, to the answer, the cost of speech, how long before the turn its first model call began, and whether a request was sent twice. Per session, the model calls that were started early and not used. |
 | Vector database with custom chunking | Done. pgvector and full-text search fused in SQL, a chunker that follows the heading tree, a reranker. |
 | Confidence guardrails that route to a person | Done. A gate on the reranker's score, a second model that checks each answer, and a ticket for a Fernhill question the help center does not answer. |
 | A chain of three or more tool calls | Done. Six tools, with the business rules in code. |
@@ -78,7 +78,7 @@ Every search ends in one of five bands. The band comes from the reranker's best 
 | `restricted` | The customer is verified, and a passage for another plan is a confident match | The agent says the topic belongs to another plan |
 | `escalate` | Nothing scores above `GATE_LOW` | A ticket, and the hand-off text |
 
-A search tries two wordings: the model's query, then the customer's own words without the sentences that only give an account number or a PIN. The better result stands.
+A search tries two wordings: the model's query, then the customer's own words without the sentences that only give an account number or a PIN. The better result stands. When the customer's latest message gave nothing but credentials, as it does right after "please verify", their own words are the question from the message before it: an account number is not a search.
 
 `restricted` needs a confident match because the reply states a fact about the customer's plan. A weak match for another plan goes to a person.
 
@@ -383,6 +383,7 @@ Three runs on 2026-11-27: before the audits at 01:34 (13 calls, on a clock 0.1 t
 Read these with care too.
 
 - The speech is synthetic and comes from the vendor whose recogniser hears it. A person on a laptop microphone in a room is harder. Nobody has yet talked to it on loudspeakers, which is where echo decides whether interrupting by speech works.
+- The 0 of 1,572 for a spoken PIN is weaker than it reads. To tell the PIN's digits from the account number's, the check replaces every digit of the clip with a marker before the redactor sees the transcript. The redactor does not treat all number words alike: a lone "oh" or "one" is left alone where a lone "nine" is masked. So a pass on the marked text does not prove that each transcript as the recogniser wrote it was masked. The check also takes the turns from how the transcript changes and not from recorded turn IDs.
 - The first-sound target is met by little. In the last run 18 of 40 turns took more than a second and 2 more than two, and over all 78 turns without a tool the 95th percentile was 2.11 s. What varies is the model's time to its first token, from hour to hour: 1.10 s at the 95th percentile in one run and 1.41 s in the next.
 - A spoken turn that uses a tool answers later than it did, by the time its check takes. That is the price of not saying what has not been checked. The check took 2.5 s once in these runs, where it usually takes one. Since this run the judge of a spoken turn is asked a second time when it has sent nothing after 1.2 s, and "one moment" is shorter: neither is in the figures above.
 - "End of the customer's speech" is the last sample above -36 dB in the clip. The server's own figure counts from the end of the last word as Flux timed it, which is earlier.
@@ -416,7 +417,7 @@ The server answers with events. Those that belong to the conversation carry a se
 - tools: `tool.started`, `tool.retry`, `tool.error`, `tool.finished`
 - guardrails: `retrieval.result`, `guardrail.verdict`, `answer.retracted`, `escalation.created`
 - reply: `answer.drafted` when a step is known to be the answer, then `assistant.message`, always after the verdict
-- speech, stored: `speech.heard` and `speech.spoken` with timings and cost for a spoken turn, `speech.spoken` marked `filler` for "one moment", `voice.usage` for listening time no turn accounts for
+- speech, stored: `speech.heard` and `speech.spoken` with timings and cost for a spoken turn, `speech.spoken` marked `filler` for "one moment" and counted under the turn it filled, `voice.usage` for listening time no turn accounts for
 - on request: `trace.list`, `passage.detail`
 - voice, to the connection with the microphone only and not stored: `voice.started`, `voice.stopped`, `voice.state`, `stt.partial`, `voice.playback` with pause, resume or flush, and the reply's audio as binary frames at 24 kHz. Flushes are numbered. A flush arrives in order with the audio. A pause or a resume may overtake audio that is still queued.
 
@@ -488,6 +489,6 @@ Dockerfile       the backend image
 - A model call that is dropped or cut short has been paid for in part, and its provider reports no usage for it. It is counted at a fixed amount, which can be more or less than it cost.
 - The voice's greeting is no turn of the conversation: what it cost is stored, and its words are not in the transcript. The same goes for "one moment".
 - In a spoken turn an answer that uses a tool comes later than it would on a screen, by the time its check takes. "One moment" covers the wait. A reply that uses no tool is still said before its check, so a wrong one is heard before it is taken back.
-- After a lockout or a change of account, a passage is handed out only if the plan of whoever is verified now may read it. The prompt traces of earlier turns are not hidden: the conversation on the page shows the same account data, and New conversation is what clears both.
+- After a lockout or a change of account, a passage is handed out only if the plan of whoever is verified now may read it, the page asks again for the passages it had, and a ticket on the new account carries no line from before that account came in. The prompt traces of earlier turns are not hidden: the conversation on the page shows the same account data, and New conversation is what clears both.
 - A spoken answer carries no citation numbers, so the page has no source chips for it. The drawer still shows what the search returned.
 - Leaving silence out of the voice's audio shortens its pauses. It cannot bring the next words in sooner, so a long pause of the voice can still be heard as a short gap.

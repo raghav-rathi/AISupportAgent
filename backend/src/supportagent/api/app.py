@@ -37,6 +37,7 @@ from supportagent.config import Settings, get_settings
 from supportagent.crm import world as worlds
 from supportagent.eventlog import LEASE_S
 from supportagent.events import (
+    TURN_ENDED,
     CustomerSummary,
     PassageDetail,
     ProtocolError,
@@ -334,13 +335,18 @@ def create_app(rt: Runtime | None = None, settings: Settings | None = None) -> F
         try:
             state = await hubs.rt.graph.aget_state({"configurable": {"thread_id": hub.session_id}})
             customer = state.values.get("customer")
+            # A turn that is storing its last event still counts as running, and that event is
+            # already among what this client is about to be sent. Nothing comes after it to
+            # say that the session is free, so this message has to.
+            ending = any(e.type in TURN_ENDED and e.turn_id == hub.current for e in backlog)
+            busy = hub.busy and not ending
             ready = SessionReady(
                 session_id=hub.session_id,
                 last_seq=newest,
                 customer=CustomerSummary(**customer) if customer else None,
                 tickets=[Ticket(**t) for t in state.values.get("tickets", [])],
-                busy=hub.busy,
-                resumable=not hub.busy and bool(state.next) and hub.log.heard is None,
+                busy=busy,
+                resumable=not busy and bool(state.next) and hub.log.heard is None,
                 fault_injection=settings.fault_injection,
                 voice=speech is not None,
             )

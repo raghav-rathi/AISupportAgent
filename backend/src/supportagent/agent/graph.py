@@ -45,9 +45,14 @@ from supportagent.agent.early import prompt_key
 from supportagent.agent.guard import guard
 from supportagent.agent.judge import JudgeError
 from supportagent.agent.prompts import for_prompt, system_prompt
-from supportagent.agent.state import AgentState, Customer, Escalation
-from supportagent.agent.tickets import open_ticket, question_only, recent_customer_texts
-from supportagent.agent.tools import CAPABILITIES, TOOLS, was_forgotten
+from supportagent.agent.state import AgentState, Customer, Escalation, was_forgotten
+from supportagent.agent.tickets import (
+    open_question,
+    open_ticket,
+    question_only,
+    recent_customer_texts,
+)
+from supportagent.agent.tools import CAPABILITIES, TOOLS
 from supportagent.crm import policy
 from supportagent.events import (
     AnswerDrafted,
@@ -611,12 +616,15 @@ async def check(state: AgentState, runtime: Runtime[AgentContext]) -> dict[str, 
         # something they asked about Fernhill. Such a question goes to a person. The prompt asks
         # the model to open the ticket, and when it did not, the ticket is opened here: nobody
         # is left with "we have no answer" and no one to follow up.
+        unanswered = open_question(state["messages"], ctx.redactor) or (
+            question_only(asked[-1]) if asked else ""
+        )
         ticket = await open_ticket(
             ctx,
             state,
             reason="unanswered_question",
             priority="normal",
-            summary=f"The help center has no answer to: {question_only(asked[-1]) if asked else ''}",
+            summary=f"The help center has no answer to: {unanswered}",
         )
         emit(EscalationCreated(ticket=ticket))
         follow_up = _FOLLOW_UP_SPOKEN if spoken else _FOLLOW_UP.format(ticket=ticket.id)

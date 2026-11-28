@@ -842,6 +842,36 @@ async def test_what_is_recorded_while_a_turn_ends_reaches_clients_after_the_turn
     await client.ws.close()
 
 
+async def test_a_client_that_connects_while_a_turns_end_is_stored_is_told_the_session_is_free(
+    serve, monkeypatch
+):
+    rt, address = await serve(ScriptedModel("m", say("Hello.")))
+    client = await Client.open(address)
+    hub = rt.app.state.hubs._hubs[client.ready["session_id"]]
+    saving, let = asyncio.Event(), asyncio.Event()
+    save = hub.log.save
+
+    async def slow(redactor=None, *, release=None):
+        if release is not None and not let.is_set():
+            saving.set()
+            await let.wait()
+        await save(redactor, release=release)
+
+    monkeypatch.setattr(hub.log, "save", slow)
+    await client.say("Hi")
+    await saving.wait()
+    # The turn's last event has its number and is on its way into the store. A second window
+    # opens now and is sent that event with everything else it missed. Nothing comes after it,
+    # so a "busy" here would leave that window's message field disabled until a reload.
+    second = await Client.open(address, session_id=client.ready["session_id"])
+    assert second.ready["busy"] is False
+    finished = await second.until("turn.finished")
+    let.set()
+    assert (await client.until("turn.finished"))["seq"] == finished["seq"]
+    for window in (client, second):
+        await window.ws.close()
+
+
 async def test_a_note_about_an_earlier_reply_does_not_stop_the_turn_that_runs_now(serve):
     """Voice hears of a turn's end a moment after the session is free again. A typed message
     may have started the next turn by then, and what voice notes about the reply before must

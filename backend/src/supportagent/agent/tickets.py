@@ -9,16 +9,19 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from supportagent.agent.context import AgentContext
-from supportagent.agent.state import AgentState
+from supportagent.agent.state import AgentState, was_forgotten
 from supportagent.crm import repo
 from supportagent.events import Ticket
 from supportagent.redact import MASK, Redactor
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
 _ACCOUNT_NUMBER = re.compile(r"(?<!\d)\d{8}(?!\d)")
+# A reply that gives credentials and says fewer words than this beside them, "Sure, it is ...",
+# asks nothing.
+_WORDS_OF_A_QUESTION = 4
 # A comma followed by a space ends a clause. A comma between digits, as in "1,000", does not.
 _CLAUSE_END = re.compile(r",\s+")
 _AND = re.compile(r"\s+and\s+", re.IGNORECASE)
@@ -64,12 +67,11 @@ def _without_credentials(sentence: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def last_customer_text(messages: Sequence[AnyMessage]) -> str:
-    """The customer's latest message as typed. Mask it before it goes anywhere but a model."""
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            return str(message.text)
-    return ""
+def _question(masked: str) -> tuple[str, bool]:
+    """A masked message without its credential clauses, and whether it had any."""
+    sentences = [part.strip() for part in _SENTENCE_END.split(masked) if part.strip()]
+    kept = [_without_credentials(s) for s in sentences]
+    return " ".join(text for text in kept if text), kept != sentences
 
 
 def question_only(masked: str) -> str:
@@ -83,9 +85,23 @@ def question_only(masked: str) -> str:
     not make a clause a credential: while nobody is verified the redactor also masks numbers such
     as the one in "ISO 27001". A message that holds nothing but credentials is returned whole.
     """
-    sentences = [part.strip() for part in _SENTENCE_END.split(masked) if part.strip()]
-    kept = [text for text in (_without_credentials(s) for s in sentences) if text]
-    return " ".join(kept) if kept else masked
+    return _question(masked)[0] or masked
+
+
+def open_question(messages: Sequence[AnyMessage], redactor: Redactor, count: int = 3) -> str:
+    """What the customer is asking, in their own words, for a search or a ticket.
+
+    Their latest message without its credentials, or an earlier one when the latest only gave
+    them. A customer asks about their plan, is asked to verify, and replies with an account
+    number and a PIN. That reply holds no question: searched, it sent an account number to the
+    reranker and found nothing, and a ticket opened from it summarised the credentials. Empty
+    when none of the last `count` messages asks anything.
+    """
+    for masked in reversed(recent_customer_texts(messages, redactor, count)):
+        said, gave = _question(masked)
+        if said and not (gave and len(said.split()) < _WORDS_OF_A_QUESTION):
+            return said
+    return ""
 
 
 def recent_customer_texts(
@@ -94,6 +110,27 @@ def recent_customer_texts(
     """The customer's last few messages, oldest first, with any PIN masked."""
     texts = [str(m.text) for m in messages if isinstance(m, HumanMessage)]
     return [redactor.text(text, customer=True) for text in texts[-count:]]
+
+
+def _since_account_change(messages: Sequence[AnyMessage]) -> Sequence[AnyMessage]:
+    """The conversation from the message that brought in the customer who is verified now.
+
+    Once another account was verified in this conversation, or verification was locked, the
+    lines before that are someone else's. A ticket on this account must not carry them.
+    """
+    last = max((i for i, m in enumerate(messages) if was_forgotten(m)), default=None)
+    if last is None:
+        return messages
+    verified = next(
+        (
+            i
+            for i, m in enumerate(messages)
+            if i > last and isinstance(m, ToolMessage) and m.name == "verify_identity"
+        ),
+        len(messages),
+    )
+    starts = [i for i, m in enumerate(messages[:verified]) if isinstance(m, HumanMessage)]
+    return messages[starts[-1] :] if starts else messages[verified:]
 
 
 def transcript_excerpt(
@@ -109,6 +146,7 @@ def transcript_excerpt(
     `current_turn_only` starts the excerpt at the customer's latest message. A ticket that is not
     about the verified customer must not carry what they said before.
     """
+    messages = _since_account_change(messages)
     if current_turn_only:
         starts = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
         messages = messages[starts[-1] :] if starts else []

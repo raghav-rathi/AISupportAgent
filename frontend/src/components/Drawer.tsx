@@ -209,8 +209,11 @@ const END_OF_TURN: Record<string, string> = {
 /** A spoken turn: where the time went between the last word and the first sound, and what speech cost. */
 function VoiceSection({ turn }: { turn: Turn }) {
   const heard = turn.heard;
-  // The reply that stood: an answer taken back is followed by the one spoken in its place.
-  const reply = turn.spoken.at(-1);
+  // What was said first, which is "one moment" when a tool ran, and the answer that stood: an
+  // answer taken back is followed by the one spoken in its place.
+  const first = turn.spoken[0];
+  const reply = turn.spoken.findLast((piece) => !piece.filler);
+  const covered = first?.filler === true && reply !== undefined;
   const firstToken = turn.calls.find((call) => call.purpose === "agent" && call.finished)?.finished?.ttft_ms;
   const chars = turn.spoken.reduce((sum, piece) => sum + piece.chars, 0);
   const cut = heardOf(turn);
@@ -224,12 +227,23 @@ function VoiceSection({ turn }: { turn: Turn }) {
         />
         <Metric label="Model first token" value={formatMs(firstToken)} note="of the first model call" />
         <Metric label="Speech first audio" value={formatMs(reply?.synthesis_ms)} note="from the text going out to the first audio back" />
-        <Metric label="Voice to voice" value={formatMs(reply?.voice_to_voice_ms)} note="last word to first audio, at the server" />
+        <Metric
+          label="Voice to voice"
+          value={formatMs(first?.voice_to_voice_ms)}
+          note={covered ? "last word to the first audio of “one moment”, at the server" : "last word to first audio, at the server"}
+        />
         <Metric
           label="Voice to voice, here"
           value={formatMs(turn.heardAfterMs)}
           note={turn.heardAfterMs == null ? "measured live in this browser only" : "last word to first sound from the speaker, as measured here"}
         />
+        {covered ? (
+          <Metric
+            label="Voice to answer"
+            value={formatMs(reply?.voice_to_voice_ms)}
+            note="last word to the first audio of the answer, after the tool and its check, at the server"
+          />
+        ) : null}
         <Metric
           label="Speech cost"
           value={formatCost(turnUsage(turn).speechUsd)}

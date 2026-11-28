@@ -118,7 +118,9 @@ async def test_while_a_tool_runs_the_voice_says_one_moment_and_never_the_models_
     assert speech.replies == [one_moment]
     await caller.played(caller.audio_ms, after="drained")
     filler = await caller.until("speech.spoken")
-    assert (filler["filler"], filler["turn_id"], filler["interrupted"]) == (True, None, False)
+    assert (filler["filler"], filler["interrupted"]) == (True, False)
+    # It is no part of the answer, and its time and cost are counted under the turn it filled.
+    assert filler["turn_id"] == caller.of("turn.started")[-1]["turn_id"]
     # No citation number and no markup either: a voice cannot read them.
     await eventually(lambda: speech.replies == [one_moment, "You have 14 days to ask."])
     assert speech.warnings == [] and speech.interrupts == []

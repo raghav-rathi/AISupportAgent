@@ -360,15 +360,19 @@ class Caller:
         if not hear_out:
             return result  # the next step speaks over the reply to this one
 
+        def answers(events: list[dict]) -> list[dict]:
+            # "One moment" is counted under the turn too, and is not its reply.
+            return [e for e in events if e.get("turn_id") == turn_id and not e.get("filler")]
+
         def over() -> bool:
-            done = [e for e in self.since(mark, "speech.spoken") if e.get("turn_id") == turn_id]
+            done = answers(self.since(mark, "speech.spoken"))
             failed = self.since(mark, "turn.failed") or self.since(mark, "turn.interrupted")
             return bool(done or failed)
 
         await self.until(over, 90)
         events = [e for e in self.events[mark:] if e.get("turn_id") == turn_id]
         heard = next((e for e in events if e["type"] == "speech.heard"), {})
-        spoken = next((e for e in events if e["type"] == "speech.spoken"), {})
+        spoken = next(iter(answers(self.since(mark, "speech.spoken"))), {})
         message = next((e for e in events if e["type"] == "assistant.message"), {})
         finished = next((e for e in events if e["type"] == "turn.finished"), {})
         model = next((e for e in events if e["type"] == "llm.finished"), {})

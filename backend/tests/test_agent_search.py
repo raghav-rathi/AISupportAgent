@@ -72,6 +72,27 @@ async def test_no_pin_leaves_in_a_search_query(pool, retriever, world):
     assert "4721" not in of(events, "retrieval.result")[0].query
 
 
+async def test_credentials_given_alone_are_not_searched_and_the_question_before_them_is(
+    pool, retriever, world
+):
+    # Asked to verify, the customer answers with an account number and a PIN and nothing else.
+    # The model's wording finds nothing. The second wording is the question they asked before,
+    # and the account number goes to no search.
+    recording = Recording(retriever)
+    model = ScriptedModel(
+        "m",
+        say("Could you give me your account number and PIN?"),
+        call("verify_identity", **MAYA),
+        call("search_knowledge_base", query="nonexistent xyzzy topic"),
+    )
+    session = Session(pool, recording, world, model)
+    await session.turn("Tell me about xyzzy.")
+    events = await session.turn("My account number is 10482917 and my PIN is 4721.")
+    assert recording.queries == ["nonexistent xyzzy topic", "Tell me about xyzzy."]
+    ticket = of(events, "escalation.created")[0].ticket
+    assert ticket.summary == "The help center has no answer to: Tell me about xyzzy."
+
+
 async def test_the_customers_own_words_get_a_try_when_the_models_wording_only_finds_another_plan(
     pool, retriever, world
 ):

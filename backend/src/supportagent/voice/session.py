@@ -229,7 +229,7 @@ class _Line:
 class _Reply:
     """One reply on its way to the customer's ear."""
 
-    turn_id: str | None  # None for wording of our own that belongs to no turn
+    turn_id: str | None  # None for wording of our own that is no turn's answer
     began: float  # when its text went to the synthesis
     after: float | None  # when the customer stopped speaking, if this answers them
     line: _Line
@@ -237,6 +237,7 @@ class _Reply:
     before: str = ""  # an earlier piece of the same answer, heard to its end
     must: bool = False  # a correction: what comes next waits for it instead of replacing it
     filler: bool = False  # "one moment" while a tool runs: no part of any answer
+    of_turn: str | None = None  # the turn such wording was said in, for its time and cost
     first_audio: float | None = None  # when its first sound went to the client
     last_audio: float = 0.0  # when the synthesis last sent a piece of it, silent or not
     sent_ms: float = 0.0  # audio passed on to the client
@@ -275,6 +276,8 @@ class _Queued:
     before: str
     must: bool
     after: float | None = None
+    filler: bool = False
+    of_turn: str | None = None
 
 
 @dataclass
@@ -1469,7 +1472,7 @@ class VoiceSession:
                 and self._utterance is None
             ):
                 self._acked.add(turn_id)
-                await self._speak(None, words, must=True, filler=True)
+                await self._speak(None, words, must=True, filler=True, of_turn=turn_id)
         elif kind == "answer.retracted":
             await self._withdraw(turn_id)
         elif kind == "assistant.message":
@@ -1602,13 +1605,15 @@ class VoiceSession:
         must: bool = False,
         filler: bool = False,
         after: float | None = None,
+        of_turn: str | None = None,
     ) -> None:
         """Hand one complete piece of text to the synthesis, as the reply now being spoken.
 
         It takes the connection that was opened for it. It waits its turn behind a reply
         that has to be heard to its end: a correction, "one moment", or the first piece of
         the same answer. `after` is when the customer stopped speaking, if this is what they
-        hear first in reply.
+        hear first in reply. `of_turn` is the turn that wording of our own was said in: it is
+        no part of that turn's answer, and its time and cost are still the turn's.
         """
         if turn_id is not None:
             self._said_text[turn_id] = f"{before} {words}".strip()
@@ -1617,7 +1622,7 @@ class VoiceSession:
         current = self._audible()
         if current is not None:
             if current.must or (before and current.turn_id == turn_id):
-                self._next.append(_Queued(turn_id, words, before, must, after))
+                self._next.append(_Queued(turn_id, words, before, must, after, filler, of_turn))
                 return
             await self._settle(current)
         line, self._spare = self._spare, self._line()
@@ -1635,6 +1640,7 @@ class VoiceSession:
                     before=before,
                     must=must,
                     filler=filler,
+                    of_turn=of_turn,
                 )
                 reply.last_audio = reply.began
                 line.reply = self._reply = reply
@@ -1786,7 +1792,13 @@ class VoiceSession:
         if self._next:
             item = self._next.pop(0)
             await self._speak(
-                item.turn_id, item.words, item.before, must=item.must, after=item.after
+                item.turn_id,
+                item.words,
+                item.before,
+                must=item.must,
+                after=item.after,
+                filler=item.filler,
+                of_turn=item.of_turn,
             )
         else:
             self._rest()
@@ -1820,5 +1832,5 @@ class VoiceSession:
                 filler=reply.filler,
                 cost_usd=round(chars / 1000 * self._config.tts_usd_per_1k_chars, 6),
             ),
-            reply.turn_id,
+            reply.turn_id or reply.of_turn,
         )

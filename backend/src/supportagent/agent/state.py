@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, ToolMessage
 from langgraph.graph.message import add_messages
+
+# What stands in the conversation in place of a tool result about an account that is no longer
+# the verified one. The model and the judge read this and not what the tool had returned.
+NO_LONGER_VERIFIED = json.dumps(
+    {
+        "omitted": "This result belongs to an account that is no longer verified in this conversation."
+    }
+)
+
+
+def was_forgotten(message: AnyMessage) -> bool:
+    """True for an account result whose content was taken out when the customer changed."""
+    return isinstance(message, ToolMessage) and message.content == NO_LONGER_VERIFIED
 
 
 class Customer(TypedDict):

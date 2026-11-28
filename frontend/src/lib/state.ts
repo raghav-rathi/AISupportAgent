@@ -384,7 +384,10 @@ function applyEvent(state: AppState, e: ServerEvent): AppState {
     state = { ...state, lastSeq: e.seq };
   }
   if (e.type === "session.state") {
-    return { ...state, customer: e.customer, tickets: e.tickets };
+    // Which passages may be read is decided for whoever is verified now. With another account,
+    // or none, the ones fetched before are asked for again.
+    const same = (state.customer?.account_number ?? null) === (e.customer?.account_number ?? null);
+    return { ...state, customer: e.customer, tickets: e.tickets, passages: same ? state.passages : {} };
   }
   if (e.type === "voice.usage" || (e.type === "speech.spoken" && !e.turn_id)) {
     return { ...state, speechUsd: state.speechUsd + e.cost_usd };
@@ -712,10 +715,10 @@ function speechCost(turn: Turn): number {
 
 /**
  * What the visitor heard of a reply that was cut off, or null when the reply was not cut off.
- * An empty string means none of it was heard.
+ * An empty string means none of it was heard. "One moment" is no reply.
  */
 export function heardOf(turn: Turn): string | null {
-  const last = turn.spoken.at(-1);
+  const last = turn.spoken.findLast((piece) => !piece.filler);
   return last?.interrupted && last.text_spoken != null ? last.text_spoken : null;
 }
 

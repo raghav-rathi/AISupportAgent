@@ -457,6 +457,18 @@ describe("what is fetched on request", () => {
     expect(tracesAreStale(s.state, s.turn)).toBe(true);
   });
 
+  it("asks again for passages once another customer is verified", () => {
+    const maya = { account_number: "10482917", company_name: "Larkspur", contact_name: "Maya", tier: "pro", status: "active" };
+    const s = new Stream().ready().send("t1", { type: "session.state", customer: maya, tickets: [] });
+    s.raw({ type: "passage.detail", seq: 0, ts: 0, turn_id: null, chunk_id: "a", source: "Refunds", tiers: ["pro"], content: "14 days." });
+    // A ticket changes the session's state and not who is verified.
+    s.send("t1", { type: "session.state", customer: maya, tickets: [] });
+    expect(s.state.passages.a).toMatchObject({ content: "14 days." });
+    // Which passages may be read is the server's decision for whoever is verified now.
+    s.send("t2", { type: "session.state", customer: { ...maya, account_number: "75148302", tier: "free" }, tickets: [] });
+    expect(s.state.passages.a).toBeUndefined();
+  });
+
   it("marks only the passage the server names as missing", () => {
     const s = new Stream().ready();
     s.state = reduce(s.state, { type: "looked", chunkId: "a" });
@@ -477,6 +489,7 @@ const spokenReply = (more: Record<string, unknown> = {}) => ({
   interrupted: false,
   played_ms: null,
   text_spoken: null,
+  filler: false,
   cost_usd: 0.0018,
   ...more,
 });
@@ -539,6 +552,18 @@ describe("voice", () => {
     s.send("t2", spokenTurn("And annual?")).send("t2", message("Thirty days. Anything else?")).send("t2", finished());
     s.send("t2", spokenReply({ interrupted: true, played_ms: 0, text_spoken: "" }));
     expect([s.turn.answer?.text, heardOf(s.turn)]).toEqual(["Thirty days. Anything else?", ""]);
+  });
+
+  it("counts one moment under its turn, and does not take it for the reply", () => {
+    const s = new Stream().ready().send("t1", spokenTurn()).send("t1", heardSpeech);
+    s.send("t1", spokenReply({ filler: true, chars: 11, cost_usd: 0.0005 }));
+    s.send("t1", message("Fourteen days.")).send("t1", finished());
+    s.send("t1", spokenReply({ interrupted: true, played_ms: 300, text_spoken: "Fourteen" }));
+    expect(s.turn.spoken.map((piece) => piece.filler)).toEqual([true, false]);
+    expect(heardOf(s.turn)).toBe("Fourteen");
+    // Said after the answer was cut, one moment is still not what the visitor heard of the reply.
+    s.send("t1", spokenReply({ filler: true, interrupted: true, played_ms: 100, text_spoken: "One" }));
+    expect(heardOf(s.turn)).toBe("Fourteen");
   });
 
   it("counts speech that belongs to no turn for the session, once", () => {

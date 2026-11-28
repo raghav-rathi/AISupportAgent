@@ -22,8 +22,14 @@ from langgraph.types import Command
 
 from supportagent import clock
 from supportagent.agent.context import AgentContext
-from supportagent.agent.state import AgentState, Customer, Escalation, Evidence
-from supportagent.agent.tickets import last_customer_text, open_ticket, question_only
+from supportagent.agent.state import (
+    NO_LONGER_VERIFIED,
+    AgentState,
+    Customer,
+    Escalation,
+    Evidence,
+)
+from supportagent.agent.tickets import open_question, open_ticket
 from supportagent.crm import policy, repo
 from supportagent.events import (
     Band,
@@ -46,11 +52,6 @@ Runtime = ToolRuntime[Any, Any]
 # one, the results are taken out of the conversation the model and the judge read.
 _ACCOUNT_TOOLS = frozenset(
     {"verify_identity", "get_account", "issue_refund", "update_account_field"}
-)
-_NO_LONGER_VERIFIED = json.dumps(
-    {
-        "omitted": "This result belongs to an account that is no longer verified in this conversation."
-    }
 )
 # How much a search result is worth to the turn. The search tool keeps the best of its wordings.
 _WORTH: dict[str, int] = {"answer": 3, "check": 2, "verify": 1, "restricted": 1, "escalate": 0}
@@ -141,21 +142,16 @@ def _forget_account(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
         if (
             not isinstance(message, ToolMessage)
             or message.name not in _ACCOUNT_TOOLS
-            or message.content == _NO_LONGER_VERIFIED
+            or message.content == NO_LONGER_VERIFIED
         ):
             continue
         artifact = dict(message.artifact or {})
         if message.name in ("verify_identity", "get_account"):
             artifact["summary"] = "Account reading, no longer available"  # it named the company
         forgotten.append(
-            message.model_copy(update={"content": _NO_LONGER_VERIFIED, "artifact": artifact})
+            message.model_copy(update={"content": NO_LONGER_VERIFIED, "artifact": artifact})
         )
     return forgotten
-
-
-def was_forgotten(message: AnyMessage) -> bool:
-    """True for an account result whose content `_forget_account` took out."""
-    return isinstance(message, ToolMessage) and message.content == _NO_LONGER_VERIFIED
 
 
 def _session_state(state: AgentState, customer: Customer | None, *new: Ticket) -> SessionState:
@@ -349,12 +345,9 @@ async def search_knowledge_base(query: str, runtime: Runtime) -> Command:
     tier = customer["tier"] if customer else None
     # Both wordings are masked before they go anywhere. A hosted embedder or reranker is a third
     # party, and the customer's message may still hold the PIN they typed next to the question.
-    # The customer's own words are searched without the sentences that only give credentials.
-    question = _searchable(
-        question_only(
-            ctx.redactor.text(last_customer_text(state.get("messages", [])), customer=True)
-        )
-    )
+    # The customer's own words are searched without the clauses that give credentials, and
+    # when the latest message gave nothing else, the question is the one before it.
+    question = _searchable(open_question(state.get("messages", []), ctx.redactor))
     query = _searchable(ctx.redactor.text(query, customer=True))
     # The model's wording first. If it does not find an answer, the customer's own words get
     # one try, and the better of the two results stands.
