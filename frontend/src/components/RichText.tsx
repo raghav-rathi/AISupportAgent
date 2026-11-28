@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 
 /**
- * Renders the assistant's text: paragraphs, bullet and numbered lists, **emphasis**, `code` and
- * citation marks such as [2], [1, 2] or [1-3]. The model writes a small subset of Markdown, and
- * this covers it. Everything goes through React as text, so nothing the model writes can become
- * markup.
+ * Renders the assistant's text: paragraphs, bullet and numbered lists, tables, **emphasis**, `code`
+ * and citation marks such as [2], [1, 2] or [1-3]. The model writes a small subset of Markdown,
+ * and this covers it. Everything goes through React as text, so nothing the model writes can
+ * become markup.
  */
 
 const CITATION = /\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/;
@@ -13,6 +13,8 @@ const ONLY_CITATION = new RegExp(`^${CITATION.source}$`);
 const BULLET = /^\s*[-*]\s+/;
 const NUMBERED = /^\s*\d+[.)]\s+/;
 const HEADING = /^\s*#{1,4}\s+/;
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_RULE = /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/; // the line of dashes under a table's head
 
 /** How citation marks behave: which numbers point at a passage, which is open, and what a click does. */
 export interface Cites {
@@ -81,11 +83,11 @@ function inline(text: string, keyPrefix: string, cites?: Cites): ReactNode[] {
 }
 
 interface Block {
-  kind: "text" | "bullets" | "numbers" | "heading";
+  kind: "text" | "bullets" | "numbers" | "heading" | "table";
   lines: string[];
 }
 
-/** Runs of list lines become lists, runs of other lines paragraphs, and a blank line ends a run. */
+/** Runs of list or table lines become lists and tables, runs of other lines paragraphs, and a blank line ends a run. */
 function blocks(text: string): Block[] {
   const found: Block[] = [];
   let open: Block | null = null;
@@ -94,7 +96,15 @@ function blocks(text: string): Block[] {
       open = null;
       continue;
     }
-    const kind = BULLET.test(line) ? "bullets" : NUMBERED.test(line) ? "numbers" : HEADING.test(line) ? "heading" : "text";
+    const kind = TABLE_ROW.test(line)
+      ? "table"
+      : BULLET.test(line)
+        ? "bullets"
+        : NUMBERED.test(line)
+          ? "numbers"
+          : HEADING.test(line)
+            ? "heading"
+            : "text";
     if (!open || open.kind !== kind || kind === "heading") {
       open = { kind, lines: [] };
       found.push(open);
@@ -102,6 +112,19 @@ function blocks(text: string): Block[] {
     open.lines.push(line.replace(kind === "bullets" ? BULLET : kind === "numbers" ? NUMBERED : kind === "heading" ? HEADING : /^$/, ""));
   }
   return found;
+}
+
+/** The cells of a table's rows, without the line of dashes. The first row is the head. */
+function tableRows(lines: string[]): string[][] {
+  return lines
+    .filter((line) => !TABLE_RULE.test(line))
+    .map((line) =>
+      line
+        .trim()
+        .slice(1, -1)
+        .split("|")
+        .map((cell) => cell.trim()),
+    );
 }
 
 export function RichText({ text, caret = false, cites }: { text: string; caret?: boolean; cites?: Cites }) {
@@ -124,6 +147,36 @@ export function RichText({ text, caret = false, cites }: { text: string; caret?:
                 </li>
               ))}
             </List>
+          );
+        }
+        if (block.kind === "table") {
+          const [head = [], ...rows] = tableRows(block.lines);
+          return (
+            <div key={b} className="overflow-x-auto">
+              <table className="w-full border-collapse text-left text-body-sm">
+                <thead>
+                  <tr>
+                    {head.map((cell, c) => (
+                      <th key={c} scope="col" className="border-b border-slate-border px-12 py-8 font-w480 first:pl-0">
+                        {inline(cell, `${b}-h-${c}`, cites)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, r) => (
+                    <tr key={r}>
+                      {row.map((cell, c) => (
+                        <td key={c} className="border-b border-slate-border/40 px-12 py-8 align-top first:pl-0">
+                          {inline(cell, `${b}-${r}-${c}`, cites)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {tail}
+            </div>
           );
         }
         return (
