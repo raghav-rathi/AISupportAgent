@@ -1,4 +1,4 @@
-"""Fifty scripted conversations and what must be true after each.
+"""Fifty-five scripted conversations and what must be true after each.
 
 A scenario gives the customer's messages. The agent, the tools, the database and the model are real.
 The checks read what happened: which tools ran, what the database holds, what the agent said.

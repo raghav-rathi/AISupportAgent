@@ -2,11 +2,11 @@
 
 A customer support agent for Fernhill, an invented B2B SaaS company. It answers from a help center, checks who it is talking to before it touches an account, and can refund an invoice, change a contact field or hand the case to a person. It streams every step to the client as a typed event.
 
-The project follows a brief that asks for streaming chat, live voice, multi-step tool chains, confidence guardrails and real-time observability. It is being built in four phases, and this README changes with every push.
+The project follows a brief that asks for streaming chat, live voice, multi-step tool chains, confidence guardrails and real-time observability. It was built in four phases. [ARCHITECTURE.md](ARCHITECTURE.md) says how it is put together and why.
 
 ## Status
 
-Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support.vercel.app**: the microphone button is next to Send. The chat UI and the backend run on hosted models, speech runs on Deepgram. After it was deployed the phase was audited twice: by its author with four independent reviews of the code, the measurements and what this file claimed, and by two outside teams who wrote scripts that reproduce what they found. The code that is here has the fixes for both. Four of them changed how voice works. The model starts on a spoken message before the recogniser has called it finished. Playback pauses on the microphone getting loud, before the recogniser has a word. A spoken answer that rests on a tool is said only after its grounding check, and the customer hears "one moment" while the tool runs. And whether the microphone is hearing the reply or the customer is decided on the words the player has reached, not on the whole reply. What was measured before and after is under [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet: that session is the project owner's.
+All four phases are done and deployed. Try it at **https://fernhill-support.vercel.app**. The chat UI and the backend run on hosted models, and speech runs on Deepgram. The last phase fixed the findings of an end-to-end review that a demo can run into, ran the public address end to end in a browser, typed and spoken, fixed what that run showed, ran every eval set again on the final code and wrote the architecture down. The voice phase before it was audited three times: by its author with four independent reviews, by two outside teams who wrote scripts that reproduce what they found, and by a reviewer who went over the voice paths once more. The code here has the fixes for all of them. What was measured is under [Results](#results) and [Voice, measured](#voice-measured). No person has talked to it on loudspeakers and headphones yet: that session is the project owner's.
 
 | What the brief asks for | State today |
 |---|---|
@@ -20,6 +20,20 @@ Phase 3 of 4, voice, is built and deployed. Try it at **https://fernhill-support
 | Fallback states for timeouts, rate limits and tool failures | Done. The UI shows a retry, a switch to the backup model, a failed turn with Try again, a stopped turn with Resume, and a dropped connection. A panel can inject each failure on demand. |
 | One memory across text and voice | Done. A session is stored under its ID. The browser keeps the ID, so a reload or a second tab continues the conversation. A spoken message and a typed one start the same kind of turn on the same session: an identity check done by voice holds for a typed question after it. |
 | Deployed | Yes. The frontend is on Vercel, the backend and Postgres with pgvector on Railway. CI runs the tests, the frontend build and a start of the image on every push. |
+
+## A five-minute tour
+
+Each step shows one thing the brief asks for.
+
+1. Click **Check the policy, then refund**. Four steps appear while they run: identity check, knowledge base, account, refund. The answer streams, cites its source, and a receipt shows the refund as the billing tool recorded it.
+2. Click the source under the answer to read the passage the model was given. Open **Observability**: the turn's timings, tokens and cost, a timeline of every model and tool call, the retrieval scores and the verdict of the grounding check. **Prompts** has every model call as it was sent, with the PIN masked.
+3. Start a new conversation and ask "How fast do you respond when we report a P1 outage?". Only a plan's passage answers that, so the agent asks you to verify and is told nothing else. Pick the Enterprise account under the message field and send it: the answer is "within 1 hour", with its source.
+4. Ask "Can I connect Fernhill to Microsoft Teams?". The help center has no answer, so the turn ends in a ticket for a person. Ask "What's the weather in Boston?". That is declined without a ticket.
+5. In the same conversation pick account 20573846, add "Please refund INV-30388" and send. At $1,440 the invoice is above what support may refund on Pro, so the tool refuses and opens a ticket for the billing team. The limit is a constant in the code, not a line in the prompt.
+6. In **Observability**, open **Failures**. Queue **Main model down** and ask anything: the turn says it switched to the backup model. Queue **Every model down**: the turn fails with **Try again**, which picks it up where it stopped.
+7. Reload the page. The conversation, its steps and the verified customer come back from the stored events.
+8. Click **Voice** and start the microphone. Ask for help with a refund, talk over the reply to interrupt it, then say an account number and PIN at your own pace. Type a question after that: it is answered for the customer you verified by voice.
+
 
 ## How a turn runs
 
@@ -49,13 +63,13 @@ LangGraph saves the conversation in Postgres after every step. The event log is 
 
 One process runs a session's turn at a time. It holds a lease in Postgres and renews it while the turn runs. A second instance, as during a deploy, cannot take the turn, and the turn of an instance that died is free again after 45 seconds.
 
-Chat and voice are two clients of this one pipeline. The turn runner takes a mode, text or voice, and the system prompt changes with it: a spoken reply is short, has no lists or citation numbers, and names an invoice by date and amount.
+Chat and voice are two clients of this one pipeline. The turn runner takes a mode, text or voice, and the system prompt changes with it: a spoken reply is short, has no lists or citation numbers, and names an invoice by date and amount. [ARCHITECTURE.md](ARCHITECTURE.md) follows one turn through every part, with the storage, the failure handling and the voice pipeline.
 
 ## The six tools
 
 | Tool | What it does | Rules the code enforces |
 |---|---|---|
-| `verify_identity` | Checks an account number and PIN | Three wrong PINs lock the conversation and open a ticket. The count never resets. |
+| `verify_identity` | Checks an account number and PIN | Three wrong PINs lock the conversation and open a ticket. The count never resets. A call without an account number or a PIN checks nothing and is no attempt: a model makes one now and then for a customer who is verified already. |
 | `get_account` | Reads plan, contract status, seats, renewal date and recent invoices | Needs a verified customer |
 | `search_knowledge_base` | Searches the help center, limited to passages the customer's plan may see | Returns a band that decides what happens to the answer. See the scope gate below. |
 | `issue_refund` | Refunds one invoice | 14 days for Pro monthly, 30 days otherwise, 90 days for a duplicate charge. Up to $500 on Pro and $2,000 on Enterprise. Anything above goes to the billing team as a ticket. The invoice has to be paid and not yet refunded. No refunds on Free, on a suspended account or on a past-due one. |
@@ -262,8 +276,8 @@ Five more accounts are in `backend/src/supportagent/crm/fixtures.py`. The page o
 The page is a fold over the event stream. `lib/state.ts` is one reducer that turns events into turns, steps and metrics, and every part of the page reads its result. Stored events replay through the same reducer, so a reload shows the conversation as it happened.
 
 - Step indicators. Each tool call is a row: a spinner and "Searching the knowledge base…" while it runs, then its result and duration. Retries, a switch to the backup model and the grounding check are rows too. A step the turn ended in stops spinning.
-- The answer streams as it is written and is marked as confirmed only after its check. Text the model wrote before a tool call is dropped, and a withdrawn answer is replaced by the hand-off with a note that says so.
-- Evidence. A citation or a source chip opens the passage the assistant was given. A refund shows a receipt taken from the tool's own record, not from the model's words. A hand-off shows the ticket with the case summary and a button to copy it.
+- The answer streams as it is written and is marked as confirmed only after its check. Text the model wrote before a tool call is dropped, and a withdrawn answer is replaced by the hand-off with a note that says so. Lists and tables in an answer are shown as lists and tables.
+- Evidence. A citation or a source chip opens the passage the assistant was given, laid out as the help center has it. A refund shows a receipt taken from the tool's own record, not from the model's words. A hand-off shows the ticket with the case summary and a button to copy it.
 - A reply in progress can be stopped and resumed. A failed turn offers Try again, which picks up after the last finished step.
 - The connection reconnects by rules that depend on why it closed, and asks for the events it missed. A message that did not arrive comes back into the field.
 - The observability drawer reads the same state: no second data path, so what it shows cannot disagree with the chat. Prompt traces are fetched when their tab is opened, which keeps a reload small.
@@ -273,7 +287,7 @@ The page sends a content security policy that names the backend as the only plac
 
 The look follows a design file the project owner supplied: a dark, flat, monochrome system with one action colour. Its typefaces are not licensed for this repo, so Inter stands in, as the design file suggests.
 
-Checked in a browser against the live backend, on the lab build and on the public address: the full chain of identity check, policy search, account read and refund with its receipt, opening a source, the drawer's metrics and its prompts on request, a hand-off with its ticket, a ticket added to an answer that left a question open, a failed grounding check and its retry, stop and resume, a reload, and a phone-sized screen. The reducer, the reconnect rules, the voice link, the Stop rules and the audio worklets have 125 tests. The case of a message lost on its way is covered by those tests and was not reproduced in a live browser.
+Checked in a browser against the live backend, on the lab build and on the public address: the full chain of identity check, policy search, account read and refund with its receipt, opening a source, the drawer's metrics and its prompts on request, a hand-off with its ticket, a ticket added to an answer that left a question open, a failed grounding check and its retry, stop and resume, a reload, and a phone-sized screen. The reducer, the reconnect rules, the voice link, the Stop rules and the audio worklets have 127 tests. The case of a message lost on its way is covered by those tests and was not reproduced in a live browser.
 
 ## Voice
 
@@ -321,7 +335,7 @@ The browser is asked to cancel the echo of everything it plays, and the page rea
 
 When the speech service fails, voice turns off and the conversation goes on in text. A recogniser connection that drops is opened again once. A voice connection that drops takes its reply with it, and so does one that takes the text and sends no audio for five seconds. The text of that reply is on the screen. A connection that the service closes once a reply's audio is complete cuts nothing. A second failure within half a minute ends voice with a message. A microphone that is unplugged ends voice with a message too. A voice session lasts at most ten minutes and ends after two minutes in which nobody speaks. What one visitor may use of it is under When things fail.
 
-A review of this code after both audits found more in the same paths. Fixed since: a number in digit mode was ended 0.6 s after its twelfth digit, also while the recogniser was still correcting one. A Stop that crossed a flush from the server on the way stopped the reply after it as well. A voice started right after another had ended could take that one's last flush for its own and then pass over its own first ones. Words heard of an answer whose turn failed could be written over a typed turn's answer, or over the same answer once a retry had confirmed it. A note about a reply that was over could cancel a typed turn that had just begun. Two windows that took the voice over at the same moment could both keep it. A voice whose inbox ran over never finished shutting down, and its line stayed taken. The figures under Voice, measured are from before these changes, and so is the code at the public address until it is deployed again.
+A review of this code after both audits found more in the same paths. Fixed since: a number in digit mode was ended 0.6 s after its twelfth digit, also while the recogniser was still correcting one. A Stop that crossed a flush from the server on the way stopped the reply after it as well. A voice started right after another had ended could take that one's last flush for its own and then pass over its own first ones. Words heard of an answer whose turn failed could be written over a typed turn's answer, or over the same answer once a retry had confirmed it. A note about a reply that was over could cancel a typed turn that had just begun. Two windows that took the voice over at the same moment could both keep it. A voice whose inbox ran over never finished shutting down, and its line stayed taken. These fixes are deployed. The figures under Voice, measured are from before them: the voice gate was not run again, and a spoken conversation in a browser was.
 
 ## Evals
 
@@ -339,26 +353,28 @@ uv run python -m supportagent.evals.bakeoff ../evals/candidates.hosted.json
 - `speech` measures Deepgram itself: `wer` reads 20 sentences of this domain to the recogniser with and without the key terms, `digits` reads 20 account numbers and PINs with pauses with the recogniser's digit settings and with its usual ones, `pins` puts everything the recogniser writes on the way through those clips through the redactor, in the state the app would have it in, `heard` transcribes a recording. `make` synthesises the clips. It needs `DEEPGRAM_API_KEY`.
 - `cli.voice_client` is the scripted caller described under Talk to it. The voice figures below are what its `--summary` prints for the calls of a run.
 
-### Results so far
+### Results
 
-Hosted models through OpenRouter. The bake-off, retrieval and gate rows are from 2026-11-26, before the hardening pass. The suite and judge rows are from after it.
+Hosted models through OpenRouter. The bake-off is from 2026-11-26. Every other row is from 2026-11-28, on the code that is deployed.
 
 | Check | Result |
 |---|---|
-| Tests | 598 backend and 125 frontend pass, locally and in CI |
+| Tests | 606 backend and 127 frontend pass, locally and in CI |
 | Bake-off, 55 conversations run 3 times | Gemma 4 31B passed 164 of 165 with a median tool chain of 2.0 s at $0.0005 a turn, and is the agent model. Gemini 3.6 Flash passed 156 and GPT-6 Luna 155. |
-| Scenario suite after the hardening pass, 55 conversations once | 54 passed, interval 90.4% to 99.7%. From the customer's message: first sign of work after 0.4 s, approved answer after 2.6 s at the median and 5.2 s at the 95th percentile. |
-| Grounding judge, Gemini 3.6 Flash, 52 replies run twice | 0 misses on 52 seeded errors, 0 false alarms on 52 correct replies. Of the replies that leave a question open, 8 of 8 were flagged. Of the others, 1 of 44, a "that is on another plan" reply, which code now exempts. |
-| Retrieval, Cohere rerank-5-pro | The right section is first for 69 of 76 answerable questions and in the top 5 for 74 |
-| Scope gate, 110 questions | 1 of 76 answerable questions escalated. 0 of 9 off-topic questions accepted. 2 of 22 near misses pass the threshold and are held for the grounding check. |
+| Scenario suite, 55 conversations once | 55 passed, interval 93.5% to 100%. From the customer's message: first sign of work after 0.4 s, approved answer after 2.4 s at the median and 5.3 s at the 95th percentile. |
+| Grounding judge, Gemini 3.6 Flash, 54 replies run twice | 0 misses on 54 seeded errors. 1 false alarm on 54 correct replies. Of the replies that leave a question open, 8 of 8 were flagged, and none of the 45 that settle it. |
+| Retrieval, Cohere rerank-5-pro | The right section is first for 69 of 74 answerable questions and in the top 5 for all 74. A search takes 0.27 s at the median, nearly all of it the hosted reranker. |
+| Scope gate, 110 questions | 1 of 74 answerable questions escalated. 0 of 9 off-topic questions accepted. 2 of 22 near misses pass the threshold and are held for the grounding check. 5 of 5 questions that belong to another plan sent to verify or told the plan. |
+| Three conversations at once on the deployed backend, six turns each | 18 of 18 turns finished, 2.1 s at the median, 6.0 s the slowest. Every stream arrived in order, and a second connection read each conversation back whole. |
+| The public address in a browser | The tour above, step by step, and the page at 390 px. Spoken, in Chrome with a recording as its microphone: the greeting, a spoken turn, a reply cut off by speech with what was heard of it, an account number and PIN with the PIN masked, a turn with a tool, and a typed question answered for the customer verified by voice. No error in the page's console. |
 
 Read these with care.
 
 - Qwen3.8-27B on Cerebras passed 15 of 15 screening conversations with the fastest tool chain, 1.6 s, in an earlier run. In the full bake-off Cerebras answered with rate limits at three conversations at once, so it was not compared. It may be the better model at a higher rate limit.
 - Claude Haiku 4.5 and GLM-5.2 passed 13 and 12 of 15 in screening and did not reach the full run.
 - The scenarios, the judge cases and the prompts have one author. The gate thresholds were tuned on the same 110 questions they are reported on, and two suite checks were loosened after a first bake-off run showed them failing correct answers.
-- The suite ran once on the final code. Its one failure was "What was your uptime last month?", answered by sending the customer to the status page, which is where the help center says the incident history is. The scenario wanted a ticket. It now accepts that reply, a change made after seeing it fail. The seven out-of-scope scenarios then passed 21 of 21 over three runs.
-- The judge is not perfectly steady. During this pass it called one correct reply unsupported in about one run in three, because the test case never said which plan the customer was on. The app always says, and the eval now does too.
+- The suite ran once on the final code. In the run before it, its one failure was "What was your uptime last month?", answered by sending the customer to the status page, which is where the help center says the incident history is. The scenario wanted a ticket. It now accepts that reply, a change made after seeing it fail.
+- The judge is not perfectly steady. During this pass it called one correct reply unsupported in about one run in three, because the test case never said which plan the customer was on. The app always says, and the eval now does too. In the last run it called "Two weeks from the date on the invoice" unsupported once in two, where the passage says 14 days.
 - Nine off-topic questions are few.
 
 ### Voice, measured
@@ -457,20 +473,23 @@ frontend/src/
   lib/voice.ts   microphone audio out, reply audio in, the playhead reported to the server
   lib/stop.ts    what Stop stops, and which key presses count as pressing it
   lib/audio.ts   the audio engine around the two worklets
-frontend/public/worklets/  capture at 16 kHz, playback with an exact playhead, pause and flush
   lib/reconnect.ts what to do after a close, by its code
   lib/protocol.ts generated from the backend's models
+frontend/public/worklets/  capture at 16 kHz, playback with an exact playhead, pause and flush
 scripts/         dev database and dev server
+ARCHITECTURE.md  how it is built and why, with diagrams
 Dockerfile       the backend image
 .github/workflows/ci.yml  backend tests, frontend checks and build, a start of the image
 ```
 
-## What comes next
+## Where it stands
 
-1. Phase 1 is done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
-2. Phase 2 is deployed. Two outside reviews after it led to a hardening pass, which is the commit history from `6e9a2b3` on. Deploys are started by hand. CI runs on every push.
-3. Phase 3, voice, is built, deployed and audited twice. Open from it: the project owner's own session on loudspeakers and on headphones.
-4. Phase 4: hardening and the write-up.
+1. Phase 1, the agent core: done. Open from it: a rerun of Qwen3.8-27B at a rate limit that allows it.
+2. Phase 2, the chat UI and the first deploy: done. Two outside reviews after it led to a hardening pass, which is the commit history from `6e9a2b3` on.
+3. Phase 3, voice: done, and audited three times. Open from it: the project owner's own session on loudspeakers and on headphones.
+4. Phase 4, hardening and the write-up: done. Fixed from an end-to-end review: a search that ran on the customer's credentials, two figures in the drawer that timed different sounds, a ticket with another customer's lines, and a message field that could stay disabled. Fixed from a run of the public address in a browser: a PIN attempt that the backup model wasted for a verified customer, a table shown as text and its last row lost to a sentence added after it, a source card that kept loading, and a wrong line for an identity check after a change of account. Left out by choice: an access code in front of the demo, an uptime check from outside, and another run of the voice gate.
+
+Deploys are started by hand. CI runs on every push.
 
 ## Known gaps
 
